@@ -1,5 +1,7 @@
 """Project KATANAの起動処理。"""
 
+from app.backtest.engine import BacktestEngine
+from app.backtest.service import CsvBacktestService
 from app.database import initialize_database
 from app.logger import create_logger
 from app.market.csv_reader import CsvStockReader
@@ -9,6 +11,7 @@ from app.market.repository import StockRepository
 from app.market.service import MarketDataService
 from app.market.summary import summarize_prices
 from app.settings import settings
+from app.strategy.buy_open_sell_close import BuyOpenSellCloseStrategy
 
 
 def main() -> None:
@@ -28,28 +31,30 @@ def main() -> None:
     initialize_database(settings.database_path)
     logger.info("データベースを初期化しました。")
 
-    service = MarketDataService(
+    market_service = MarketDataService(
         downloader=DummyDownloader(),
         sqlite_repository=StockRepository(settings.database_path),
         csv_repository=CsvStockRepository(settings.csv_dir),
     )
 
-    result = service.import_prices()
+    import_result = market_service.import_prices()
 
     logger.info(
         "市場データを取り込みました。downloaded=%d database_count=%d",
-        result.downloaded_count,
-        result.database_count,
+        import_result.downloaded_count,
+        import_result.database_count,
     )
 
-    if result.latest_csv_path is not None:
+    if import_result.latest_csv_path is not None:
+        csv_path = import_result.latest_csv_path
+
         logger.info(
             "CSVへ保存しました。path=%s",
-            result.latest_csv_path,
+            csv_path,
         )
 
         csv_reader = CsvStockReader()
-        saved_prices = csv_reader.read(result.latest_csv_path)
+        saved_prices = csv_reader.read(csv_path)
         summary = summarize_prices(saved_prices)
 
         logger.info(
@@ -60,6 +65,30 @@ def main() -> None:
             summary.total_volume,
             summary.highest_price,
             summary.lowest_price,
+        )
+
+        backtest_service = CsvBacktestService(
+            csv_reader=csv_reader,
+            strategy=BuyOpenSellCloseStrategy(quantity=100),
+            engine=BacktestEngine(),
+        )
+
+        backtest_result = backtest_service.run(csv_path)
+
+        logger.info(
+            "バックテスト結果: trades=%d wins=%d losses=%d "
+            "breakeven=%d win_rate=%.2f%%",
+            backtest_result.trade_count,
+            backtest_result.win_count,
+            backtest_result.loss_count,
+            backtest_result.breakeven_count,
+            backtest_result.win_rate,
+        )
+
+        logger.info(
+            "バックテスト損益: total_profit=%.2f average_profit=%.2f",
+            backtest_result.total_profit,
+            backtest_result.average_profit,
         )
 
     logger.info("Startup completed.")
