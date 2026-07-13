@@ -8,18 +8,34 @@ from app.market.models import StockPrice
 
 
 class BuyOpenSellCloseStrategy:
-    """各銘柄を最初の足の始値で買い、最後の足の終値で売る。"""
+    """最初の足の始値で買い、最後の足の終値で売る。"""
 
-    def __init__(self, quantity: int = 100) -> None:
-        """取引数量を設定する。"""
+    def __init__(
+        self,
+        quantity: int = 100,
+        commission: float = 0.0,
+        slippage_rate: float = 0.0,
+    ) -> None:
+        """数量・手数料・スリッページ率を設定する。"""
 
         if quantity <= 0:
             raise ValueError("数量は0より大きい必要があります。")
 
-        self.quantity = quantity
+        if commission < 0:
+            raise ValueError("手数料は0以上である必要があります。")
 
-    def generate_trades(self, prices: list[StockPrice]) -> list[Trade]:
-        """株価データを銘柄・日付ごとにまとめ、取引を生成する。"""
+        if slippage_rate < 0:
+            raise ValueError("スリッページ率は0以上である必要があります。")
+
+        self.quantity = quantity
+        self.commission = commission
+        self.slippage_rate = slippage_rate
+
+    def generate_trades(
+        self,
+        prices: list[StockPrice],
+    ) -> list[Trade]:
+        """株価を銘柄・日付ごとにまとめ、取引を生成する。"""
 
         grouped_prices: dict[
             tuple[str, date],
@@ -27,7 +43,10 @@ class BuyOpenSellCloseStrategy:
         ] = defaultdict(list)
 
         for price in prices:
-            key = (price.code, price.datetime.date())
+            key = (
+                price.code,
+                price.datetime.date(),
+            )
             grouped_prices[key].append(price)
 
         trades: list[Trade] = []
@@ -47,7 +66,12 @@ class BuyOpenSellCloseStrategy:
                     buy_price=first_price.open,
                     sell_price=last_price.close,
                     quantity=self.quantity,
+                    commission=self.commission,
+                    slippage_rate=self.slippage_rate,
                 )
             )
 
-        return sorted(trades, key=lambda trade: trade.code)
+        return sorted(
+            trades,
+            key=lambda trade: trade.code,
+        )

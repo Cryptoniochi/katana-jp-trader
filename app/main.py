@@ -13,7 +13,9 @@ from app.market.repository import StockRepository
 from app.market.service import MarketDataService
 from app.market.summary import summarize_prices
 from app.settings import settings
-from app.strategy.buy_open_sell_close import BuyOpenSellCloseStrategy
+from app.strategy.buy_open_sell_close import (
+    BuyOpenSellCloseStrategy,
+)
 
 
 def main() -> None:
@@ -50,7 +52,10 @@ def main() -> None:
     if import_result.latest_csv_path is not None:
         csv_path = import_result.latest_csv_path
 
-        logger.info("CSVへ保存しました。path=%s", csv_path)
+        logger.info(
+            "CSVへ保存しました。path=%s",
+            csv_path,
+        )
 
         csv_reader = CsvStockReader()
         saved_prices = csv_reader.read(csv_path)
@@ -66,9 +71,15 @@ def main() -> None:
             summary.lowest_price,
         )
 
+        strategy = BuyOpenSellCloseStrategy(
+            quantity=100,
+            commission=0.0,
+            slippage_rate=0.0005,
+        )
+
         backtest_service = CsvBacktestService(
             csv_reader=csv_reader,
-            strategy=BuyOpenSellCloseStrategy(quantity=100),
+            strategy=strategy,
             engine=BacktestEngine(),
         )
 
@@ -79,8 +90,15 @@ def main() -> None:
         )
 
         logger.info(
-            "バックテスト結果: trades=%d wins=%d losses=%d "
-            "breakeven=%d win_rate=%.2f%%",
+            "バックテスト条件: quantity=%d commission=%.2f slippage_rate=%.4f",
+            strategy.quantity,
+            strategy.commission,
+            strategy.slippage_rate,
+        )
+
+        logger.info(
+            "バックテスト結果: trades=%d wins=%d "
+            "losses=%d breakeven=%d win_rate=%.2f%%",
             result.trade_count,
             result.win_count,
             result.loss_count,
@@ -89,8 +107,9 @@ def main() -> None:
         )
 
         logger.info(
-            "バックテスト損益: total=%.2f gross_profit=%.2f "
-            "gross_loss=%.2f average=%.2f",
+            "バックテスト損益: total=%.2f "
+            "gross_profit=%.2f gross_loss=%.2f "
+            "average=%.2f",
             result.total_profit,
             result.gross_profit,
             result.gross_loss,
