@@ -1,5 +1,7 @@
 """Project KATANAの起動処理。"""
 
+from math import isinf
+
 from app.backtest.engine import BacktestEngine
 from app.backtest.service import CsvBacktestService
 from app.database import initialize_database
@@ -48,10 +50,7 @@ def main() -> None:
     if import_result.latest_csv_path is not None:
         csv_path = import_result.latest_csv_path
 
-        logger.info(
-            "CSVへ保存しました。path=%s",
-            csv_path,
-        )
+        logger.info("CSVへ保存しました。path=%s", csv_path)
 
         csv_reader = CsvStockReader()
         saved_prices = csv_reader.read(csv_path)
@@ -73,22 +72,36 @@ def main() -> None:
             engine=BacktestEngine(),
         )
 
-        backtest_result = backtest_service.run(csv_path)
+        result = backtest_service.run(csv_path)
+
+        profit_factor_text = (
+            "INF" if isinf(result.profit_factor) else f"{result.profit_factor:.2f}"
+        )
 
         logger.info(
             "バックテスト結果: trades=%d wins=%d losses=%d "
             "breakeven=%d win_rate=%.2f%%",
-            backtest_result.trade_count,
-            backtest_result.win_count,
-            backtest_result.loss_count,
-            backtest_result.breakeven_count,
-            backtest_result.win_rate,
+            result.trade_count,
+            result.win_count,
+            result.loss_count,
+            result.breakeven_count,
+            result.win_rate,
         )
 
         logger.info(
-            "バックテスト損益: total_profit=%.2f average_profit=%.2f",
-            backtest_result.total_profit,
-            backtest_result.average_profit,
+            "バックテスト損益: total=%.2f gross_profit=%.2f "
+            "gross_loss=%.2f average=%.2f",
+            result.total_profit,
+            result.gross_profit,
+            result.gross_loss,
+            result.average_profit,
+        )
+
+        logger.info(
+            "バックテスト指標: PF=%s expectancy=%.2f max_drawdown=%.2f",
+            profit_factor_text,
+            result.expectancy,
+            result.max_drawdown,
         )
 
     logger.info("Startup completed.")
