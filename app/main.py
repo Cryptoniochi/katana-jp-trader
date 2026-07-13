@@ -2,6 +2,7 @@
 
 from app.database import initialize_database
 from app.logger import create_logger
+from app.market.csv_repository import CsvStockRepository
 from app.market.downloader import DummyDownloader
 from app.market.repository import StockRepository
 from app.settings import settings
@@ -25,23 +26,31 @@ def main() -> None:
     logger.info("データベースを初期化しました。")
 
     downloader = DummyDownloader()
-    repository = StockRepository(settings.database_path)
+
+    sqlite_repository = StockRepository(settings.database_path)
+    csv_repository = CsvStockRepository(settings.csv_dir)
 
     prices = downloader.download()
 
     for price in prices:
-        repository.save(price)
+        sqlite_repository.save(price)
+        csv_path = csv_repository.save(price)
+
         logger.info(
             "株価を保存しました。code=%s close=%.2f volume=%d",
             price.code,
             price.close,
             price.volume,
         )
+        logger.info(
+            "CSVへ保存しました。path=%s",
+            csv_path,
+        )
 
     logger.info("Downloaded %d records.", len(prices))
     logger.info(
         "データベース内の株価件数: %d",
-        repository.count(),
+        sqlite_repository.count(),
     )
     logger.info("Startup completed.")
 
