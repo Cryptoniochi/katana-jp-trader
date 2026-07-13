@@ -6,7 +6,6 @@ from app.market.models import StockPrice
 
 
 class DummyDownloader:
-
     def download(self) -> list[StockPrice]:
 
         return [

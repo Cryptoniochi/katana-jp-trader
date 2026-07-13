@@ -54,9 +54,7 @@ class StockRepository:
         """保存されている株価データの件数を返す。"""
 
         with sqlite3.connect(self.database_path) as connection:
-            result = connection.execute(
-                "SELECT COUNT(*) FROM stock_prices"
-            ).fetchone()
+            result = connection.execute("SELECT COUNT(*) FROM stock_prices").fetchone()
 
         if result is None:
             return 0

@@ -14,9 +14,7 @@ class CsvStockReader:
         """CSVファイルを読み込み、株価データの一覧を返す。"""
 
         if not file_path.exists():
-            raise FileNotFoundError(
-                f"CSVファイルが見つかりません: {file_path}"
-            )
+            raise FileNotFoundError(f"CSVファイルが見つかりません: {file_path}")
 
         prices: list[StockPrice] = []
 

@@ -16,9 +16,7 @@ def create_logger(logs_dir: Path) -> logging.Logger:
     if logger.handlers:
         return logger
 
-    formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(message)s"
-    )
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
 
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
