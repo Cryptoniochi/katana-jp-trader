@@ -6,6 +6,7 @@ from app.market.csv_reader import CsvStockReader
 from app.market.csv_repository import CsvStockRepository
 from app.market.downloader import DummyDownloader
 from app.market.repository import StockRepository
+from app.market.service import MarketDataService
 from app.market.summary import summarize_prices
 from app.settings import settings
 
@@ -27,38 +28,28 @@ def main() -> None:
     initialize_database(settings.database_path)
     logger.info("データベースを初期化しました。")
 
-    downloader = DummyDownloader()
-    sqlite_repository = StockRepository(settings.database_path)
-    csv_repository = CsvStockRepository(settings.csv_dir)
-
-    prices = downloader.download()
-
-    latest_csv_path = None
-
-    for price in prices:
-        sqlite_repository.save(price)
-        latest_csv_path = csv_repository.save(price)
-
-        logger.info(
-            "株価を保存しました。code=%s close=%.2f volume=%d",
-            price.code,
-            price.close,
-            price.volume,
-        )
-        logger.info(
-            "CSVへ保存しました。path=%s",
-            latest_csv_path,
-        )
-
-    logger.info("Downloaded %d records.", len(prices))
-    logger.info(
-        "データベース内の株価件数: %d",
-        sqlite_repository.count(),
+    service = MarketDataService(
+        downloader=DummyDownloader(),
+        sqlite_repository=StockRepository(settings.database_path),
+        csv_repository=CsvStockRepository(settings.csv_dir),
     )
 
-    if latest_csv_path is not None:
+    result = service.import_prices()
+
+    logger.info(
+        "市場データを取り込みました。downloaded=%d database_count=%d",
+        result.downloaded_count,
+        result.database_count,
+    )
+
+    if result.latest_csv_path is not None:
+        logger.info(
+            "CSVへ保存しました。path=%s",
+            result.latest_csv_path,
+        )
+
         csv_reader = CsvStockReader()
-        saved_prices = csv_reader.read(latest_csv_path)
+        saved_prices = csv_reader.read(result.latest_csv_path)
         summary = summarize_prices(saved_prices)
 
         logger.info(
