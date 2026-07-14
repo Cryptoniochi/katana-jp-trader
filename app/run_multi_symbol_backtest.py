@@ -45,6 +45,9 @@ def main() -> None:
         force_exit_time=time(14, 50),
         commission=0.0,
         slippage_rate=0.0005,
+        min_opening_range_volume=200_000,
+        min_breakout_volume=150_000,
+        breakout_volume_ratio=1.2,
     )
 
     service = MultiSymbolOrbBacktestService(
@@ -82,6 +85,13 @@ def main() -> None:
     )
 
     total = report.total_result
+
+    logger.info(
+        "ORB出来高条件: opening_volume=%d breakout_volume=%d breakout_ratio=%.2f",
+        strategy.min_opening_range_volume or 0,
+        strategy.min_breakout_volume or 0,
+        strategy.breakout_volume_ratio or 0,
+    )
 
     logger.info(
         "検証銘柄数: total=%d traded=%d",
@@ -141,8 +151,8 @@ def main() -> None:
 
     if report.total_result.trade_count == 0:
         logger.warning(
-            "全銘柄で取引が0件です。"
-            "ORB条件を満たす5分足データがあるか確認してください。"
+            "全銘柄で取引が0件です。価格条件または"
+            "出来高条件を満たす5分足があるか確認してください。"
         )
 
 
