@@ -11,7 +11,7 @@ class Settings:
     """アプリケーション全体の設定。"""
 
     app_name: str = "Project KATANA"
-    version: str = "0.17.0"
+    version: str = "0.18.0"
 
     data_dir: Path = ROOT_DIR / "data"
     logs_dir: Path = ROOT_DIR / "logs"
@@ -25,11 +25,22 @@ class Settings:
     def create_directories(self) -> None:
         """必要なフォルダを作成する。"""
 
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
-        self.reports_dir.mkdir(parents=True, exist_ok=True)
-
-        self.csv_dir.mkdir(parents=True, exist_ok=True)
+        self.data_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        self.logs_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        self.reports_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        self.csv_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
         self.historical_csv_dir.mkdir(
             parents=True,
             exist_ok=True,
