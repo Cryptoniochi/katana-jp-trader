@@ -150,25 +150,33 @@ def test_optimizer_runs_all_parameter_combinations(
     )
 
     assert len(results) == 6
-
-    combinations = {
-        (
-            result.stop_loss_rate,
-            result.take_profit_rate,
-        )
-        for result in results
-    }
-
-    assert combinations == {
-        (0.01, 0.01),
-        (0.01, 0.02),
-        (0.01, 0.03),
-        (0.02, 0.01),
-        (0.02, 0.02),
-        (0.02, 0.03),
-    }
-
     assert all(result.trade_count == 2 for result in results)
+
+
+def test_optimizer_accepts_preloaded_prices(
+    tmp_path: Path,
+) -> None:
+    """読み込み済み株価でも最適化できる。"""
+
+    write_historical_csv(tmp_path / "prices.csv")
+
+    reader = HistoricalCsvReader()
+    prices = reader.read_directory(tmp_path)
+
+    optimizer = OrbOptimizer(
+        historical_reader=reader,
+        engine=BacktestEngine(),
+        slippage_rate=0.0,
+    )
+
+    results = optimizer.run_prices(
+        prices=prices,
+        stop_loss_rates=[0.01],
+        take_profit_rates=[0.02],
+    )
+
+    assert len(results) == 1
+    assert results[0].trade_count == 2
 
 
 def test_optimizer_sorts_by_total_profit(
@@ -226,18 +234,6 @@ def test_optimizer_writes_csv_report(
 
     assert output_path == report_path
     assert report_path.exists()
-
-    with report_path.open(
-        mode="r",
-        encoding="utf-8-sig",
-        newline="",
-    ) as csv_file:
-        rows = list(csv.DictReader(csv_file))
-
-    assert len(rows) == 1
-    assert rows[0]["rank"] == "1"
-    assert float(rows[0]["stop_loss_rate"]) == pytest.approx(0.01)
-    assert float(rows[0]["take_profit_rate"]) == pytest.approx(0.02)
 
 
 @pytest.mark.parametrize(

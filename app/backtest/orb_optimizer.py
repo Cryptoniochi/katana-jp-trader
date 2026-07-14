@@ -7,6 +7,7 @@ from pathlib import Path
 
 from app.backtest.engine import BacktestEngine
 from app.market.historical_csv_reader import HistoricalCsvReader
+from app.market.models import StockPrice
 from app.strategy.opening_range_breakout import (
     OpeningRangeBreakoutStrategy,
 )
@@ -67,17 +68,34 @@ class OrbOptimizer:
         take_profit_rates: list[float],
         code: str | None = None,
     ) -> list[OrbOptimizationResult]:
-        """全パラメータの組み合わせを検証する。"""
+        """履歴CSVを読み込み、全組み合わせを検証する。"""
+
+        prices = self.historical_reader.read_directory(
+            directory,
+            code=code,
+        )
+
+        return self.run_prices(
+            prices=prices,
+            stop_loss_rates=stop_loss_rates,
+            take_profit_rates=take_profit_rates,
+        )
+
+    def run_prices(
+        self,
+        prices: list[StockPrice],
+        stop_loss_rates: list[float],
+        take_profit_rates: list[float],
+    ) -> list[OrbOptimizationResult]:
+        """読み込み済み株価で全パラメータを検証する。"""
 
         self._validate_rates(
             stop_loss_rates=stop_loss_rates,
             take_profit_rates=take_profit_rates,
         )
 
-        prices = self.historical_reader.read_directory(
-            directory,
-            code=code,
-        )
+        if not prices:
+            raise ValueError("最適化対象の株価データがありません。")
 
         results: list[OrbOptimizationResult] = []
 

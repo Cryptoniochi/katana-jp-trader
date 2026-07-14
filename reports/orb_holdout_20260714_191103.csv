@@ -1,0 +1,2 @@
+﻿training_start,training_end,validation_start,validation_end,training_day_count,validation_day_count,stop_loss_rate,take_profit_rate,training_trade_count,training_total_profit,training_profit_factor,training_expectancy,training_max_drawdown,validation_trade_count,validation_win_rate,validation_total_profit,validation_profit_factor,validation_expectancy,validation_max_drawdown
+2026-07-13,2026-07-13,2026-07-14,2026-07-14,1,1,0.005,0.01,0,0,0.0,0.0,0.0,0,0.0,0,0.0,0.0,0.0
