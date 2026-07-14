@@ -22,8 +22,12 @@ class OpeningRangeBreakoutStrategy:
         min_opening_range_volume: int | None = None,
         min_breakout_volume: int | None = None,
         breakout_volume_ratio: float | None = None,
+        min_price: float | None = None,
+        max_price: float | None = None,
+        min_opening_range_turnover: float | None = None,
+        min_breakout_turnover: float | None = None,
     ) -> None:
-        """戦略条件・取引コスト・出来高条件を設定する。"""
+        """戦略条件・取引コスト・流動性条件を設定する。"""
 
         if quantity <= 0:
             raise ValueError("数量は0より大きい必要があります。")
@@ -49,6 +53,21 @@ class OpeningRangeBreakoutStrategy:
         if breakout_volume_ratio is not None and breakout_volume_ratio <= 0:
             raise ValueError("出来高倍率は0より大きい必要があります。")
 
+        if min_price is not None and min_price <= 0:
+            raise ValueError("最低株価は0より大きい必要があります。")
+
+        if max_price is not None and max_price <= 0:
+            raise ValueError("最高株価は0より大きい必要があります。")
+
+        if min_price is not None and max_price is not None and min_price > max_price:
+            raise ValueError("最低株価は最高株価以下にしてください。")
+
+        if min_opening_range_turnover is not None and min_opening_range_turnover < 0:
+            raise ValueError("オープニングレンジ売買代金は0以上である必要があります。")
+
+        if min_breakout_turnover is not None and min_breakout_turnover < 0:
+            raise ValueError("ブレイク足売買代金は0以上である必要があります。")
+
         if force_exit_time <= opening_range_end:
             raise ValueError("強制決済時刻はオープニングレンジ終了後にしてください。")
 
@@ -59,9 +78,15 @@ class OpeningRangeBreakoutStrategy:
         self.force_exit_time = force_exit_time
         self.commission = commission
         self.slippage_rate = slippage_rate
+
         self.min_opening_range_volume = min_opening_range_volume
         self.min_breakout_volume = min_breakout_volume
         self.breakout_volume_ratio = breakout_volume_ratio
+
+        self.min_price = min_price
+        self.max_price = max_price
+        self.min_opening_range_turnover = min_opening_range_turnover
+        self.min_breakout_turnover = min_breakout_turnover
 
     def generate_trades(
         self,
@@ -118,7 +143,7 @@ class OpeningRangeBreakoutStrategy:
         if not opening_prices:
             return None
 
-        if not self._passes_opening_volume_filter(opening_prices):
+        if not self._passes_opening_filters(opening_prices):
             return None
 
         opening_range_high = max(price.high for price in opening_prices)
@@ -140,7 +165,7 @@ class OpeningRangeBreakoutStrategy:
             if price.high <= opening_range_high:
                 continue
 
-            if not self._passes_breakout_volume_filter(
+            if not self._passes_breakout_filters(
                 price=price,
                 average_opening_volume=average_opening_volume,
             ):
@@ -154,6 +179,9 @@ class OpeningRangeBreakoutStrategy:
 
         entry_bar = sorted_prices[breakout_index]
         entry_price = entry_bar.close
+
+        if not self._passes_price_filter(entry_price):
+            return None
 
         exit_candidates = [
             price
@@ -182,25 +210,36 @@ class OpeningRangeBreakoutStrategy:
             exit_reason=exit_reason,
         )
 
-    def _passes_opening_volume_filter(
+    def _passes_opening_filters(
         self,
         opening_prices: list[StockPrice],
     ) -> bool:
-        """オープニングレンジ累計出来高の条件を判定する。"""
-
-        if self.min_opening_range_volume is None:
-            return True
+        """寄り付きの出来高と売買代金を判定する。"""
 
         opening_volume = sum(price.volume for price in opening_prices)
 
-        return opening_volume >= self.min_opening_range_volume
+        if (
+            self.min_opening_range_volume is not None
+            and opening_volume < self.min_opening_range_volume
+        ):
+            return False
 
-    def _passes_breakout_volume_filter(
+        opening_turnover = sum(price.close * price.volume for price in opening_prices)
+
+        if (
+            self.min_opening_range_turnover is not None
+            and opening_turnover < self.min_opening_range_turnover
+        ):
+            return False
+
+        return True
+
+    def _passes_breakout_filters(
         self,
         price: StockPrice,
         average_opening_volume: float,
     ) -> bool:
-        """ブレイク足の出来高と出来高倍率を判定する。"""
+        """ブレイク足の出来高・倍率・売買代金を判定する。"""
 
         if (
             self.min_breakout_volume is not None
@@ -208,15 +247,38 @@ class OpeningRangeBreakoutStrategy:
         ):
             return False
 
-        if self.breakout_volume_ratio is None:
-            return True
+        if self.breakout_volume_ratio is not None:
+            if average_opening_volume <= 0:
+                return False
 
-        if average_opening_volume <= 0:
+            actual_ratio = price.volume / average_opening_volume
+
+            if actual_ratio < self.breakout_volume_ratio:
+                return False
+
+        breakout_turnover = price.close * price.volume
+
+        if (
+            self.min_breakout_turnover is not None
+            and breakout_turnover < self.min_breakout_turnover
+        ):
             return False
 
-        actual_ratio = price.volume / average_opening_volume
+        return True
 
-        return actual_ratio >= self.breakout_volume_ratio
+    def _passes_price_filter(
+        self,
+        entry_price: float,
+    ) -> bool:
+        """エントリー価格が指定株価帯に入るか判定する。"""
+
+        if self.min_price is not None and entry_price < self.min_price:
+            return False
+
+        if self.max_price is not None and entry_price > self.max_price:
+            return False
+
+        return True
 
     def _determine_exit(
         self,
@@ -242,7 +304,7 @@ class OpeningRangeBreakoutStrategy:
             stop_hit = stop_price is not None and price.low <= stop_price
             target_hit = target_price is not None and price.high >= target_price
 
-            # 5分足内の値動きの順序が分からない場合は、
+            # 5分足内の値動きの順序が不明な場合は、
             # 利益を過大評価しないよう損切りを優先する。
             if stop_hit:
                 return (

@@ -48,6 +48,10 @@ def main() -> None:
         min_opening_range_volume=200_000,
         min_breakout_volume=150_000,
         breakout_volume_ratio=1.2,
+        min_price=500.0,
+        max_price=20_000.0,
+        min_opening_range_turnover=200_000_000.0,
+        min_breakout_turnover=100_000_000.0,
     )
 
     service = MultiSymbolOrbBacktestService(
@@ -91,6 +95,18 @@ def main() -> None:
         strategy.min_opening_range_volume or 0,
         strategy.min_breakout_volume or 0,
         strategy.breakout_volume_ratio or 0,
+    )
+
+    logger.info(
+        "ORB株価帯: min_price=%.2f max_price=%.2f",
+        strategy.min_price or 0,
+        strategy.max_price or 0,
+    )
+
+    logger.info(
+        "ORB売買代金条件: opening_turnover=%.0f breakout_turnover=%.0f",
+        strategy.min_opening_range_turnover or 0,
+        strategy.min_breakout_turnover or 0,
     )
 
     logger.info(
@@ -151,8 +167,8 @@ def main() -> None:
 
     if report.total_result.trade_count == 0:
         logger.warning(
-            "全銘柄で取引が0件です。価格条件または"
-            "出来高条件を満たす5分足があるか確認してください。"
+            "全銘柄で取引が0件です。価格・出来高・"
+            "売買代金条件を満たす5分足があるか確認してください。"
         )
 
 
