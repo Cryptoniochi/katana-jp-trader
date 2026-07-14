@@ -2,6 +2,17 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
+
+
+class ExitReason(StrEnum):
+    """取引を終了した理由。"""
+
+    UNSPECIFIED = "unspecified"
+    TAKE_PROFIT = "take_profit"
+    STOP_LOSS = "stop_loss"
+    TIME_EXIT = "time_exit"
+    END_OF_DAY = "end_of_day"
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +29,7 @@ class Trade:
 
     entry_at: datetime | None = None
     exit_at: datetime | None = None
+    exit_reason: ExitReason = ExitReason.UNSPECIFIED
 
     def __post_init__(self) -> None:
         """不正な取引データを拒否する。"""

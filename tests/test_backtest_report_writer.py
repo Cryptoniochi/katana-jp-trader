@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from app.backtest.report_writer import BacktestReportWriter
-from app.backtest.trade import Trade
+from app.backtest.trade import ExitReason, Trade
 
 
 def test_writer_outputs_trade_details(
@@ -23,7 +23,8 @@ def test_writer_outputs_trade_details(
         commission=100.0,
         slippage_rate=0.0005,
         entry_at=datetime(2026, 7, 13, 9, 25),
-        exit_at=datetime(2026, 7, 13, 15, 30),
+        exit_at=datetime(2026, 7, 13, 14, 50),
+        exit_reason=ExitReason.TIME_EXIT,
     )
 
     file_path = tmp_path / "report.csv"
@@ -46,5 +47,6 @@ def test_writer_outputs_trade_details(
     assert len(rows) == 1
     assert rows[0]["code"] == "7203"
     assert rows[0]["entry_at"] == "2026-07-13T09:25:00"
-    assert rows[0]["exit_at"] == "2026-07-13T15:30:00"
+    assert rows[0]["exit_at"] == "2026-07-13T14:50:00"
+    assert rows[0]["exit_reason"] == "time_exit"
     assert float(rows[0]["net_profit"]) == pytest.approx(trade.profit)

@@ -33,6 +33,7 @@ class BacktestReportWriter:
                     "code",
                     "entry_at",
                     "exit_at",
+                    "exit_reason",
                     "buy_price",
                     "sell_price",
                     "quantity",
@@ -59,6 +60,7 @@ class BacktestReportWriter:
                             if trade.exit_at is not None
                             else ""
                         ),
+                        trade.exit_reason.value,
                         trade.buy_price,
                         trade.sell_price,
                         trade.quantity,

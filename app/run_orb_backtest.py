@@ -1,6 +1,6 @@
 """履歴CSVを使ってORBバックテストを実行する。"""
 
-from datetime import datetime
+from datetime import datetime, time
 from math import isinf
 
 from app.backtest.engine import BacktestEngine
@@ -27,13 +27,19 @@ def main() -> None:
     settings.create_directories()
     logger = create_logger(settings.logs_dir)
 
+    strategy = OpeningRangeBreakoutStrategy(
+        quantity=100,
+        opening_range_end=time(9, 15),
+        stop_loss_rate=0.01,
+        take_profit_rate=0.02,
+        force_exit_time=time(14, 50),
+        commission=0.0,
+        slippage_rate=0.0005,
+    )
+
     service = HistoricalOrbBacktestService(
         historical_reader=HistoricalCsvReader(),
-        strategy=OpeningRangeBreakoutStrategy(
-            quantity=100,
-            commission=0.0,
-            slippage_rate=0.0005,
-        ),
+        strategy=strategy,
         engine=BacktestEngine(),
     )
 
@@ -58,6 +64,15 @@ def main() -> None:
     BacktestReportWriter().write_trades(
         report.trades,
         report_path,
+    )
+
+    logger.info(
+        "ORB条件: opening_range_end=%s stop_loss=%.2f%% "
+        "take_profit=%.2f%% force_exit=%s",
+        strategy.opening_range_end.strftime("%H:%M"),
+        (strategy.stop_loss_rate or 0) * 100,
+        (strategy.take_profit_rate or 0) * 100,
+        strategy.force_exit_time.strftime("%H:%M"),
     )
 
     logger.info(

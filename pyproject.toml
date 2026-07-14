@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "project-katana"
-version = "0.13.0"
+version = "0.15.0"
 description = "Japanese equity research and trading platform"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -32,6 +32,7 @@ exclude = [
     ".venv",
     "data",
     "logs",
+    "reports",
 ]
 
 [tool.ruff.lint]
