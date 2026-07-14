@@ -1,11 +1,12 @@
 """1回の売買を表すデータモデル。"""
 
 from dataclasses import dataclass
+from datetime import datetime
 
 
 @dataclass(frozen=True, slots=True)
 class Trade:
-    """買値・売値・数量・取引コストを持つ1回の取引。"""
+    """価格・数量・時刻・取引コストを持つ1回の取引。"""
 
     code: str
     buy_price: float
@@ -14,6 +15,9 @@ class Trade:
 
     commission: float = 0.0
     slippage_rate: float = 0.0
+
+    entry_at: datetime | None = None
+    exit_at: datetime | None = None
 
     def __post_init__(self) -> None:
         """不正な取引データを拒否する。"""
@@ -36,6 +40,13 @@ class Trade:
         if self.slippage_rate < 0:
             raise ValueError("スリッページ率は0以上である必要があります。")
 
+        if (
+            self.entry_at is not None
+            and self.exit_at is not None
+            and self.exit_at < self.entry_at
+        ):
+            raise ValueError("決済時刻がエントリー時刻より前です。")
+
     @property
     def invested_amount(self) -> float:
         """買付金額を返す。"""
@@ -44,7 +55,7 @@ class Trade:
 
     @property
     def gross_profit(self) -> float:
-        """取引コスト控除前の売買損益を返す。"""
+        """コスト控除前の売買損益を返す。"""
 
         return (self.sell_price - self.buy_price) * self.quantity
 
@@ -52,11 +63,10 @@ class Trade:
     def slippage_cost(self) -> float:
         """買い・売りの往復スリッページ費用を返す。"""
 
-        buy_slippage = self.buy_price * self.quantity * self.slippage_rate
+        buy_cost = self.buy_price * self.quantity * self.slippage_rate
+        sell_cost = self.sell_price * self.quantity * self.slippage_rate
 
-        sell_slippage = self.sell_price * self.quantity * self.slippage_rate
-
-        return buy_slippage + sell_slippage
+        return buy_cost + sell_cost
 
     @property
     def total_cost(self) -> float:

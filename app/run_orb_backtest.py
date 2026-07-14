@@ -1,11 +1,13 @@
 """履歴CSVを使ってORBバックテストを実行する。"""
 
+from datetime import datetime
 from math import isinf
 
 from app.backtest.engine import BacktestEngine
 from app.backtest.historical_service import (
     HistoricalOrbBacktestService,
 )
+from app.backtest.report_writer import BacktestReportWriter
 from app.logger import create_logger
 from app.market.historical_csv_reader import HistoricalCsvReader
 from app.settings import settings
@@ -15,7 +17,7 @@ from app.strategy.opening_range_breakout import (
 
 
 def main() -> None:
-    """ORBバックテストを実行し、結果をログへ出力する。"""
+    """ORBバックテストを実行して結果を出力する。"""
 
     print("=" * 50)
     print(f"{settings.app_name} - ORB Backtest")
@@ -36,13 +38,26 @@ def main() -> None:
     )
 
     try:
-        result = service.run(settings.historical_csv_dir)
+        report = service.run_report(settings.historical_csv_dir)
     except (FileNotFoundError, NotADirectoryError, ValueError) as error:
-        logger.error("ORBバックテストを実行できません: %s", error)
+        logger.error(
+            "ORBバックテストを実行できません: %s",
+            error,
+        )
         return
+
+    result = report.result
 
     profit_factor_text = (
         "INF" if isinf(result.profit_factor) else f"{result.profit_factor:.2f}"
+    )
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = settings.reports_dir / f"orb_trades_{timestamp}.csv"
+
+    BacktestReportWriter().write_trades(
+        report.trades,
+        report_path,
     )
 
     logger.info(
@@ -67,6 +82,11 @@ def main() -> None:
         profit_factor_text,
         result.expectancy,
         result.max_drawdown,
+    )
+
+    logger.info(
+        "取引明細を出力しました。path=%s",
+        report_path,
     )
 
 

@@ -8,7 +8,7 @@ from app.market.models import StockPrice
 
 
 class OpeningRangeBreakoutStrategy:
-    """寄り付き後の高値突破で買い、当日終値で売る戦略。"""
+    """寄り付き後の高値突破で買い、当日最終足で売る。"""
 
     def __init__(
         self,
@@ -17,7 +17,7 @@ class OpeningRangeBreakoutStrategy:
         commission: float = 0.0,
         slippage_rate: float = 0.0,
     ) -> None:
-        """戦略の条件と取引コストを設定する。"""
+        """戦略条件と取引コストを設定する。"""
 
         if quantity <= 0:
             raise ValueError("数量は0より大きい必要があります。")
@@ -45,32 +45,33 @@ class OpeningRangeBreakoutStrategy:
         ] = defaultdict(list)
 
         for price in prices:
-            grouped_prices[(price.code, price.datetime.date())].append(price)
+            key = (price.code, price.datetime.date())
+            grouped_prices[key].append(price)
 
-        generated_trades: list[tuple[date, str, Trade]] = []
+        trades: list[Trade] = []
 
-        for (
-            code,
-            trading_date,
-        ), daily_prices in grouped_prices.items():
+        for (code, _trading_date), daily_prices in grouped_prices.items():
             trade = self._generate_daily_trade(
                 code=code,
                 daily_prices=daily_prices,
             )
 
             if trade is not None:
-                generated_trades.append((trading_date, code, trade))
+                trades.append(trade)
 
-        generated_trades.sort(key=lambda item: (item[0], item[1]))
-
-        return [trade for _trading_date, _code, trade in generated_trades]
+        return sorted(
+            trades,
+            key=lambda trade: (
+                trade.entry_at if trade.entry_at is not None else trade.code
+            ),
+        )
 
     def _generate_daily_trade(
         self,
         code: str,
         daily_prices: list[StockPrice],
     ) -> Trade | None:
-        """1銘柄・1日分の足から取引を1件生成する。"""
+        """1銘柄・1日分から取引を最大1件生成する。"""
 
         sorted_prices = sorted(
             daily_prices,
@@ -111,4 +112,6 @@ class OpeningRangeBreakoutStrategy:
             quantity=self.quantity,
             commission=self.commission,
             slippage_rate=self.slippage_rate,
+            entry_at=breakout_price.datetime,
+            exit_at=final_price.datetime,
         )
