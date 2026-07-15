@@ -1,286 +1,388 @@
-"""SQLiteの保存状況に基づく市場データ差分更新処理。"""
+"""市場時間足の差分更新範囲を安全に判定する。"""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from enum import StrEnum
 from typing import Protocol
 
-from app.market.bar_repository import MarketBarRepository
-from app.market.jquants_batch_import import (
-    JQuantsBatchImportResult,
-)
 
+class LatestMarketBarReader(Protocol):
+    """保存済み時間足の最新日時を取得するインターフェース。"""
 
-class BatchImportRunner(Protocol):
-    """一括取込サービスが満たすインターフェース。"""
-
-    def run_dates(
+    def latest_datetime(
         self,
-        codes: list[str],
-        target_dates: list[date],
-        *,
-        interval_minutes: int = 5,
-        data_source: str = "jquants",
-        continue_on_error: bool = True,
-        progress_callback: object | None = None,
-    ) -> JQuantsBatchImportResult:
-        """指定した銘柄・営業日を取り込む。"""
+        code: str,
+        interval_minutes: int,
+    ) -> datetime | None:
+        """指定銘柄・時間足の最新保存日時を返す。"""
+
+
+class TradingCalendarReader(Protocol):
+    """指定期間の営業日を取得するインターフェース。"""
+
+    def get_business_dates(
+        self,
+        start_date: date,
+        end_date: date,
+    ) -> list[date]:
+        """指定期間内の営業日一覧を返す。"""
+
+
+class IncrementalUpdateAction(StrEnum):
+    """銘柄ごとの差分更新判定を表す。"""
+
+    UPDATE = "update"
+    SKIP_UP_TO_DATE = "skip_up_to_date"
+    SKIP_NO_BUSINESS_DATES = "skip_no_business_dates"
 
 
 @dataclass(frozen=True, slots=True)
-class IncrementalCodeUpdateResult:
-    """1銘柄分の差分更新結果。"""
+class IncrementalUpdateTask:
+    """1銘柄の差分更新計画を表す。"""
 
     code: str
-    start_date: date | None
-    end_date: date
-    previous_latest_date: date | None
-    skipped: bool
+    interval_minutes: int
+    latest_saved_at: datetime | None
+    requested_start_date: date
+    requested_end_date: date
+    business_dates: tuple[date, ...]
+    action: IncrementalUpdateAction
 
-    request_count: int
-    successful_request_count: int
-    empty_request_count: int
-    failed_request_count: int
+    @property
+    def should_update(self) -> bool:
+        """API取得が必要な計画か返す。"""
 
-    minute_bar_count: int
-    five_minute_bar_count: int
-    processed_bar_count: int
+        return self.action is IncrementalUpdateAction.UPDATE
+
+    @property
+    def update_start_date(self) -> date | None:
+        """実際の更新対象となる最初の営業日を返す。"""
+
+        if not self.business_dates:
+            return None
+
+        return self.business_dates[0]
+
+    @property
+    def update_end_date(self) -> date | None:
+        """実際の更新対象となる最後の営業日を返す。"""
+
+        if not self.business_dates:
+            return None
+
+        return self.business_dates[-1]
+
+    @property
+    def business_date_count(self) -> int:
+        """更新対象営業日数を返す。"""
+
+        return len(self.business_dates)
 
 
 @dataclass(frozen=True, slots=True)
-class IncrementalMarketUpdateResult:
-    """複数銘柄の差分更新結果。"""
+class IncrementalUpdatePlan:
+    """複数銘柄の差分更新計画を表す。"""
 
-    code_results: list[IncrementalCodeUpdateResult]
+    initial_start_date: date
+    target_end_date: date
+    interval_minutes: int
+    tasks: tuple[IncrementalUpdateTask, ...]
 
     @property
     def code_count(self) -> int:
-        """対象銘柄数を返す。"""
+        """計画に含まれる銘柄数を返す。"""
 
-        return len(self.code_results)
+        return len(self.tasks)
 
     @property
-    def updated_code_count(self) -> int:
-        """API取得を実行した銘柄数を返す。"""
+    def update_tasks(self) -> tuple[IncrementalUpdateTask, ...]:
+        """更新が必要な銘柄だけを返す。"""
 
-        return sum(not result.skipped for result in self.code_results)
+        return tuple(
+            task
+            for task in self.tasks
+            if task.should_update
+        )
+
+    @property
+    def skipped_tasks(self) -> tuple[IncrementalUpdateTask, ...]:
+        """更新不要としてスキップする銘柄だけを返す。"""
+
+        return tuple(
+            task
+            for task in self.tasks
+            if not task.should_update
+        )
+
+    @property
+    def update_code_count(self) -> int:
+        """更新が必要な銘柄数を返す。"""
+
+        return len(self.update_tasks)
 
     @property
     def skipped_code_count(self) -> int:
-        """更新不要だった銘柄数を返す。"""
+        """スキップする銘柄数を返す。"""
 
-        return sum(result.skipped for result in self.code_results)
-
-    @property
-    def request_count(self) -> int:
-        """分足APIリクエスト総数を返す。"""
-
-        return sum(result.request_count for result in self.code_results)
+        return len(self.skipped_tasks)
 
     @property
-    def successful_request_count(self) -> int:
-        """成功したリクエスト総数を返す。"""
+    def total_business_date_count(self) -> int:
+        """全銘柄の更新対象営業日数合計を返す。"""
 
-        return sum(result.successful_request_count for result in self.code_results)
-
-    @property
-    def empty_request_count(self) -> int:
-        """0件だったリクエスト総数を返す。"""
-
-        return sum(result.empty_request_count for result in self.code_results)
+        return sum(
+            task.business_date_count
+            for task in self.tasks
+        )
 
     @property
-    def failed_request_count(self) -> int:
-        """失敗したリクエスト総数を返す。"""
+    def is_up_to_date(self) -> bool:
+        """すべての銘柄が更新不要か返す。"""
 
-        return sum(result.failed_request_count for result in self.code_results)
-
-    @property
-    def minute_bar_count(self) -> int:
-        """取得した1分足総数を返す。"""
-
-        return sum(result.minute_bar_count for result in self.code_results)
-
-    @property
-    def five_minute_bar_count(self) -> int:
-        """生成した5分足総数を返す。"""
-
-        return sum(result.five_minute_bar_count for result in self.code_results)
-
-    @property
-    def processed_bar_count(self) -> int:
-        """SQLiteへ処理した足数を返す。"""
-
-        return sum(result.processed_bar_count for result in self.code_results)
+        return not self.update_tasks
 
 
-class IncrementalMarketUpdateService:
-    """営業日のうち不足している期間だけを更新する。"""
+class IncrementalUpdatePlanner:
+    """保存済みデータから銘柄別の差分更新範囲を決定する。"""
 
     def __init__(
         self,
-        repository: MarketBarRepository,
-        batch_importer: BatchImportRunner,
+        repository: LatestMarketBarReader,
+        calendar_reader: TradingCalendarReader,
     ) -> None:
-        """Repositoryと一括取込サービスを受け取る。"""
+        """最新日時Repositoryと取引カレンダーを設定する。"""
 
         self.repository = repository
-        self.batch_importer = batch_importer
+        self.calendar_reader = calendar_reader
 
-    def run(
+    def create_plan(
         self,
-        codes: list[str],
-        initial_start_date: date,
-        end_date: date,
+        codes: Sequence[str],
         *,
-        business_dates: list[date] | None = None,
+        initial_start_date: date,
+        target_end_date: date,
         interval_minutes: int = 5,
-        data_source: str = "jquants",
-        continue_on_error: bool = True,
-    ) -> IncrementalMarketUpdateResult:
-        """銘柄ごとに不足している営業日だけを取得する。"""
+        today: date | None = None,
+    ) -> IncrementalUpdatePlan:
+        """複数銘柄の差分更新計画を作成する。
+
+        保存済みデータがない銘柄は ``initial_start_date`` から更新する。
+        保存済みデータがある銘柄は、最新保存日の翌日から更新する。
+
+        ``target_end_date`` より新しい保存データがある場合や、
+        最新保存日が ``target_end_date`` と同日の場合は更新不要とする。
+
+        取引カレンダー上の営業日が1日も存在しない場合も、
+        APIを呼び出さないスキップ計画とする。
+        """
 
         normalized_codes = self._normalize_codes(codes)
 
-        if initial_start_date > end_date:
-            raise ValueError("初回開始日は終了日以前にしてください。")
-
-        if interval_minutes <= 0:
-            raise ValueError("時間足の間隔は0より大きい必要があります。")
-
-        if not data_source.strip():
-            raise ValueError("データソースを指定してください。")
-
-        available_business_dates = (
-            sorted(set(business_dates))
-            if business_dates is not None
-            else self._create_date_range(
-                initial_start_date,
-                end_date,
-            )
+        self._validate_arguments(
+            initial_start_date=initial_start_date,
+            target_end_date=target_end_date,
+            interval_minutes=interval_minutes,
+            today=today,
         )
 
-        available_business_dates = [
-            target_date
-            for target_date in available_business_dates
-            if initial_start_date <= target_date <= end_date
-        ]
-
-        code_results: list[IncrementalCodeUpdateResult] = []
-
-        for code in normalized_codes:
-            latest_datetime = self.repository.latest_datetime(
+        latest_by_code = {
+            code: self.repository.latest_datetime(
                 code=code,
                 interval_minutes=interval_minutes,
             )
+            for code in normalized_codes
+        }
 
-            previous_latest_date = (
-                latest_datetime.date() if latest_datetime is not None else None
+        requested_start_by_code = {
+            code: self._resolve_requested_start_date(
+                latest_saved_at=latest_by_code[code],
+                initial_start_date=initial_start_date,
+            )
+            for code in normalized_codes
+        }
+
+        calendar_start_date = min(
+            requested_start_by_code.values()
+        )
+
+        all_business_dates: tuple[date, ...] = ()
+
+        if calendar_start_date <= target_end_date:
+            all_business_dates = self._normalize_business_dates(
+                self.calendar_reader.get_business_dates(
+                    start_date=calendar_start_date,
+                    end_date=target_end_date,
+                ),
+                start_date=calendar_start_date,
+                end_date=target_end_date,
             )
 
-            minimum_date = (
-                initial_start_date
-                if previous_latest_date is None
-                else previous_latest_date + timedelta(days=1)
-            )
-
-            target_dates = [
-                target_date
-                for target_date in available_business_dates
-                if target_date >= minimum_date
-            ]
-
-            if not target_dates:
-                code_results.append(
-                    self._create_skipped_result(
-                        code=code,
-                        end_date=end_date,
-                        previous_latest_date=(previous_latest_date),
-                    )
-                )
-                continue
-
-            batch_result = self.batch_importer.run_dates(
-                codes=[code],
-                target_dates=target_dates,
+        tasks = tuple(
+            self._create_task(
+                code=code,
                 interval_minutes=interval_minutes,
-                data_source=data_source,
-                continue_on_error=continue_on_error,
+                latest_saved_at=latest_by_code[code],
+                requested_start_date=(
+                    requested_start_by_code[code]
+                ),
+                requested_end_date=target_end_date,
+                all_business_dates=all_business_dates,
             )
+            for code in normalized_codes
+        )
 
-            code_results.append(
-                IncrementalCodeUpdateResult(
-                    code=code,
-                    start_date=target_dates[0],
-                    end_date=target_dates[-1],
-                    previous_latest_date=(previous_latest_date),
-                    skipped=False,
-                    request_count=(batch_result.request_count),
-                    successful_request_count=(batch_result.successful_request_count),
-                    empty_request_count=(batch_result.empty_request_count),
-                    failed_request_count=(batch_result.failed_request_count),
-                    minute_bar_count=(batch_result.minute_bar_count),
-                    five_minute_bar_count=(batch_result.five_minute_bar_count),
-                    processed_bar_count=(batch_result.processed_bar_count),
-                )
-            )
-
-        return IncrementalMarketUpdateResult(code_results=code_results)
+        return IncrementalUpdatePlan(
+            initial_start_date=initial_start_date,
+            target_end_date=target_end_date,
+            interval_minutes=interval_minutes,
+            tasks=tasks,
+        )
 
     @staticmethod
-    def _create_skipped_result(
-        code: str,
-        end_date: date,
-        previous_latest_date: date | None,
-    ) -> IncrementalCodeUpdateResult:
-        """更新不要の結果を作成する。"""
+    def _resolve_requested_start_date(
+        *,
+        latest_saved_at: datetime | None,
+        initial_start_date: date,
+    ) -> date:
+        """保存状況から更新要求開始日を決定する。"""
 
-        return IncrementalCodeUpdateResult(
+        if latest_saved_at is None:
+            return initial_start_date
+
+        return latest_saved_at.date() + timedelta(days=1)
+
+    @staticmethod
+    def _create_task(
+        *,
+        code: str,
+        interval_minutes: int,
+        latest_saved_at: datetime | None,
+        requested_start_date: date,
+        requested_end_date: date,
+        all_business_dates: tuple[date, ...],
+    ) -> IncrementalUpdateTask:
+        """1銘柄の差分更新計画を作成する。"""
+
+        if requested_start_date > requested_end_date:
+            return IncrementalUpdateTask(
+                code=code,
+                interval_minutes=interval_minutes,
+                latest_saved_at=latest_saved_at,
+                requested_start_date=requested_start_date,
+                requested_end_date=requested_end_date,
+                business_dates=(),
+                action=(
+                    IncrementalUpdateAction.SKIP_UP_TO_DATE
+                ),
+            )
+
+        business_dates = tuple(
+            business_date
+            for business_date in all_business_dates
+            if (
+                requested_start_date
+                <= business_date
+                <= requested_end_date
+            )
+        )
+
+        if not business_dates:
+            return IncrementalUpdateTask(
+                code=code,
+                interval_minutes=interval_minutes,
+                latest_saved_at=latest_saved_at,
+                requested_start_date=requested_start_date,
+                requested_end_date=requested_end_date,
+                business_dates=(),
+                action=(
+                    IncrementalUpdateAction.SKIP_NO_BUSINESS_DATES
+                ),
+            )
+
+        return IncrementalUpdateTask(
             code=code,
-            start_date=None,
-            end_date=end_date,
-            previous_latest_date=previous_latest_date,
-            skipped=True,
-            request_count=0,
-            successful_request_count=0,
-            empty_request_count=0,
-            failed_request_count=0,
-            minute_bar_count=0,
-            five_minute_bar_count=0,
-            processed_bar_count=0,
+            interval_minutes=interval_minutes,
+            latest_saved_at=latest_saved_at,
+            requested_start_date=requested_start_date,
+            requested_end_date=requested_end_date,
+            business_dates=business_dates,
+            action=IncrementalUpdateAction.UPDATE,
+        )
+
+    @staticmethod
+    def _normalize_business_dates(
+        business_dates: Sequence[date],
+        *,
+        start_date: date,
+        end_date: date,
+    ) -> tuple[date, ...]:
+        """営業日を期間内に限定し、重複除去して昇順にする。"""
+
+        return tuple(
+            sorted(
+                {
+                    business_date
+                    for business_date in business_dates
+                    if start_date <= business_date <= end_date
+                }
+            )
         )
 
     @staticmethod
     def _normalize_codes(
-        codes: list[str],
-    ) -> list[str]:
-        """銘柄コードを検証して重複を除去する。"""
+        codes: Sequence[str],
+    ) -> tuple[str, ...]:
+        """銘柄コードを検証し、順序を維持して重複除去する。"""
 
         if not codes:
-            raise ValueError("銘柄コードを1件以上指定してください。")
+            raise ValueError(
+                "銘柄コードを1件以上指定してください。"
+            )
 
         normalized_codes: list[str] = []
 
         for code in codes:
-            normalized = code.strip()
+            normalized_code = code.strip()
 
-            if not normalized.isdigit():
-                raise ValueError("銘柄コードは数字で指定してください。")
+            if not normalized_code.isdigit():
+                raise ValueError(
+                    "銘柄コードは数字で指定してください。"
+                )
 
-            if len(normalized) not in (4, 5):
-                raise ValueError("銘柄コードは4桁または5桁で指定してください。")
+            if len(normalized_code) not in (4, 5):
+                raise ValueError(
+                    "銘柄コードは4桁または5桁で指定してください。"
+                )
 
-            if normalized not in normalized_codes:
-                normalized_codes.append(normalized)
+            if normalized_code not in normalized_codes:
+                normalized_codes.append(normalized_code)
 
-        return normalized_codes
+        return tuple(normalized_codes)
 
     @staticmethod
-    def _create_date_range(
-        start_date: date,
-        end_date: date,
-    ) -> list[date]:
-        """開始日から終了日までの日付一覧を返す。"""
+    def _validate_arguments(
+        *,
+        initial_start_date: date,
+        target_end_date: date,
+        interval_minutes: int,
+        today: date | None,
+    ) -> None:
+        """差分更新条件を検証する。"""
 
-        date_count = (end_date - start_date).days
+        if initial_start_date > target_end_date:
+            raise ValueError(
+                "初回取得開始日は更新終了日以前にしてください。"
+            )
 
-        return [start_date + timedelta(days=offset) for offset in range(date_count + 1)]
+        if interval_minutes <= 0:
+            raise ValueError(
+                "時間足の間隔は0より大きい必要があります。"
+            )
+
+        resolved_today = today or date.today()
+
+        if target_end_date > resolved_today:
+            raise ValueError(
+                "更新終了日に未来日は指定できません。"
+            )

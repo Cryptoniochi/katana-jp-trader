@@ -1,444 +1,521 @@
-"""市場データ差分更新サービスのテスト。"""
+"""市場時間足の差分更新範囲判定テスト。"""
 
 from datetime import date, datetime
-from pathlib import Path
 
 import pytest
 
-from app.database import initialize_database
-from app.market.bar_repository import MarketBarRepository
 from app.market.incremental_update import (
-    IncrementalMarketUpdateService,
+    IncrementalUpdateAction,
+    IncrementalUpdatePlanner,
 )
-from app.market.jquants_batch_import import (
-    JQuantsBatchImportResult,
-)
-from app.market.models import StockPrice
 
 
-class FakeBatchImporter:
-    """呼び出し条件を記録する一括取込サービス。"""
+class FakeLatestMarketBarReader:
+    """テスト用の最新時間足取得Repository。"""
 
-    def __init__(self) -> None:
-        """呼び出し履歴を初期化する。"""
-
-        self.calls: list[
-            tuple[
-                list[str],
-                list[date],
-                int,
-                str,
-                bool,
-            ]
-        ] = []
-
-    def run_dates(
+    def __init__(
         self,
-        codes: list[str],
-        target_dates: list[date],
-        *,
-        interval_minutes: int = 5,
-        data_source: str = "jquants",
-        continue_on_error: bool = True,
-        progress_callback: object | None = None,
-    ) -> JQuantsBatchImportResult:
-        """固定の取込結果を返す。"""
+        latest_by_code: dict[str, datetime | None],
+    ) -> None:
+        """銘柄別の最新保存日時を設定する。"""
 
-        del progress_callback
+        self.latest_by_code = latest_by_code
+        self.calls: list[tuple[str, int]] = []
+
+    def latest_datetime(
+        self,
+        code: str,
+        interval_minutes: int,
+    ) -> datetime | None:
+        """設定済みの最新保存日時を返す。"""
 
         self.calls.append(
             (
-                codes,
-                target_dates,
+                code,
                 interval_minutes,
-                data_source,
-                continue_on_error,
             )
         )
 
-        return JQuantsBatchImportResult(
-            code_count=len(codes),
-            date_count=len(target_dates),
-            request_count=(len(codes) * len(target_dates)),
-            successful_request_count=1,
-            empty_request_count=0,
-            failed_request_count=0,
-            minute_bar_count=327,
-            five_minute_bar_count=67,
-            processed_bar_count=67,
-            failures=[],
+        return self.latest_by_code.get(code)
+
+
+class FakeTradingCalendarReader:
+    """テスト用の取引カレンダー。"""
+
+    def __init__(
+        self,
+        business_dates: list[date],
+    ) -> None:
+        """返却する営業日一覧を設定する。"""
+
+        self.business_dates = business_dates
+        self.calls: list[tuple[date, date]] = []
+
+    def get_business_dates(
+        self,
+        start_date: date,
+        end_date: date,
+    ) -> list[date]:
+        """設定済みの営業日一覧を返す。"""
+
+        self.calls.append(
+            (
+                start_date,
+                end_date,
+            )
         )
 
-
-def create_repository(
-    tmp_path: Path,
-) -> MarketBarRepository:
-    """初期化済みRepositoryを作成する。"""
-
-    database_path = tmp_path / "katana.db"
-    initialize_database(database_path)
-
-    return MarketBarRepository(database_path)
+        return self.business_dates
 
 
-def create_price(
-    code: str,
-    date_text: str,
-    time_text: str = "15:30",
-) -> StockPrice:
-    """最新日時確認用の5分足を作成する。"""
+def create_business_dates(
+    start_day: int,
+    end_day: int,
+) -> list[date]:
+    """2026年7月の日付一覧を作成する。"""
 
-    return StockPrice(
-        code=code,
-        datetime=datetime.strptime(
-            f"{date_text} {time_text}",
-            "%Y-%m-%d %H:%M",
-        ),
-        open=1000.0,
-        high=1010.0,
-        low=995.0,
-        close=1005.0,
-        volume=100_000,
-    )
-
-
-def test_service_starts_day_after_latest_date(
-    tmp_path: Path,
-) -> None:
-    """最新保存日の翌日以降の営業日だけ更新する。"""
-
-    repository = create_repository(tmp_path)
-    importer = FakeBatchImporter()
-
-    repository.save_all(
-        prices=[
-            create_price(
-                code="7203",
-                date_text="2026-07-13",
-            )
-        ],
-        interval_minutes=5,
-        data_source="jquants",
-    )
-
-    service = IncrementalMarketUpdateService(
-        repository=repository,
-        batch_importer=importer,
-    )
-
-    result = service.run(
-        codes=["7203"],
-        initial_start_date=date(2026, 7, 1),
-        end_date=date(2026, 7, 15),
-        business_dates=[
-            date(2026, 7, 13),
-            date(2026, 7, 14),
-            date(2026, 7, 15),
-        ],
-    )
-
-    assert len(importer.calls) == 1
-    assert importer.calls[0][0] == ["7203"]
-    assert importer.calls[0][1] == [
-        date(2026, 7, 14),
-        date(2026, 7, 15),
+    return [
+        date(2026, 7, day)
+        for day in range(
+            start_day,
+            end_day + 1,
+        )
     ]
 
-    code_result = result.code_results[0]
 
-    assert code_result.previous_latest_date == date(
-        2026,
-        7,
-        13,
+def test_planner_uses_initial_start_for_new_symbol() -> None:
+    """保存データがない銘柄は初回開始日から更新する。"""
+
+    repository = FakeLatestMarketBarReader(
+        {
+            "7203": None,
+        }
     )
-    assert code_result.start_date == date(
-        2026,
-        7,
-        14,
-    )
-    assert code_result.end_date == date(
-        2026,
-        7,
-        15,
-    )
-    assert not code_result.skipped
-
-
-def test_service_uses_initial_date_without_saved_data(
-    tmp_path: Path,
-) -> None:
-    """未保存銘柄は初回開始日以降の営業日を取得する。"""
-
-    repository = create_repository(tmp_path)
-    importer = FakeBatchImporter()
-
-    service = IncrementalMarketUpdateService(
-        repository=repository,
-        batch_importer=importer,
-    )
-
-    result = service.run(
-        codes=["8306"],
-        initial_start_date=date(2026, 7, 1),
-        end_date=date(2026, 7, 3),
-        business_dates=[
+    calendar = FakeTradingCalendarReader(
+        [
             date(2026, 7, 1),
             date(2026, 7, 2),
             date(2026, 7, 3),
-        ],
+        ]
     )
 
-    assert importer.calls[0][1] == [
+    plan = IncrementalUpdatePlanner(
+        repository=repository,
+        calendar_reader=calendar,
+    ).create_plan(
+        codes=["7203"],
+        initial_start_date=date(2026, 7, 1),
+        target_end_date=date(2026, 7, 3),
+        interval_minutes=5,
+        today=date(2026, 7, 10),
+    )
+
+    assert plan.code_count == 1
+    assert plan.update_code_count == 1
+    assert plan.skipped_code_count == 0
+    assert plan.total_business_date_count == 3
+    assert plan.is_up_to_date is False
+
+    task = plan.tasks[0]
+
+    assert task.code == "7203"
+    assert task.latest_saved_at is None
+    assert task.requested_start_date == date(
+        2026,
+        7,
+        1,
+    )
+    assert task.update_start_date == date(
+        2026,
+        7,
+        1,
+    )
+    assert task.update_end_date == date(
+        2026,
+        7,
+        3,
+    )
+    assert task.business_date_count == 3
+    assert task.action is IncrementalUpdateAction.UPDATE
+    assert task.should_update is True
+
+    assert repository.calls == [
+        (
+            "7203",
+            5,
+        )
+    ]
+
+    assert calendar.calls == [
+        (
+            date(2026, 7, 1),
+            date(2026, 7, 3),
+        )
+    ]
+
+
+def test_planner_starts_after_latest_saved_date() -> None:
+    """保存済み最終日の翌日から差分更新する。"""
+
+    repository = FakeLatestMarketBarReader(
+        {
+            "7203": datetime(
+                2026,
+                7,
+                2,
+                15,
+                0,
+            ),
+        }
+    )
+    calendar = FakeTradingCalendarReader(
+        create_business_dates(
+            3,
+            6,
+        )
+    )
+
+    plan = IncrementalUpdatePlanner(
+        repository=repository,
+        calendar_reader=calendar,
+    ).create_plan(
+        codes=["7203"],
+        initial_start_date=date(2026, 7, 1),
+        target_end_date=date(2026, 7, 6),
+        interval_minutes=5,
+        today=date(2026, 7, 10),
+    )
+
+    task = plan.tasks[0]
+
+    assert task.requested_start_date == date(
+        2026,
+        7,
+        3,
+    )
+    assert task.business_dates == (
+        date(2026, 7, 3),
+        date(2026, 7, 4),
+        date(2026, 7, 5),
+        date(2026, 7, 6),
+    )
+    assert task.action is IncrementalUpdateAction.UPDATE
+
+
+def test_planner_skips_symbol_already_up_to_date() -> None:
+    """最終保存日が終了日と同じなら更新不要にする。"""
+
+    repository = FakeLatestMarketBarReader(
+        {
+            "7203": datetime(
+                2026,
+                7,
+                5,
+                15,
+                0,
+            ),
+        }
+    )
+    calendar = FakeTradingCalendarReader([])
+
+    plan = IncrementalUpdatePlanner(
+        repository=repository,
+        calendar_reader=calendar,
+    ).create_plan(
+        codes=["7203"],
+        initial_start_date=date(2026, 7, 1),
+        target_end_date=date(2026, 7, 5),
+        interval_minutes=5,
+        today=date(2026, 7, 10),
+    )
+
+    task = plan.tasks[0]
+
+    assert task.requested_start_date == date(
+        2026,
+        7,
+        6,
+    )
+    assert task.business_dates == ()
+    assert task.update_start_date is None
+    assert task.update_end_date is None
+    assert task.action is (
+        IncrementalUpdateAction.SKIP_UP_TO_DATE
+    )
+    assert task.should_update is False
+
+    assert plan.update_code_count == 0
+    assert plan.skipped_code_count == 1
+    assert plan.is_up_to_date is True
+    assert calendar.calls == []
+
+
+def test_planner_skips_when_no_business_dates_exist() -> None:
+    """対象期間に営業日がなければAPI更新を不要にする。"""
+
+    repository = FakeLatestMarketBarReader(
+        {
+            "7203": None,
+        }
+    )
+    calendar = FakeTradingCalendarReader([])
+
+    plan = IncrementalUpdatePlanner(
+        repository=repository,
+        calendar_reader=calendar,
+    ).create_plan(
+        codes=["7203"],
+        initial_start_date=date(2026, 7, 4),
+        target_end_date=date(2026, 7, 5),
+        interval_minutes=5,
+        today=date(2026, 7, 10),
+    )
+
+    task = plan.tasks[0]
+
+    assert task.action is (
+        IncrementalUpdateAction.SKIP_NO_BUSINESS_DATES
+    )
+    assert task.should_update is False
+    assert task.business_date_count == 0
+    assert plan.is_up_to_date is True
+
+    assert calendar.calls == [
+        (
+            date(2026, 7, 4),
+            date(2026, 7, 5),
+        )
+    ]
+
+
+def test_planner_creates_different_ranges_for_each_code() -> None:
+    """銘柄ごとの最終保存日に応じて異なる範囲を作る。"""
+
+    repository = FakeLatestMarketBarReader(
+        {
+            "7203": datetime(
+                2026,
+                7,
+                2,
+                15,
+                0,
+            ),
+            "8306": datetime(
+                2026,
+                7,
+                4,
+                15,
+                0,
+            ),
+            "9984": None,
+        }
+    )
+    calendar = FakeTradingCalendarReader(
+        create_business_dates(
+            1,
+            5,
+        )
+    )
+
+    plan = IncrementalUpdatePlanner(
+        repository=repository,
+        calendar_reader=calendar,
+    ).create_plan(
+        codes=[
+            "7203",
+            "8306",
+            "9984",
+        ],
+        initial_start_date=date(2026, 7, 1),
+        target_end_date=date(2026, 7, 5),
+        interval_minutes=5,
+        today=date(2026, 7, 10),
+    )
+
+    tasks_by_code = {
+        task.code: task
+        for task in plan.tasks
+    }
+
+    assert tasks_by_code[
+        "7203"
+    ].business_dates == (
+        date(2026, 7, 3),
+        date(2026, 7, 4),
+        date(2026, 7, 5),
+    )
+
+    assert tasks_by_code[
+        "8306"
+    ].business_dates == (
+        date(2026, 7, 5),
+    )
+
+    assert tasks_by_code[
+        "9984"
+    ].business_dates == (
         date(2026, 7, 1),
         date(2026, 7, 2),
         date(2026, 7, 3),
-    ]
-
-    assert result.code_results[0].previous_latest_date is None
-
-
-def test_service_skips_up_to_date_symbol(
-    tmp_path: Path,
-) -> None:
-    """終了日まで保存済みならAPI取得しない。"""
-
-    repository = create_repository(tmp_path)
-    importer = FakeBatchImporter()
-
-    repository.save_all(
-        prices=[
-            create_price(
-                code="7203",
-                date_text="2026-07-15",
-            )
-        ],
-        interval_minutes=5,
-        data_source="jquants",
+        date(2026, 7, 4),
+        date(2026, 7, 5),
     )
 
-    result = IncrementalMarketUpdateService(
+    assert plan.code_count == 3
+    assert plan.update_code_count == 3
+    assert plan.total_business_date_count == 9
+
+    assert calendar.calls == [
+        (
+            date(2026, 7, 1),
+            date(2026, 7, 5),
+        )
+    ]
+
+
+def test_planner_filters_sorts_and_deduplicates_calendar_dates() -> None:
+    """営業日を期間内へ限定し、昇順・重複なしにする。"""
+
+    repository = FakeLatestMarketBarReader(
+        {
+            "7203": None,
+        }
+    )
+    calendar = FakeTradingCalendarReader(
+        [
+            date(2026, 7, 4),
+            date(2026, 7, 2),
+            date(2026, 7, 2),
+            date(2026, 6, 30),
+            date(2026, 7, 6),
+            date(2026, 7, 3),
+        ]
+    )
+
+    plan = IncrementalUpdatePlanner(
         repository=repository,
-        batch_importer=importer,
-    ).run(
+        calendar_reader=calendar,
+    ).create_plan(
         codes=["7203"],
         initial_start_date=date(2026, 7, 1),
-        end_date=date(2026, 7, 15),
-        business_dates=[
-            date(2026, 7, 13),
-            date(2026, 7, 14),
-            date(2026, 7, 15),
-        ],
+        target_end_date=date(2026, 7, 5),
+        today=date(2026, 7, 10),
     )
 
-    assert importer.calls == []
-    assert result.updated_code_count == 0
-    assert result.skipped_code_count == 1
-    assert result.code_results[0].skipped
-    assert result.code_results[0].start_date is None
-
-
-def test_service_handles_different_latest_dates(
-    tmp_path: Path,
-) -> None:
-    """銘柄ごとの最新保存日に応じて営業日を絞る。"""
-
-    repository = create_repository(tmp_path)
-    importer = FakeBatchImporter()
-
-    repository.save_all(
-        prices=[
-            create_price(
-                code="7203",
-                date_text="2026-07-13",
-            ),
-            create_price(
-                code="8306",
-                date_text="2026-07-14",
-            ),
-        ],
-        interval_minutes=5,
-        data_source="jquants",
+    assert plan.tasks[0].business_dates == (
+        date(2026, 7, 2),
+        date(2026, 7, 3),
+        date(2026, 7, 4),
     )
 
-    result = IncrementalMarketUpdateService(
+
+def test_planner_removes_duplicate_codes() -> None:
+    """重複銘柄を1件にまとめる。"""
+
+    repository = FakeLatestMarketBarReader(
+        {
+            "7203": None,
+        }
+    )
+    calendar = FakeTradingCalendarReader(
+        [
+            date(2026, 7, 1),
+        ]
+    )
+
+    plan = IncrementalUpdatePlanner(
         repository=repository,
-        batch_importer=importer,
-    ).run(
-        codes=["7203", "8306"],
+        calendar_reader=calendar,
+    ).create_plan(
+        codes=[
+            "7203",
+            "7203",
+        ],
         initial_start_date=date(2026, 7, 1),
-        end_date=date(2026, 7, 15),
-        business_dates=[
-            date(2026, 7, 13),
-            date(2026, 7, 14),
-            date(2026, 7, 15),
-        ],
+        target_end_date=date(2026, 7, 1),
+        today=date(2026, 7, 10),
     )
 
-    assert len(importer.calls) == 2
-
-    assert importer.calls[0][0] == ["7203"]
-    assert importer.calls[0][1] == [
-        date(2026, 7, 14),
-        date(2026, 7, 15),
-    ]
-
-    assert importer.calls[1][0] == ["8306"]
-    assert importer.calls[1][1] == [
-        date(2026, 7, 15),
-    ]
-
-    assert result.code_count == 2
-    assert result.updated_code_count == 2
-    assert result.skipped_code_count == 0
-
-
-def test_service_aggregates_result_counts(
-    tmp_path: Path,
-) -> None:
-    """銘柄ごとの取込件数を合計できる。"""
-
-    repository = create_repository(tmp_path)
-    importer = FakeBatchImporter()
-
-    result = IncrementalMarketUpdateService(
-        repository=repository,
-        batch_importer=importer,
-    ).run(
-        codes=["7203", "8306"],
-        initial_start_date=date(2026, 7, 13),
-        end_date=date(2026, 7, 13),
-        business_dates=[
-            date(2026, 7, 13),
-        ],
-    )
-
-    assert result.request_count == 2
-    assert result.successful_request_count == 2
-    assert result.minute_bar_count == 654
-    assert result.five_minute_bar_count == 134
-    assert result.processed_bar_count == 134
-
-
-def test_service_removes_duplicate_codes(
-    tmp_path: Path,
-) -> None:
-    """重複した銘柄コードを1回だけ更新する。"""
-
-    repository = create_repository(tmp_path)
-    importer = FakeBatchImporter()
-
-    result = IncrementalMarketUpdateService(
-        repository=repository,
-        batch_importer=importer,
-    ).run(
-        codes=["7203", "7203"],
-        initial_start_date=date(2026, 7, 13),
-        end_date=date(2026, 7, 13),
-        business_dates=[
-            date(2026, 7, 13),
-        ],
-    )
-
-    assert result.code_count == 1
-    assert len(importer.calls) == 1
-
-
-def test_service_excludes_non_business_dates(
-    tmp_path: Path,
-) -> None:
-    """営業日一覧に含まれない日は取込対象にしない。"""
-
-    repository = create_repository(tmp_path)
-    importer = FakeBatchImporter()
-
-    IncrementalMarketUpdateService(
-        repository=repository,
-        batch_importer=importer,
-    ).run(
-        codes=["7203"],
-        initial_start_date=date(2026, 7, 10),
-        end_date=date(2026, 7, 15),
-        business_dates=[
-            date(2026, 7, 10),
-            date(2026, 7, 13),
-            date(2026, 7, 14),
-            date(2026, 7, 15),
-        ],
-    )
-
-    assert importer.calls[0][1] == [
-        date(2026, 7, 10),
-        date(2026, 7, 13),
-        date(2026, 7, 14),
-        date(2026, 7, 15),
-    ]
-
-
-def test_service_skips_when_business_date_list_is_empty(
-    tmp_path: Path,
-) -> None:
-    """営業日が0件ならAPI取得せずスキップする。"""
-
-    repository = create_repository(tmp_path)
-    importer = FakeBatchImporter()
-
-    result = IncrementalMarketUpdateService(
-        repository=repository,
-        batch_importer=importer,
-    ).run(
-        codes=["7203"],
-        initial_start_date=date(2026, 7, 11),
-        end_date=date(2026, 7, 12),
-        business_dates=[],
-    )
-
-    assert importer.calls == []
-    assert result.skipped_code_count == 1
-    assert result.request_count == 0
+    assert plan.code_count == 1
+    assert len(repository.calls) == 1
+    assert plan.tasks[0].code == "7203"
 
 
 @pytest.mark.parametrize(
-    ("codes", "initial_start_date", "end_date", "message"),
+    (
+        "codes",
+        "initial_start_date",
+        "target_end_date",
+        "interval_minutes",
+        "today",
+        "message",
+    ),
     [
         (
             [],
             date(2026, 7, 1),
-            date(2026, 7, 15),
+            date(2026, 7, 5),
+            5,
+            date(2026, 7, 10),
             "銘柄コード",
         ),
         (
             ["ABCD"],
             date(2026, 7, 1),
-            date(2026, 7, 15),
+            date(2026, 7, 5),
+            5,
+            date(2026, 7, 10),
             "数字",
         ),
         (
             ["7203"],
-            date(2026, 7, 16),
-            date(2026, 7, 15),
-            "初回開始日",
+            date(2026, 7, 5),
+            date(2026, 7, 1),
+            5,
+            date(2026, 7, 10),
+            "初回取得開始日",
+        ),
+        (
+            ["7203"],
+            date(2026, 7, 1),
+            date(2026, 7, 5),
+            0,
+            date(2026, 7, 10),
+            "時間足",
+        ),
+        (
+            ["7203"],
+            date(2026, 7, 1),
+            date(2026, 7, 11),
+            5,
+            date(2026, 7, 10),
+            "未来日",
         ),
     ],
 )
-def test_service_rejects_invalid_arguments(
-    tmp_path: Path,
+def test_planner_rejects_invalid_arguments(
     codes: list[str],
     initial_start_date: date,
-    end_date: date,
+    target_end_date: date,
+    interval_minutes: int,
+    today: date,
     message: str,
 ) -> None:
-    """不正な銘柄または期間を拒否する。"""
+    """不正な差分更新条件を拒否する。"""
 
-    repository = create_repository(tmp_path)
-    importer = FakeBatchImporter()
+    planner = IncrementalUpdatePlanner(
+        repository=FakeLatestMarketBarReader({}),
+        calendar_reader=FakeTradingCalendarReader([]),
+    )
 
-    with pytest.raises(ValueError, match=message):
-        IncrementalMarketUpdateService(
-            repository=repository,
-            batch_importer=importer,
-        ).run(
+    with pytest.raises(
+        ValueError,
+        match=message,
+    ):
+        planner.create_plan(
             codes=codes,
             initial_start_date=initial_start_date,
-            end_date=end_date,
-            business_dates=[],
+            target_end_date=target_end_date,
+            interval_minutes=interval_minutes,
+            today=today,
         )
