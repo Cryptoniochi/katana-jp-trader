@@ -3,10 +3,12 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
-def initialize_database(database_path: Path) -> None:
+def initialize_database(
+    database_path: Path,
+) -> None:
     """KATANA用SQLiteデータベースを初期化する。"""
 
     database_path.parent.mkdir(
@@ -17,10 +19,17 @@ def initialize_database(database_path: Path) -> None:
     with sqlite3.connect(database_path) as connection:
         _create_schema_version_table(connection)
         _migrate_schema_version_table(connection)
+
         _create_stock_prices_table(connection)
+
         _create_market_bars_table(connection)
         _migrate_market_bars_table(connection)
         _create_market_bar_indexes(connection)
+
+        _create_update_runs_table(connection)
+        _migrate_update_runs_table(connection)
+        _create_update_run_indexes(connection)
+
         _update_schema_version(connection)
 
         connection.commit()
@@ -210,6 +219,220 @@ def _create_market_bar_indexes(
     )
 
 
+def _create_update_runs_table(
+    connection: sqlite3.Connection,
+) -> None:
+    """J-Quants自動更新の実行履歴テーブルを作成する。"""
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS update_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL UNIQUE,
+            process_name TEXT NOT NULL,
+            status TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            exit_code INTEGER,
+            requested_code_count INTEGER NOT NULL
+                DEFAULT 0,
+            updated_code_count INTEGER NOT NULL
+                DEFAULT 0,
+            skipped_code_count INTEGER NOT NULL
+                DEFAULT 0,
+            failed_code_count INTEGER NOT NULL
+                DEFAULT 0,
+            business_date_count INTEGER NOT NULL
+                DEFAULT 0,
+            request_count INTEGER NOT NULL
+                DEFAULT 0,
+            successful_request_count INTEGER NOT NULL
+                DEFAULT 0,
+            empty_request_count INTEGER NOT NULL
+                DEFAULT 0,
+            failed_request_count INTEGER NOT NULL
+                DEFAULT 0,
+            processed_bar_count INTEGER NOT NULL
+                DEFAULT 0,
+            error_message TEXT,
+            created_at TEXT NOT NULL
+                DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL
+                DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+
+def _migrate_update_runs_table(
+    connection: sqlite3.Connection,
+) -> None:
+    """既存update_runsへ不足している列を追加する。"""
+
+    column_definitions = {
+        "run_id": "TEXT",
+        "process_name": "TEXT",
+        "status": "TEXT",
+        "started_at": "TEXT",
+        "finished_at": "TEXT",
+        "exit_code": "INTEGER",
+        "requested_code_count": "INTEGER DEFAULT 0",
+        "updated_code_count": "INTEGER DEFAULT 0",
+        "skipped_code_count": "INTEGER DEFAULT 0",
+        "failed_code_count": "INTEGER DEFAULT 0",
+        "business_date_count": "INTEGER DEFAULT 0",
+        "request_count": "INTEGER DEFAULT 0",
+        "successful_request_count": "INTEGER DEFAULT 0",
+        "empty_request_count": "INTEGER DEFAULT 0",
+        "failed_request_count": "INTEGER DEFAULT 0",
+        "processed_bar_count": "INTEGER DEFAULT 0",
+        "error_message": "TEXT",
+        "created_at": "TEXT",
+        "updated_at": "TEXT",
+    }
+
+    for column_name, column_definition in column_definitions.items():
+        _add_column_if_missing(
+            connection=connection,
+            table_name="update_runs",
+            column_name=column_name,
+            column_definition=column_definition,
+        )
+
+    connection.execute(
+        """
+        UPDATE update_runs
+        SET requested_code_count = 0
+        WHERE requested_code_count IS NULL
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE update_runs
+        SET updated_code_count = 0
+        WHERE updated_code_count IS NULL
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE update_runs
+        SET skipped_code_count = 0
+        WHERE skipped_code_count IS NULL
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE update_runs
+        SET failed_code_count = 0
+        WHERE failed_code_count IS NULL
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE update_runs
+        SET business_date_count = 0
+        WHERE business_date_count IS NULL
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE update_runs
+        SET request_count = 0
+        WHERE request_count IS NULL
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE update_runs
+        SET successful_request_count = 0
+        WHERE successful_request_count IS NULL
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE update_runs
+        SET empty_request_count = 0
+        WHERE empty_request_count IS NULL
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE update_runs
+        SET failed_request_count = 0
+        WHERE failed_request_count IS NULL
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE update_runs
+        SET processed_bar_count = 0
+        WHERE processed_bar_count IS NULL
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE update_runs
+        SET created_at = CURRENT_TIMESTAMP
+        WHERE created_at IS NULL
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE update_runs
+        SET updated_at = CURRENT_TIMESTAMP
+        WHERE updated_at IS NULL
+        """
+    )
+
+
+def _create_update_run_indexes(
+    connection: sqlite3.Connection,
+) -> None:
+    """自動更新実行履歴用の検索インデックスを作成する。"""
+
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_update_runs_run_id
+        ON update_runs (
+            run_id
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_update_runs_started_at
+        ON update_runs (
+            started_at DESC
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_update_runs_status_started_at
+        ON update_runs (
+            status,
+            started_at DESC
+        )
+        """
+    )
+
+
 def _update_schema_version(
     connection: sqlite3.Connection,
 ) -> None:
@@ -265,7 +488,9 @@ def _add_column_if_missing(
 
     existing_columns = {
         str(row[1])
-        for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        for row in connection.execute(
+            f"PRAGMA table_info({table_name})"
+        ).fetchall()
     }
 
     if column_name in existing_columns:

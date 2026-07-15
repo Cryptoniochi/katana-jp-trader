@@ -1,0 +1,1 @@
+"""Project KATANAの監視・運用基盤。"""
