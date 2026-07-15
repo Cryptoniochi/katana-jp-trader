@@ -11,7 +11,7 @@ class Settings:
     """アプリケーション全体の設定。"""
 
     app_name: str = "Project KATANA"
-    version: str = "0.28.0"
+    version: str = "0.33.0"
 
     config_dir: Path = ROOT_DIR / "config"
     data_dir: Path = ROOT_DIR / "data"
@@ -22,7 +22,6 @@ class Settings:
 
     csv_dir: Path = ROOT_DIR / "data" / "csv"
     historical_csv_dir: Path = ROOT_DIR / "data" / "historical"
-
     database_path: Path = ROOT_DIR / "data" / "katana.db"
 
     def create_directories(self) -> None:

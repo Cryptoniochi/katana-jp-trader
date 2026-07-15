@@ -2,20 +2,18 @@
 
 import argparse
 from collections import Counter
-from datetime import datetime, time
+from datetime import datetime
 from pathlib import Path
 
 from app.database import initialize_database
 from app.logger import create_logger
 from app.market.bar_repository import MarketBarRepository
 from app.settings import settings
-from app.strategy.opening_range_breakout import (
-    OpeningRangeBreakoutStrategy,
-)
 from app.strategy.orb_diagnostics import (
     OrbDiagnosticService,
     OrbDiagnosticWriter,
 )
+from app.strategy.orb_profile import DEFAULT_ORB_PROFILE
 from app.watchlist import WatchlistError, load_watchlist
 
 DEFAULT_START_DATE = "2026-07-01"
@@ -36,29 +34,33 @@ def parse_arguments() -> argparse.Namespace:
         "--watchlist",
         type=Path,
         default=settings.watchlist_path,
+        help=(f"Watch Listのパス。既定値: {settings.watchlist_path}"),
     )
 
     parser.add_argument(
         "--codes",
         nargs="+",
         default=None,
+        help=("直接指定する銘柄コード。指定時はWatch Listより優先します。"),
     )
 
     parser.add_argument(
         "--start-date",
         default=DEFAULT_START_DATE,
+        help="開始日。形式: YYYY-MM-DD",
     )
 
     parser.add_argument(
         "--end-date",
         default=DEFAULT_END_DATE,
+        help="終了日。形式: YYYY-MM-DD",
     )
 
     return parser.parse_args()
 
 
 def parse_date_start(value: str) -> datetime:
-    """日付を開始日時へ変換する。"""
+    """日付を当日の開始日時へ変換する。"""
 
     try:
         return datetime.strptime(
@@ -70,7 +72,7 @@ def parse_date_start(value: str) -> datetime:
 
 
 def parse_date_end(value: str) -> datetime:
-    """日付を終了日時へ変換する。"""
+    """日付を当日の終了日時へ変換する。"""
 
     try:
         parsed = datetime.strptime(
@@ -91,13 +93,16 @@ def parse_date_end(value: str) -> datetime:
 def resolve_codes(
     command_codes: list[str] | None,
     watchlist_path: Path,
-) -> list[str]:
+) -> tuple[list[str], str]:
     """診断対象の銘柄を決定する。"""
 
     if command_codes:
-        return command_codes
+        return command_codes, "command"
 
-    return load_watchlist(watchlist_path)
+    return (
+        load_watchlist(watchlist_path),
+        str(watchlist_path),
+    )
 
 
 def main() -> None:
@@ -116,10 +121,11 @@ def main() -> None:
     logger = create_logger(settings.logs_dir)
 
     try:
-        codes = resolve_codes(
+        codes, code_source = resolve_codes(
             command_codes=arguments.codes,
             watchlist_path=arguments.watchlist,
         )
+
         start_at = parse_date_start(arguments.start_date)
         end_at = parse_date_end(arguments.end_date)
 
@@ -140,22 +146,7 @@ def main() -> None:
         if not prices:
             raise ValueError("対象期間の5分足がSQLiteにありません。")
 
-        strategy = OpeningRangeBreakoutStrategy(
-            quantity=100,
-            opening_range_end=time(9, 15),
-            stop_loss_rate=0.01,
-            take_profit_rate=0.02,
-            force_exit_time=time(14, 50),
-            commission=0.0,
-            slippage_rate=0.0005,
-            min_opening_range_volume=200_000,
-            min_breakout_volume=150_000,
-            breakout_volume_ratio=1.2,
-            min_price=500.0,
-            max_price=20_000.0,
-            min_opening_range_turnover=200_000_000.0,
-            min_breakout_turnover=100_000_000.0,
-        )
+        strategy = DEFAULT_ORB_PROFILE.create_strategy()
 
         report = OrbDiagnosticService(strategy).run(prices)
 
@@ -176,17 +167,39 @@ def main() -> None:
     summary_path = settings.reports_dir / f"orb_diagnostic_summary_{timestamp}.csv"
 
     writer = OrbDiagnosticWriter()
+
     writer.write_daily_results(
-        report,
-        daily_path,
+        report=report,
+        file_path=daily_path,
     )
     writer.write_symbol_summary(
-        report,
-        summary_path,
+        report=report,
+        file_path=summary_path,
     )
 
     reason_counts = Counter(
         result.rejection_reason or "trade_candidate" for result in report.daily_results
+    )
+
+    logger.info(
+        "診断対象を読み込みました。source=%s codes=%d",
+        code_source,
+        len(codes),
+    )
+
+    logger.info(
+        "ORB共通条件: opening_end=%s "
+        "opening_volume=%s opening_turnover=%s "
+        "breakout_volume=%s volume_ratio=%s "
+        "breakout_turnover=%s price_range=%s-%s",
+        strategy.opening_range_end,
+        strategy.min_opening_range_volume,
+        strategy.min_opening_range_turnover,
+        strategy.min_breakout_volume,
+        strategy.breakout_volume_ratio,
+        strategy.min_breakout_turnover,
+        strategy.min_price,
+        strategy.max_price,
     )
 
     logger.info(

@@ -15,6 +15,7 @@ from app.database import initialize_database
 from app.logger import create_logger
 from app.market.bar_repository import MarketBarRepository
 from app.settings import settings
+from app.strategy.orb_profile import DEFAULT_ORB_PROFILE
 from app.watchlist import WatchlistError, load_watchlist
 
 DEFAULT_START_DATE = "2026-07-01"
@@ -158,6 +159,7 @@ def main() -> None:
     initialize_database(settings.database_path)
 
     logger = create_logger(settings.logs_dir)
+    profile = DEFAULT_ORB_PROFILE
 
     try:
         codes, code_source = resolve_codes(
@@ -171,17 +173,17 @@ def main() -> None:
         optimizer = WatchlistOrbOptimizer(
             repository=MarketBarRepository(settings.database_path),
             engine=BacktestEngine(),
-            quantity=100,
-            force_exit_time=time(14, 50),
-            commission=0.0,
-            slippage_rate=0.0005,
-            min_opening_range_volume=200_000,
-            min_breakout_volume=150_000,
-            breakout_volume_ratio=1.2,
-            min_price=500.0,
-            max_price=20_000.0,
-            min_opening_range_turnover=200_000_000.0,
-            min_breakout_turnover=100_000_000.0,
+            quantity=profile.quantity,
+            force_exit_time=profile.force_exit_time,
+            commission=profile.commission,
+            slippage_rate=profile.slippage_rate,
+            min_opening_range_volume=(profile.min_opening_range_volume),
+            min_breakout_volume=(profile.min_breakout_volume),
+            breakout_volume_ratio=(profile.breakout_volume_ratio),
+            min_price=profile.min_price,
+            max_price=profile.max_price,
+            min_opening_range_turnover=(profile.min_opening_range_turnover),
+            min_breakout_turnover=(profile.min_breakout_turnover),
         )
 
         report = optimizer.run(
@@ -233,6 +235,20 @@ def main() -> None:
     )
 
     logger.info(
+        "最適化共通条件: opening_volume=%s "
+        "opening_turnover=%s breakout_volume=%s "
+        "volume_ratio=%s breakout_turnover=%s "
+        "price_range=%s-%s",
+        profile.min_opening_range_volume,
+        profile.min_opening_range_turnover,
+        profile.min_breakout_volume,
+        profile.breakout_volume_ratio,
+        profile.min_breakout_turnover,
+        profile.min_price,
+        profile.max_price,
+    )
+
+    logger.info(
         "ORB最適化を完了しました。start=%s end=%s combinations=%d",
         report.start_at,
         report.end_at,
@@ -281,7 +297,7 @@ def main() -> None:
         if best.result.trade_count == 0:
             logger.warning(
                 "全パラメータで取引が0件です。"
-                "対象期間、データ量、出来高条件を"
+                "対象期間、データ量、流動性条件を"
                 "確認してください。"
             )
 

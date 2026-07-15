@@ -1,0 +1,2 @@
+﻿code,entry_at,exit_at,exit_reason,buy_price,sell_price,quantity,gross_profit,commission,slippage_cost,total_cost,net_profit,return_rate
+9984,2026-07-14T10:20:00,2026-07-14T10:25:00,take_profit,6486.0,6550.86,100,6485.999999999967,0.0,651.8430000000001,651.8430000000001,5834.156999999967,0.899499999999995

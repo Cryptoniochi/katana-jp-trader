@@ -1,0 +1,21 @@
+﻿code,trading_date,bar_count,opening_bar_count,opening_range_high,opening_range_volume,opening_range_turnover,average_opening_volume,opening_range_available,opening_volume_passed,opening_turnover_passed,price_breakout_found,breakout_at,breakout_price,breakout_volume,breakout_volume_ratio,breakout_turnover,breakout_volume_passed,breakout_volume_ratio_passed,breakout_turnover_passed,price_range_passed,exit_available,trade_candidate,rejection_reason
+6758,2026-07-13,67,4,3384.0,1356000,4540074300.0,339000.0,True,True,True,False,,,,,,False,False,False,False,False,False,no_price_breakout
+6758,2026-07-14,67,4,3417.0,2543200,8610670800.0,635800.0,True,True,True,True,2026-07-14 10:30:00,3411.0,96200,0.1513054419628814,328138200.0,True,False,True,True,True,False,breakout_volume_ratio
+6758,2026-07-15,67,4,3390.0,2027700,6848197400.0,506925.0,True,True,True,False,,,,,,False,False,False,False,False,False,no_price_breakout
+7203,2026-07-13,67,4,2847.0,3476700,9802031350.0,869175.0,True,True,True,False,,,,,,False,False,False,False,False,False,no_price_breakout
+7203,2026-07-14,67,4,2848.0,5398800,15293830500.0,1349700.0,True,True,True,True,2026-07-14 09:30:00,2845.5,659800,0.4888493739349485,1877460900.0,True,False,True,True,True,False,breakout_volume_ratio
+7203,2026-07-15,67,4,2874.5,3530000,10131700300.0,882500.0,True,True,True,False,,,,,,False,False,False,False,False,False,no_price_breakout
+8035,2026-07-10,67,4,73130.0,980700,70955863000.0,245175.0,True,True,True,True,2026-07-10 14:45:00,73360.0,29800,0.12154583460793311,2186128000.0,False,False,True,False,True,False,breakout_volume
+8035,2026-07-13,67,4,74080.0,547700,40145867000.0,136925.0,True,True,True,True,2026-07-13 09:30:00,73440.0,53300,0.3892641957275881,3914352000.0,True,False,True,False,True,False,breakout_volume_ratio
+8035,2026-07-14,67,4,71550.0,814600,57360243000.0,203650.0,True,True,True,True,2026-07-14 10:10:00,71110.0,55900,0.27449054750797935,3975049000.0,True,False,True,False,True,False,breakout_volume_ratio
+8035,2026-07-15,67,4,72600.0,717900,51440704000.0,179475.0,True,True,True,True,2026-07-15 14:45:00,73900.0,48800,0.2719041649254771,3606320000.0,False,False,True,False,True,False,breakout_volume
+8306,2026-07-13,67,4,3564.0,11914200,42239188700.0,2978550.0,True,True,True,False,,,,,,False,False,False,False,False,False,no_price_breakout
+8306,2026-07-14,67,4,3552.0,13368800,47006354800.0,3342200.0,True,True,True,True,2026-07-14 14:45:00,3596.0,297600,0.08904314523367841,1070169600.0,True,False,True,True,True,False,breakout_volume_ratio
+8306,2026-07-15,67,4,3725.0,15193200,56468996200.0,3798300.0,True,True,True,True,2026-07-15 09:25:00,3719.0,845000,0.22246794618645183,3142555000.0,True,False,True,True,True,False,breakout_volume_ratio
+9432,2026-07-10,67,4,149.1,31190400,4643218220.0,7797600.0,True,True,True,False,,,,,,False,False,False,False,False,False,no_price_breakout
+9432,2026-07-13,67,4,149.2,23860300,3542659740.0,5965075.0,True,True,True,True,2026-07-13 12:45:00,149.2,2227800,0.37347392949795266,332387760.0,True,False,True,False,True,False,breakout_volume_ratio
+9432,2026-07-14,67,4,151.0,49812100,7482447870.0,12453025.0,True,True,True,True,2026-07-14 14:45:00,151.0,2623000,0.21063155337759298,396073000.0,True,False,True,False,True,False,breakout_volume_ratio
+9432,2026-07-15,67,4,151.0,55478500,8332562000.0,13869625.0,True,True,True,True,2026-07-15 10:15:00,150.9,1166200,0.08408302315311336,175979580.0,True,False,True,False,True,False,breakout_volume_ratio
+9984,2026-07-13,67,4,6542.0,9566000,61956005700.0,2391500.0,True,True,True,False,,,,,,False,False,False,False,False,False,no_price_breakout
+9984,2026-07-14,67,4,6276.0,7782000,47936651300.0,1945500.0,True,True,True,True,2026-07-14 10:20:00,6486.0,2029100,1.042970958622462,13160742600.0,True,True,True,True,True,True,
+9984,2026-07-15,67,4,6644.0,9202700,60047490400.0,2300675.0,True,True,True,True,2026-07-15 09:25:00,6613.0,1667200,0.7246568941723625,11025193600.0,True,False,True,True,True,False,breakout_volume_ratio

@@ -1,0 +1,7 @@
+﻿code,trading_day_count,opening_range_count,opening_volume_pass_count,opening_turnover_pass_count,price_breakout_count,breakout_volume_pass_count,breakout_volume_ratio_pass_count,breakout_turnover_pass_count,price_range_pass_count,exit_available_count,trade_candidate_count
+6758,3,3,3,3,1,1,0,1,1,1,0
+7203,3,3,3,3,1,1,0,1,1,1,0
+8035,4,4,4,4,4,2,0,4,0,4,0
+8306,3,3,3,3,2,2,0,2,2,2,0
+9432,4,4,4,4,3,3,0,3,0,3,0
+9984,3,3,3,3,2,2,1,2,2,2,1

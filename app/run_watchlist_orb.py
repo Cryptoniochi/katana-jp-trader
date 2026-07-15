@@ -1,7 +1,7 @@
 """Watch List全銘柄のSQLite ORBバックテストを実行する。"""
 
 import argparse
-from datetime import datetime, time
+from datetime import datetime
 from math import isinf
 from pathlib import Path
 
@@ -15,9 +15,7 @@ from app.database import initialize_database
 from app.logger import create_logger
 from app.market.bar_repository import MarketBarRepository
 from app.settings import settings
-from app.strategy.opening_range_breakout import (
-    OpeningRangeBreakoutStrategy,
-)
+from app.strategy.orb_profile import DEFAULT_ORB_PROFILE
 from app.watchlist import WatchlistError, load_watchlist
 
 DEFAULT_START_DATE = "2026-07-01"
@@ -149,22 +147,7 @@ def main() -> None:
         start_at = parse_date_start(arguments.start_date)
         end_at = parse_date_end(arguments.end_date)
 
-        strategy = OpeningRangeBreakoutStrategy(
-            quantity=100,
-            opening_range_end=time(9, 15),
-            stop_loss_rate=0.01,
-            take_profit_rate=0.02,
-            force_exit_time=time(14, 50),
-            commission=0.0,
-            slippage_rate=0.0005,
-            min_opening_range_volume=200_000,
-            min_breakout_volume=150_000,
-            breakout_volume_ratio=1.2,
-            min_price=500.0,
-            max_price=20_000.0,
-            min_opening_range_turnover=200_000_000.0,
-            min_breakout_turnover=100_000_000.0,
-        )
+        strategy = DEFAULT_ORB_PROFILE.create_strategy()
 
         service = WatchlistSqliteOrbBacktestService(
             repository=MarketBarRepository(settings.database_path),
@@ -211,6 +194,24 @@ def main() -> None:
         "Watch Listを読み込みました。source=%s codes=%d",
         code_source,
         len(codes),
+    )
+
+    logger.info(
+        "ORB共通条件: opening_end=%s stop=%.2f%% "
+        "target=%.2f%% opening_volume=%s "
+        "opening_turnover=%s breakout_volume=%s "
+        "volume_ratio=%s breakout_turnover=%s "
+        "price_range=%s-%s",
+        strategy.opening_range_end,
+        (strategy.stop_loss_rate or 0.0) * 100,
+        (strategy.take_profit_rate or 0.0) * 100,
+        strategy.min_opening_range_volume,
+        strategy.min_opening_range_turnover,
+        strategy.min_breakout_volume,
+        strategy.breakout_volume_ratio,
+        strategy.min_breakout_turnover,
+        strategy.min_price,
+        strategy.max_price,
     )
 
     logger.info(
