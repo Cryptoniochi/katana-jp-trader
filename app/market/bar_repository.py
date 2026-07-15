@@ -94,13 +94,8 @@ class MarketBarRepository:
     ) -> list[StockPrice]:
         """銘柄・時間軸・期間を指定して時間足を返す。"""
 
-        normalized_code = code.strip()
-
-        if not normalized_code:
-            raise ValueError("銘柄コードを指定してください。")
-
-        if interval_minutes <= 0:
-            raise ValueError("時間足の間隔は0より大きい必要があります。")
+        normalized_code = self._normalize_code(code)
+        self._validate_interval(interval_minutes)
 
         if start_at is not None and end_at is not None and start_at > end_at:
             raise ValueError("開始日時は終了日時以前にしてください。")
@@ -155,6 +150,64 @@ class MarketBarRepository:
             for row in rows
         ]
 
+    def latest_datetime(
+        self,
+        code: str,
+        interval_minutes: int,
+    ) -> datetime | None:
+        """指定銘柄・時間軸の最新保存日時を返す。"""
+
+        normalized_code = self._normalize_code(code)
+        self._validate_interval(interval_minutes)
+
+        with sqlite3.connect(self.database_path) as connection:
+            row = connection.execute(
+                """
+                SELECT MAX(traded_at)
+                FROM market_bars
+                WHERE code = ?
+                  AND interval_minutes = ?
+                """,
+                (
+                    normalized_code,
+                    interval_minutes,
+                ),
+            ).fetchone()
+
+        if row is None or row[0] is None:
+            return None
+
+        return datetime.fromisoformat(str(row[0]))
+
+    def earliest_datetime(
+        self,
+        code: str,
+        interval_minutes: int,
+    ) -> datetime | None:
+        """指定銘柄・時間軸の最古保存日時を返す。"""
+
+        normalized_code = self._normalize_code(code)
+        self._validate_interval(interval_minutes)
+
+        with sqlite3.connect(self.database_path) as connection:
+            row = connection.execute(
+                """
+                SELECT MIN(traded_at)
+                FROM market_bars
+                WHERE code = ?
+                  AND interval_minutes = ?
+                """,
+                (
+                    normalized_code,
+                    interval_minutes,
+                ),
+            ).fetchone()
+
+        if row is None or row[0] is None:
+            return None
+
+        return datetime.fromisoformat(str(row[0]))
+
     def count(
         self,
         code: str | None = None,
@@ -166,17 +219,11 @@ class MarketBarRepository:
         parameters: list[object] = []
 
         if code is not None:
-            normalized_code = code.strip()
-
-            if not normalized_code:
-                raise ValueError("銘柄コードを指定してください。")
-
             conditions.append("code = ?")
-            parameters.append(normalized_code)
+            parameters.append(self._normalize_code(code))
 
         if interval_minutes is not None:
-            if interval_minutes <= 0:
-                raise ValueError("時間足の間隔は0より大きい必要があります。")
+            self._validate_interval(interval_minutes)
 
             conditions.append("interval_minutes = ?")
             parameters.append(interval_minutes)
@@ -202,14 +249,36 @@ class MarketBarRepository:
         return int(result[0])
 
     @staticmethod
+    def _normalize_code(
+        code: str,
+    ) -> str:
+        """銘柄コードを検証して前後の空白を除く。"""
+
+        normalized_code = code.strip()
+
+        if not normalized_code:
+            raise ValueError("銘柄コードを指定してください。")
+
+        return normalized_code
+
+    @staticmethod
+    def _validate_interval(
+        interval_minutes: int,
+    ) -> None:
+        """時間足の間隔を検証する。"""
+
+        if interval_minutes <= 0:
+            raise ValueError("時間足の間隔は0より大きい必要があります。")
+
+    @classmethod
     def _validate_common_arguments(
+        cls,
         interval_minutes: int,
         data_source: str,
     ) -> None:
         """保存時の共通引数を検証する。"""
 
-        if interval_minutes <= 0:
-            raise ValueError("時間足の間隔は0より大きい必要があります。")
+        cls._validate_interval(interval_minutes)
 
         if not data_source.strip():
             raise ValueError("データソースを指定してください。")
