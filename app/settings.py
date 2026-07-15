@@ -11,7 +11,7 @@ class Settings:
     """アプリケーション全体の設定。"""
 
     app_name: str = "Project KATANA"
-    version: str = "0.33.0"
+    version: str = "0.35.0"
 
     config_dir: Path = ROOT_DIR / "config"
     data_dir: Path = ROOT_DIR / "data"
