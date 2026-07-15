@@ -3,7 +3,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def initialize_database(
@@ -29,6 +29,10 @@ def initialize_database(
         _create_update_runs_table(connection)
         _migrate_update_runs_table(connection)
         _create_update_run_indexes(connection)
+
+        _create_trade_signals_table(connection)
+        _migrate_trade_signals_table(connection)
+        _create_trade_signal_indexes(connection)
 
         _update_schema_version(connection)
 
@@ -299,85 +303,27 @@ def _migrate_update_runs_table(
             column_definition=column_definition,
         )
 
-    connection.execute(
-        """
-        UPDATE update_runs
-        SET requested_code_count = 0
-        WHERE requested_code_count IS NULL
-        """
+    count_columns = (
+        "requested_code_count",
+        "updated_code_count",
+        "skipped_code_count",
+        "failed_code_count",
+        "business_date_count",
+        "request_count",
+        "successful_request_count",
+        "empty_request_count",
+        "failed_request_count",
+        "processed_bar_count",
     )
 
-    connection.execute(
-        """
-        UPDATE update_runs
-        SET updated_code_count = 0
-        WHERE updated_code_count IS NULL
-        """
-    )
-
-    connection.execute(
-        """
-        UPDATE update_runs
-        SET skipped_code_count = 0
-        WHERE skipped_code_count IS NULL
-        """
-    )
-
-    connection.execute(
-        """
-        UPDATE update_runs
-        SET failed_code_count = 0
-        WHERE failed_code_count IS NULL
-        """
-    )
-
-    connection.execute(
-        """
-        UPDATE update_runs
-        SET business_date_count = 0
-        WHERE business_date_count IS NULL
-        """
-    )
-
-    connection.execute(
-        """
-        UPDATE update_runs
-        SET request_count = 0
-        WHERE request_count IS NULL
-        """
-    )
-
-    connection.execute(
-        """
-        UPDATE update_runs
-        SET successful_request_count = 0
-        WHERE successful_request_count IS NULL
-        """
-    )
-
-    connection.execute(
-        """
-        UPDATE update_runs
-        SET empty_request_count = 0
-        WHERE empty_request_count IS NULL
-        """
-    )
-
-    connection.execute(
-        """
-        UPDATE update_runs
-        SET failed_request_count = 0
-        WHERE failed_request_count IS NULL
-        """
-    )
-
-    connection.execute(
-        """
-        UPDATE update_runs
-        SET processed_bar_count = 0
-        WHERE processed_bar_count IS NULL
-        """
-    )
+    for column_name in count_columns:
+        connection.execute(
+            f"""
+            UPDATE update_runs
+            SET {column_name} = 0
+            WHERE {column_name} IS NULL
+            """
+        )
 
     connection.execute(
         """
@@ -428,6 +374,173 @@ def _create_update_run_indexes(
         ON update_runs (
             status,
             started_at DESC
+        )
+        """
+    )
+
+
+def _create_trade_signals_table(
+    connection: sqlite3.Connection,
+) -> None:
+    """売買シグナルを保存するテーブルを作成する。"""
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trade_signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_id TEXT NOT NULL UNIQUE,
+            code TEXT NOT NULL,
+            strategy_name TEXT NOT NULL,
+            action TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            signal_price REAL NOT NULL,
+            quantity INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            confidence REAL,
+            metadata_json TEXT NOT NULL
+                DEFAULT '{}',
+            status TEXT NOT NULL
+                DEFAULT 'pending',
+            processed_at TEXT,
+            process_note TEXT,
+            created_at TEXT NOT NULL
+                DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL
+                DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(
+                code,
+                strategy_name,
+                action,
+                generated_at
+            )
+        )
+        """
+    )
+
+
+def _migrate_trade_signals_table(
+    connection: sqlite3.Connection,
+) -> None:
+    """既存trade_signalsへ不足している列を追加する。"""
+
+    column_definitions = {
+        "signal_id": "TEXT",
+        "code": "TEXT",
+        "strategy_name": "TEXT",
+        "action": "TEXT",
+        "generated_at": "TEXT",
+        "signal_price": "REAL",
+        "quantity": "INTEGER",
+        "reason": "TEXT",
+        "confidence": "REAL",
+        "metadata_json": "TEXT DEFAULT '{}'",
+        "status": "TEXT DEFAULT 'pending'",
+        "processed_at": "TEXT",
+        "process_note": "TEXT",
+        "created_at": "TEXT",
+        "updated_at": "TEXT",
+    }
+
+    for column_name, column_definition in column_definitions.items():
+        _add_column_if_missing(
+            connection=connection,
+            table_name="trade_signals",
+            column_name=column_name,
+            column_definition=column_definition,
+        )
+
+    connection.execute(
+        """
+        UPDATE trade_signals
+        SET metadata_json = '{}'
+        WHERE metadata_json IS NULL
+           OR TRIM(metadata_json) = ''
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE trade_signals
+        SET status = 'pending'
+        WHERE status IS NULL
+           OR TRIM(status) = ''
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE trade_signals
+        SET created_at = CURRENT_TIMESTAMP
+        WHERE created_at IS NULL
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE trade_signals
+        SET updated_at = CURRENT_TIMESTAMP
+        WHERE updated_at IS NULL
+        """
+    )
+
+
+def _create_trade_signal_indexes(
+    connection: sqlite3.Connection,
+) -> None:
+    """売買シグナル検索用のインデックスを作成する。"""
+
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_trade_signals_signal_id
+        ON trade_signals (
+            signal_id
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_trade_signals_identity
+        ON trade_signals (
+            code,
+            strategy_name,
+            action,
+            generated_at
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_trade_signals_status_generated_at
+        ON trade_signals (
+            status,
+            generated_at DESC
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_trade_signals_code_generated_at
+        ON trade_signals (
+            code,
+            generated_at DESC
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_trade_signals_strategy_generated_at
+        ON trade_signals (
+            strategy_name,
+            generated_at DESC
         )
         """
     )
