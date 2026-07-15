@@ -97,12 +97,39 @@ class JQuantsBatchImportService:
         continue_on_error: bool = True,
         progress_callback: ProgressCallback | None = None,
     ) -> JQuantsBatchImportResult:
-        """複数銘柄・複数日の分足を取得・集約・保存する。"""
-
-        normalized_codes = self._normalize_codes(codes)
+        """カレンダー日単位で指定期間を取り込む。"""
 
         if start_date > end_date:
             raise ValueError("開始日は終了日以前にしてください。")
+
+        target_dates = self._create_date_range(
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        return self.run_dates(
+            codes=codes,
+            target_dates=target_dates,
+            interval_minutes=interval_minutes,
+            data_source=data_source,
+            continue_on_error=continue_on_error,
+            progress_callback=progress_callback,
+        )
+
+    def run_dates(
+        self,
+        codes: list[str],
+        target_dates: list[date],
+        *,
+        interval_minutes: int = 5,
+        data_source: str = "jquants",
+        continue_on_error: bool = True,
+        progress_callback: ProgressCallback | None = None,
+    ) -> JQuantsBatchImportResult:
+        """明示された日付だけを取り込む。"""
+
+        normalized_codes = self._normalize_codes(codes)
+        normalized_dates = sorted(set(target_dates))
 
         if interval_minutes <= 0:
             raise ValueError("時間足の間隔は0より大きい必要があります。")
@@ -110,12 +137,7 @@ class JQuantsBatchImportService:
         if not data_source.strip():
             raise ValueError("データソースを指定してください。")
 
-        target_dates = self._create_date_range(
-            start_date=start_date,
-            end_date=end_date,
-        )
-
-        total_requests = len(normalized_codes) * len(target_dates)
+        total_requests = len(normalized_codes) * len(normalized_dates)
 
         request_count = 0
         successful_request_count = 0
@@ -128,14 +150,14 @@ class JQuantsBatchImportService:
         failures: list[JQuantsImportFailure] = []
 
         for code in normalized_codes:
-            for target_date in target_dates:
+            for target_date in normalized_dates:
                 request_count += 1
                 current_minute_count = 0
 
                 try:
                     minute_prices = self.downloader.download(
                         code=code,
-                        date=target_date.strftime("%Y-%m-%d"),
+                        date=target_date.isoformat(),
                     )
 
                     current_minute_count = len(minute_prices)
@@ -148,14 +170,14 @@ class JQuantsBatchImportService:
 
                         aggregated_prices = self.aggregator.aggregate(
                             prices=minute_prices,
-                            interval_minutes=interval_minutes,
+                            interval_minutes=(interval_minutes),
                         )
 
                         five_minute_bar_count += len(aggregated_prices)
 
                         processed_bar_count += self.repository.save_all(
                             prices=aggregated_prices,
-                            interval_minutes=interval_minutes,
+                            interval_minutes=(interval_minutes),
                             data_source=data_source,
                         )
 
@@ -189,9 +211,9 @@ class JQuantsBatchImportService:
 
         return JQuantsBatchImportResult(
             code_count=len(normalized_codes),
-            date_count=len(target_dates),
+            date_count=len(normalized_dates),
             request_count=request_count,
-            successful_request_count=successful_request_count,
+            successful_request_count=(successful_request_count),
             empty_request_count=empty_request_count,
             failed_request_count=len(failures),
             minute_bar_count=minute_bar_count,
@@ -204,7 +226,7 @@ class JQuantsBatchImportService:
     def _normalize_codes(
         codes: list[str],
     ) -> list[str]:
-        """銘柄コードを検証し、重複を除いて返す。"""
+        """銘柄コードを検証して重複を除去する。"""
 
         if not codes:
             raise ValueError("銘柄コードを1件以上指定してください。")

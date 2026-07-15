@@ -22,13 +22,20 @@ class FakeBatchImporter:
     def __init__(self) -> None:
         """呼び出し履歴を初期化する。"""
 
-        self.calls: list[tuple[list[str], date, date, int, str, bool]] = []
+        self.calls: list[
+            tuple[
+                list[str],
+                list[date],
+                int,
+                str,
+                bool,
+            ]
+        ] = []
 
-    def run(
+    def run_dates(
         self,
         codes: list[str],
-        start_date: date,
-        end_date: date,
+        target_dates: list[date],
         *,
         interval_minutes: int = 5,
         data_source: str = "jquants",
@@ -42,8 +49,7 @@ class FakeBatchImporter:
         self.calls.append(
             (
                 codes,
-                start_date,
-                end_date,
+                target_dates,
                 interval_minutes,
                 data_source,
                 continue_on_error,
@@ -52,8 +58,8 @@ class FakeBatchImporter:
 
         return JQuantsBatchImportResult(
             code_count=len(codes),
-            date_count=(end_date - start_date).days + 1,
-            request_count=(len(codes) * ((end_date - start_date).days + 1)),
+            date_count=len(target_dates),
+            request_count=(len(codes) * len(target_dates)),
             successful_request_count=1,
             empty_request_count=0,
             failed_request_count=0,
@@ -99,7 +105,7 @@ def create_price(
 def test_service_starts_day_after_latest_date(
     tmp_path: Path,
 ) -> None:
-    """最新保存日の翌日から更新する。"""
+    """最新保存日の翌日以降の営業日だけ更新する。"""
 
     repository = create_repository(tmp_path)
     importer = FakeBatchImporter()
@@ -124,20 +130,19 @@ def test_service_starts_day_after_latest_date(
         codes=["7203"],
         initial_start_date=date(2026, 7, 1),
         end_date=date(2026, 7, 15),
+        business_dates=[
+            date(2026, 7, 13),
+            date(2026, 7, 14),
+            date(2026, 7, 15),
+        ],
     )
 
     assert len(importer.calls) == 1
     assert importer.calls[0][0] == ["7203"]
-    assert importer.calls[0][1] == date(
-        2026,
-        7,
-        14,
-    )
-    assert importer.calls[0][2] == date(
-        2026,
-        7,
-        15,
-    )
+    assert importer.calls[0][1] == [
+        date(2026, 7, 14),
+        date(2026, 7, 15),
+    ]
 
     code_result = result.code_results[0]
 
@@ -151,13 +156,18 @@ def test_service_starts_day_after_latest_date(
         7,
         14,
     )
+    assert code_result.end_date == date(
+        2026,
+        7,
+        15,
+    )
     assert not code_result.skipped
 
 
 def test_service_uses_initial_date_without_saved_data(
     tmp_path: Path,
 ) -> None:
-    """未保存銘柄は初回開始日から取得する。"""
+    """未保存銘柄は初回開始日以降の営業日を取得する。"""
 
     repository = create_repository(tmp_path)
     importer = FakeBatchImporter()
@@ -171,18 +181,18 @@ def test_service_uses_initial_date_without_saved_data(
         codes=["8306"],
         initial_start_date=date(2026, 7, 1),
         end_date=date(2026, 7, 3),
+        business_dates=[
+            date(2026, 7, 1),
+            date(2026, 7, 2),
+            date(2026, 7, 3),
+        ],
     )
 
-    assert importer.calls[0][1] == date(
-        2026,
-        7,
-        1,
-    )
-    assert importer.calls[0][2] == date(
-        2026,
-        7,
-        3,
-    )
+    assert importer.calls[0][1] == [
+        date(2026, 7, 1),
+        date(2026, 7, 2),
+        date(2026, 7, 3),
+    ]
 
     assert result.code_results[0].previous_latest_date is None
 
@@ -213,6 +223,11 @@ def test_service_skips_up_to_date_symbol(
         codes=["7203"],
         initial_start_date=date(2026, 7, 1),
         end_date=date(2026, 7, 15),
+        business_dates=[
+            date(2026, 7, 13),
+            date(2026, 7, 14),
+            date(2026, 7, 15),
+        ],
     )
 
     assert importer.calls == []
@@ -225,7 +240,7 @@ def test_service_skips_up_to_date_symbol(
 def test_service_handles_different_latest_dates(
     tmp_path: Path,
 ) -> None:
-    """銘柄ごとの最新保存日に応じて開始日を変える。"""
+    """銘柄ごとの最新保存日に応じて営業日を絞る。"""
 
     repository = create_repository(tmp_path)
     importer = FakeBatchImporter()
@@ -252,19 +267,25 @@ def test_service_handles_different_latest_dates(
         codes=["7203", "8306"],
         initial_start_date=date(2026, 7, 1),
         end_date=date(2026, 7, 15),
+        business_dates=[
+            date(2026, 7, 13),
+            date(2026, 7, 14),
+            date(2026, 7, 15),
+        ],
     )
 
     assert len(importer.calls) == 2
-    assert importer.calls[0][1] == date(
-        2026,
-        7,
-        14,
-    )
-    assert importer.calls[1][1] == date(
-        2026,
-        7,
-        15,
-    )
+
+    assert importer.calls[0][0] == ["7203"]
+    assert importer.calls[0][1] == [
+        date(2026, 7, 14),
+        date(2026, 7, 15),
+    ]
+
+    assert importer.calls[1][0] == ["8306"]
+    assert importer.calls[1][1] == [
+        date(2026, 7, 15),
+    ]
 
     assert result.code_count == 2
     assert result.updated_code_count == 2
@@ -286,6 +307,9 @@ def test_service_aggregates_result_counts(
         codes=["7203", "8306"],
         initial_start_date=date(2026, 7, 13),
         end_date=date(2026, 7, 13),
+        business_dates=[
+            date(2026, 7, 13),
+        ],
     )
 
     assert result.request_count == 2
@@ -310,10 +334,67 @@ def test_service_removes_duplicate_codes(
         codes=["7203", "7203"],
         initial_start_date=date(2026, 7, 13),
         end_date=date(2026, 7, 13),
+        business_dates=[
+            date(2026, 7, 13),
+        ],
     )
 
     assert result.code_count == 1
     assert len(importer.calls) == 1
+
+
+def test_service_excludes_non_business_dates(
+    tmp_path: Path,
+) -> None:
+    """営業日一覧に含まれない日は取込対象にしない。"""
+
+    repository = create_repository(tmp_path)
+    importer = FakeBatchImporter()
+
+    IncrementalMarketUpdateService(
+        repository=repository,
+        batch_importer=importer,
+    ).run(
+        codes=["7203"],
+        initial_start_date=date(2026, 7, 10),
+        end_date=date(2026, 7, 15),
+        business_dates=[
+            date(2026, 7, 10),
+            date(2026, 7, 13),
+            date(2026, 7, 14),
+            date(2026, 7, 15),
+        ],
+    )
+
+    assert importer.calls[0][1] == [
+        date(2026, 7, 10),
+        date(2026, 7, 13),
+        date(2026, 7, 14),
+        date(2026, 7, 15),
+    ]
+
+
+def test_service_skips_when_business_date_list_is_empty(
+    tmp_path: Path,
+) -> None:
+    """営業日が0件ならAPI取得せずスキップする。"""
+
+    repository = create_repository(tmp_path)
+    importer = FakeBatchImporter()
+
+    result = IncrementalMarketUpdateService(
+        repository=repository,
+        batch_importer=importer,
+    ).run(
+        codes=["7203"],
+        initial_start_date=date(2026, 7, 11),
+        end_date=date(2026, 7, 12),
+        business_dates=[],
+    )
+
+    assert importer.calls == []
+    assert result.skipped_code_count == 1
+    assert result.request_count == 0
 
 
 @pytest.mark.parametrize(
@@ -359,4 +440,5 @@ def test_service_rejects_invalid_arguments(
             codes=codes,
             initial_start_date=initial_start_date,
             end_date=end_date,
+            business_dates=[],
         )

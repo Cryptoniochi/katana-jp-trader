@@ -13,18 +13,17 @@ from app.market.jquants_batch_import import (
 class BatchImportRunner(Protocol):
     """一括取込サービスが満たすインターフェース。"""
 
-    def run(
+    def run_dates(
         self,
         codes: list[str],
-        start_date: date,
-        end_date: date,
+        target_dates: list[date],
         *,
         interval_minutes: int = 5,
         data_source: str = "jquants",
         continue_on_error: bool = True,
         progress_callback: object | None = None,
     ) -> JQuantsBatchImportResult:
-        """指定した銘柄・期間を取り込む。"""
+        """指定した銘柄・営業日を取り込む。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,29 +62,29 @@ class IncrementalMarketUpdateResult:
     def updated_code_count(self) -> int:
         """API取得を実行した銘柄数を返す。"""
 
-        return sum(1 for result in self.code_results if not result.skipped)
+        return sum(not result.skipped for result in self.code_results)
 
     @property
     def skipped_code_count(self) -> int:
-        """更新不要でスキップした銘柄数を返す。"""
+        """更新不要だった銘柄数を返す。"""
 
-        return sum(1 for result in self.code_results if result.skipped)
+        return sum(result.skipped for result in self.code_results)
 
     @property
     def request_count(self) -> int:
-        """APIリクエスト総数を返す。"""
+        """分足APIリクエスト総数を返す。"""
 
         return sum(result.request_count for result in self.code_results)
 
     @property
     def successful_request_count(self) -> int:
-        """データ取得に成功したリクエスト総数を返す。"""
+        """成功したリクエスト総数を返す。"""
 
         return sum(result.successful_request_count for result in self.code_results)
 
     @property
     def empty_request_count(self) -> int:
-        """データ0件だったリクエスト総数を返す。"""
+        """0件だったリクエスト総数を返す。"""
 
         return sum(result.empty_request_count for result in self.code_results)
 
@@ -109,13 +108,13 @@ class IncrementalMarketUpdateResult:
 
     @property
     def processed_bar_count(self) -> int:
-        """SQLiteへ処理した時間足総数を返す。"""
+        """SQLiteへ処理した足数を返す。"""
 
         return sum(result.processed_bar_count for result in self.code_results)
 
 
 class IncrementalMarketUpdateService:
-    """銘柄ごとの最新保存日を基準に差分更新する。"""
+    """営業日のうち不足している期間だけを更新する。"""
 
     def __init__(
         self,
@@ -133,11 +132,12 @@ class IncrementalMarketUpdateService:
         initial_start_date: date,
         end_date: date,
         *,
+        business_dates: list[date] | None = None,
         interval_minutes: int = 5,
         data_source: str = "jquants",
         continue_on_error: bool = True,
     ) -> IncrementalMarketUpdateResult:
-        """銘柄ごとに不足期間だけを取得する。"""
+        """銘柄ごとに不足している営業日だけを取得する。"""
 
         normalized_codes = self._normalize_codes(codes)
 
@@ -149,6 +149,21 @@ class IncrementalMarketUpdateService:
 
         if not data_source.strip():
             raise ValueError("データソースを指定してください。")
+
+        available_business_dates = (
+            sorted(set(business_dates))
+            if business_dates is not None
+            else self._create_date_range(
+                initial_start_date,
+                end_date,
+            )
+        )
+
+        available_business_dates = [
+            target_date
+            for target_date in available_business_dates
+            if initial_start_date <= target_date <= end_date
+        ]
 
         code_results: list[IncrementalCodeUpdateResult] = []
 
@@ -162,34 +177,31 @@ class IncrementalMarketUpdateService:
                 latest_datetime.date() if latest_datetime is not None else None
             )
 
-            if previous_latest_date is None:
-                update_start_date = initial_start_date
-            else:
-                update_start_date = previous_latest_date + timedelta(days=1)
+            minimum_date = (
+                initial_start_date
+                if previous_latest_date is None
+                else previous_latest_date + timedelta(days=1)
+            )
 
-            if update_start_date > end_date:
+            target_dates = [
+                target_date
+                for target_date in available_business_dates
+                if target_date >= minimum_date
+            ]
+
+            if not target_dates:
                 code_results.append(
-                    IncrementalCodeUpdateResult(
+                    self._create_skipped_result(
                         code=code,
-                        start_date=None,
                         end_date=end_date,
-                        previous_latest_date=previous_latest_date,
-                        skipped=True,
-                        request_count=0,
-                        successful_request_count=0,
-                        empty_request_count=0,
-                        failed_request_count=0,
-                        minute_bar_count=0,
-                        five_minute_bar_count=0,
-                        processed_bar_count=0,
+                        previous_latest_date=(previous_latest_date),
                     )
                 )
                 continue
 
-            batch_result = self.batch_importer.run(
+            batch_result = self.batch_importer.run_dates(
                 codes=[code],
-                start_date=update_start_date,
-                end_date=end_date,
+                target_dates=target_dates,
                 interval_minutes=interval_minutes,
                 data_source=data_source,
                 continue_on_error=continue_on_error,
@@ -198,11 +210,11 @@ class IncrementalMarketUpdateService:
             code_results.append(
                 IncrementalCodeUpdateResult(
                     code=code,
-                    start_date=update_start_date,
-                    end_date=end_date,
-                    previous_latest_date=previous_latest_date,
+                    start_date=target_dates[0],
+                    end_date=target_dates[-1],
+                    previous_latest_date=(previous_latest_date),
                     skipped=False,
-                    request_count=batch_result.request_count,
+                    request_count=(batch_result.request_count),
                     successful_request_count=(batch_result.successful_request_count),
                     empty_request_count=(batch_result.empty_request_count),
                     failed_request_count=(batch_result.failed_request_count),
@@ -215,10 +227,33 @@ class IncrementalMarketUpdateService:
         return IncrementalMarketUpdateResult(code_results=code_results)
 
     @staticmethod
+    def _create_skipped_result(
+        code: str,
+        end_date: date,
+        previous_latest_date: date | None,
+    ) -> IncrementalCodeUpdateResult:
+        """更新不要の結果を作成する。"""
+
+        return IncrementalCodeUpdateResult(
+            code=code,
+            start_date=None,
+            end_date=end_date,
+            previous_latest_date=previous_latest_date,
+            skipped=True,
+            request_count=0,
+            successful_request_count=0,
+            empty_request_count=0,
+            failed_request_count=0,
+            minute_bar_count=0,
+            five_minute_bar_count=0,
+            processed_bar_count=0,
+        )
+
+    @staticmethod
     def _normalize_codes(
         codes: list[str],
     ) -> list[str]:
-        """銘柄コードを検証し、重複を除去する。"""
+        """銘柄コードを検証して重複を除去する。"""
 
         if not codes:
             raise ValueError("銘柄コードを1件以上指定してください。")
@@ -238,3 +273,14 @@ class IncrementalMarketUpdateService:
                 normalized_codes.append(normalized)
 
         return normalized_codes
+
+    @staticmethod
+    def _create_date_range(
+        start_date: date,
+        end_date: date,
+    ) -> list[date]:
+        """開始日から終了日までの日付一覧を返す。"""
+
+        date_count = (end_date - start_date).days
+
+        return [start_date + timedelta(days=offset) for offset in range(date_count + 1)]
