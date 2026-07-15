@@ -118,13 +118,18 @@ class ScheduledUpdateResult:
     def failed_request_count(self) -> int:
         """失敗したAPIリクエスト数を返す。"""
 
-        return self.history_result.failed_request_count
+        return (
+            self.history_result
+            .failed_request_count
+        )
 
     @property
     def is_successful(self) -> bool:
         """取得失敗がなかったか返す。"""
 
-        return self.failed_request_count == 0
+        return (
+            self.failed_request_count == 0
+        )
 
 
 def parse_arguments(
@@ -296,7 +301,9 @@ def parse_arguments(
         help="取得失敗が発生した時点で処理を停止します。",
     )
 
-    return parser.parse_args(arguments)
+    return parser.parse_args(
+        arguments
+    )
 
 
 def resolve_target_end_date(
@@ -307,7 +314,9 @@ def resolve_target_end_date(
     """CLI指定値または実行日から更新終了日を決定する。"""
 
     if value is not None:
-        return parse_date(value)
+        return parse_date(
+            value
+        )
 
     return today or date.today()
 
@@ -315,7 +324,9 @@ def resolve_target_end_date(
 def merge_history_results(
     *,
     plan: IncrementalUpdatePlan,
-    imported_results: Sequence[HistoryImportResult],
+    imported_results: Sequence[
+        HistoryImportResult
+    ],
 ) -> HistoryImportResult:
     """銘柄ごとの取込結果を1つの実行結果へ統合する。"""
 
@@ -324,13 +335,22 @@ def merge_history_results(
         HistorySymbolResult,
     ] = {}
 
-    failures: list[HistoryImportFailure] = []
+    failures: list[
+        HistoryImportFailure
+    ] = []
 
     for imported_result in imported_results:
-        failures.extend(imported_result.failures)
+        failures.extend(
+            imported_result.failures
+        )
 
-        for symbol_result in imported_result.code_results:
-            if symbol_result.code in symbol_results_by_code:
+        for symbol_result in (
+            imported_result.code_results
+        ):
+            if (
+                symbol_result.code
+                in symbol_results_by_code
+            ):
                 raise ValueError(
                     "同一銘柄の履歴取込結果が"
                     "複数回登録されています。 "
@@ -346,8 +366,10 @@ def merge_history_results(
     ] = []
 
     for task in plan.tasks:
-        symbol_result = symbol_results_by_code.get(
-            task.code
+        symbol_result = (
+            symbol_results_by_code.get(
+                task.code
+            )
         )
 
         if symbol_result is None:
@@ -369,10 +391,45 @@ def merge_history_results(
         )
 
     return HistoryImportResult(
-        start_date=plan.initial_start_date,
-        end_date=plan.target_end_date,
-        code_results=ordered_symbol_results,
+        start_date=(
+            plan.initial_start_date
+        ),
+        end_date=(
+            plan.target_end_date
+        ),
+        code_results=(
+            ordered_symbol_results
+        ),
         failures=failures,
+    )
+
+
+def reconcile_resolved_failures(
+    *,
+    state_repository: HistoryStateRepository,
+    code: str,
+    resolved_through_date: date,
+) -> None:
+    """差分更新で解決済みとなった古い失敗状態を整理する。"""
+
+    current_state = (
+        state_repository.load()
+    )
+
+    reconciled_state = (
+        current_state.clear_failures_through(
+            code=code,
+            resolved_through_date=(
+                resolved_through_date
+            ),
+        )
+    )
+
+    if reconciled_state is current_state:
+        return
+
+    state_repository.save(
+        reconciled_state
     )
 
 
@@ -386,11 +443,19 @@ def run_incremental_update(
     continue_on_error: bool,
     repository: MarketBarRepository,
     calendar_reader: TradingCalendarReader,
-    state_repository: HistoryStateRepository | None = None,
+    state_repository: (
+        HistoryStateRepository | None
+    ) = None,
     retry_policy: RetryPolicy | None = None,
-    batch_importer: HistoricalBatchImporter | None = None,
-    retry_sleeper: Callable[[float], None] | None = None,
-    progress_callback: ProgressCallback | None = None,
+    batch_importer: (
+        HistoricalBatchImporter | None
+    ) = None,
+    retry_sleeper: (
+        Callable[[float], None] | None
+    ) = None,
+    progress_callback: (
+        ProgressCallback | None
+    ) = None,
     report_path: Path | None = None,
     today: date | None = None,
 ) -> ScheduledUpdateResult:
@@ -403,9 +468,15 @@ def run_incremental_update(
 
     plan = planner.create_plan(
         codes=codes,
-        initial_start_date=initial_start_date,
-        target_end_date=target_end_date,
-        interval_minutes=INTERVAL_MINUTES,
+        initial_start_date=(
+            initial_start_date
+        ),
+        target_end_date=(
+            target_end_date
+        ),
+        interval_minutes=(
+            INTERVAL_MINUTES
+        ),
         today=today,
     )
 
@@ -426,50 +497,92 @@ def run_incremental_update(
             or update_end_date is None
         ):
             raise RuntimeError(
-                "更新対象タスクに有効な期間がありません。 "
+                "更新対象タスクに有効な"
+                "期間がありません。 "
                 f"code={task.code}"
             )
 
         imported_result = run_history_import(
-            codes=[task.code],
-            start_date=update_start_date,
-            end_date=update_end_date,
+            codes=[
+                task.code
+            ],
+            start_date=(
+                update_start_date
+            ),
+            end_date=(
+                update_end_date
+            ),
             chunk_business_days=(
                 chunk_business_days
             ),
             request_interval_seconds=(
                 request_interval_seconds
             ),
-            continue_on_error=continue_on_error,
+            continue_on_error=(
+                continue_on_error
+            ),
             retry_policy=retry_policy,
-            calendar_reader=calendar_reader,
-            batch_importer=batch_importer,
-            state_repository=state_repository,
-            retry_sleeper=retry_sleeper,
-            progress_callback=progress_callback,
+            calendar_reader=(
+                calendar_reader
+            ),
+            batch_importer=(
+                batch_importer
+            ),
+            state_repository=(
+                state_repository
+            ),
+            retry_sleeper=(
+                retry_sleeper
+            ),
+            progress_callback=(
+                progress_callback
+            ),
         )
 
         imported_results.append(
             imported_result
         )
 
+        if (
+            state_repository is not None
+            and imported_result.failed_request_count
+            == 0
+        ):
+            reconcile_resolved_failures(
+                state_repository=(
+                    state_repository
+                ),
+                code=task.code,
+                resolved_through_date=(
+                    update_end_date
+                ),
+            )
+
     history_result = merge_history_results(
         plan=plan,
-        imported_results=imported_results,
+        imported_results=(
+            imported_results
+        ),
     )
 
-    saved_report_path: Path | None = None
+    saved_report_path: (
+        Path | None
+    ) = None
 
     if report_path is not None:
-        saved_report_path = write_csv_report(
-            result=history_result,
-            output_path=report_path,
+        saved_report_path = (
+            write_csv_report(
+                result=history_result,
+                output_path=report_path,
+            )
         )
 
     return ScheduledUpdateResult(
         plan=plan,
         history_result=history_result,
-        report_path=saved_report_path,
+        report_path=(
+            saved_report_path
+        ),
     )
 
 
@@ -484,11 +597,19 @@ def run_locked_incremental_update(
     continue_on_error: bool,
     repository: MarketBarRepository,
     calendar_reader: TradingCalendarReader,
-    state_repository: HistoryStateRepository | None = None,
+    state_repository: (
+        HistoryStateRepository | None
+    ) = None,
     retry_policy: RetryPolicy | None = None,
-    batch_importer: HistoricalBatchImporter | None = None,
-    retry_sleeper: Callable[[float], None] | None = None,
-    progress_callback: ProgressCallback | None = None,
+    batch_importer: (
+        HistoricalBatchImporter | None
+    ) = None,
+    retry_sleeper: (
+        Callable[[float], None] | None
+    ) = None,
+    progress_callback: (
+        ProgressCallback | None
+    ) = None,
     report_path: Path | None = None,
     today: date | None = None,
 ) -> ScheduledUpdateResult:
@@ -497,23 +618,43 @@ def run_locked_incremental_update(
     with process_lock:
         return run_incremental_update(
             codes=codes,
-            initial_start_date=initial_start_date,
-            target_end_date=target_end_date,
+            initial_start_date=(
+                initial_start_date
+            ),
+            target_end_date=(
+                target_end_date
+            ),
             chunk_business_days=(
                 chunk_business_days
             ),
             request_interval_seconds=(
                 request_interval_seconds
             ),
-            continue_on_error=continue_on_error,
+            continue_on_error=(
+                continue_on_error
+            ),
             repository=repository,
-            calendar_reader=calendar_reader,
-            state_repository=state_repository,
-            retry_policy=retry_policy,
-            batch_importer=batch_importer,
-            retry_sleeper=retry_sleeper,
-            progress_callback=progress_callback,
-            report_path=report_path,
+            calendar_reader=(
+                calendar_reader
+            ),
+            state_repository=(
+                state_repository
+            ),
+            retry_policy=(
+                retry_policy
+            ),
+            batch_importer=(
+                batch_importer
+            ),
+            retry_sleeper=(
+                retry_sleeper
+            ),
+            progress_callback=(
+                progress_callback
+            ),
+            report_path=(
+                report_path
+            ),
             today=today,
         )
 
@@ -546,10 +687,22 @@ def log_update_result(
         result.skipped_code_count,
         result.plan.total_business_date_count,
         result.history_result.request_count,
-        result.history_result.successful_request_count,
-        result.history_result.empty_request_count,
-        result.history_result.failed_request_count,
-        result.history_result.processed_bar_count,
+        (
+            result.history_result
+            .successful_request_count
+        ),
+        (
+            result.history_result
+            .empty_request_count
+        ),
+        (
+            result.history_result
+            .failed_request_count
+        ),
+        (
+            result.history_result
+            .processed_bar_count
+        ),
     )
 
     for task in result.plan.tasks:
@@ -569,7 +722,8 @@ def log_update_result(
 
     if result.report_path is not None:
         logger.info(
-            "J-Quants差分更新CSVレポート: path=%s",
+            "J-Quants差分更新CSVレポート: "
+            "path=%s",
             result.report_path,
         )
 
@@ -583,15 +737,22 @@ def main(
         arguments
     )
 
-    print("=" * 50)
+    print(
+        "=" * 50
+    )
     print(
         f"{settings.app_name} "
         "- J-Quants Incremental Update"
     )
-    print(f"Version : {settings.version}")
-    print("=" * 50)
+    print(
+        f"Version : {settings.version}"
+    )
+    print(
+        "=" * 50
+    )
 
     settings.create_directories()
+
     initialize_database(
         settings.database_path
     )
@@ -611,33 +772,40 @@ def main(
         )
 
         initial_start_date = parse_date(
-            parsed_arguments.initial_start_date
+            parsed_arguments
+            .initial_start_date
         )
 
         target_end_date = (
             resolve_target_end_date(
-                parsed_arguments.target_end_date
+                parsed_arguments
+                .target_end_date
             )
         )
 
         retry_policy = create_retry_policy(
             max_attempts=(
-                parsed_arguments.retry_max_attempts
+                parsed_arguments
+                .retry_max_attempts
             ),
             initial_delay_seconds=(
-                parsed_arguments.retry_initial_delay
+                parsed_arguments
+                .retry_initial_delay
             ),
             backoff_multiplier=(
-                parsed_arguments.retry_backoff
+                parsed_arguments
+                .retry_backoff
             ),
             maximum_delay_seconds=(
-                parsed_arguments.retry_max_delay
+                parsed_arguments
+                .retry_max_delay
             ),
         )
 
         state_repository = (
             HistoryStateRepository(
-                parsed_arguments.state_file
+                parsed_arguments
+                .state_file
             )
         )
 
@@ -645,9 +813,11 @@ def main(
             state_repository.reset()
 
             logger.info(
-                "差分更新状態をリセットしました。 "
+                "差分更新状態を"
+                "リセットしました。 "
                 "path=%s",
-                parsed_arguments.state_file,
+                parsed_arguments
+                .state_file,
             )
 
         repository = MarketBarRepository(
@@ -659,12 +829,16 @@ def main(
         )
 
         process_lock = ProcessLock(
-            file_path=parsed_arguments.lock_file,
+            file_path=(
+                parsed_arguments
+                .lock_file
+            ),
             process_name=(
                 "jquants-incremental-update"
             ),
             stale_after_seconds=(
-                parsed_arguments.lock_stale_seconds
+                parsed_arguments
+                .lock_stale_seconds
             ),
         )
 
@@ -685,34 +859,59 @@ def main(
             len(codes),
             initial_start_date,
             target_end_date,
-            parsed_arguments.chunk_business_days,
-            parsed_arguments.request_interval,
+            (
+                parsed_arguments
+                .chunk_business_days
+            ),
+            (
+                parsed_arguments
+                .request_interval
+            ),
             parsed_arguments.state_file,
             parsed_arguments.lock_file,
         )
 
-        result = run_locked_incremental_update(
-            process_lock=process_lock,
-            codes=codes,
-            initial_start_date=initial_start_date,
-            target_end_date=target_end_date,
-            chunk_business_days=(
-                parsed_arguments.chunk_business_days
-            ),
-            request_interval_seconds=(
-                parsed_arguments.request_interval
-            ),
-            continue_on_error=(
-                not parsed_arguments.stop_on_error
-            ),
-            repository=repository,
-            calendar_reader=calendar_reader,
-            state_repository=state_repository,
-            retry_policy=retry_policy,
-            progress_callback=(
-                create_progress_callback(logger)
-            ),
-            report_path=report_path,
+        result = (
+            run_locked_incremental_update(
+                process_lock=process_lock,
+                codes=codes,
+                initial_start_date=(
+                    initial_start_date
+                ),
+                target_end_date=(
+                    target_end_date
+                ),
+                chunk_business_days=(
+                    parsed_arguments
+                    .chunk_business_days
+                ),
+                request_interval_seconds=(
+                    parsed_arguments
+                    .request_interval
+                ),
+                continue_on_error=(
+                    not parsed_arguments
+                    .stop_on_error
+                ),
+                repository=repository,
+                calendar_reader=(
+                    calendar_reader
+                ),
+                state_repository=(
+                    state_repository
+                ),
+                retry_policy=(
+                    retry_policy
+                ),
+                progress_callback=(
+                    create_progress_callback(
+                        logger
+                    )
+                ),
+                report_path=(
+                    report_path
+                ),
+            )
         )
 
         log_update_result(
@@ -726,7 +925,8 @@ def main(
 
     except AlreadyLockedError as error:
         logger.warning(
-            "J-Quants差分更新を開始しませんでした。 "
+            "J-Quants差分更新を"
+            "開始しませんでした。 "
             "既に別プロセスが実行中です: %s",
             error,
         )
@@ -745,7 +945,8 @@ def main(
         WatchlistError,
     ) as error:
         logger.error(
-            "J-Quants差分更新を実行できません: %s",
+            "J-Quants差分更新を"
+            "実行できません: %s",
             error,
         )
 
@@ -753,4 +954,6 @@ def main(
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(
+        main()
+    )
