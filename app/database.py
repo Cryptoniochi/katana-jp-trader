@@ -3,7 +3,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def initialize_database(
@@ -41,6 +41,10 @@ def initialize_database(
         _create_trade_orders_table(connection)
         _migrate_trade_orders_table(connection)
         _create_trade_order_indexes(connection)
+
+        _create_scheduled_run_states_table(connection)
+        _migrate_scheduled_run_states_table(connection)
+        _create_scheduled_run_state_indexes(connection)
 
         _update_schema_version(connection)
 
@@ -711,6 +715,107 @@ def _create_trade_order_indexes(
             idx_trade_orders_broker_order_id
         ON trade_orders (
             broker_order_id
+        )
+        """
+    )
+
+
+def _create_scheduled_run_states_table(
+    connection: sqlite3.Connection,
+) -> None:
+    """定刻処理の完了状態を保存するテーブルを作成する。"""
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scheduled_run_states (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trading_date TEXT NOT NULL,
+            process_name TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+                DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL
+                DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(
+                trading_date,
+                process_name
+            )
+        )
+        """
+    )
+
+
+def _migrate_scheduled_run_states_table(
+    connection: sqlite3.Connection,
+) -> None:
+    """既存scheduled_run_statesへ不足列を追加する。"""
+
+    column_definitions = {
+        "trading_date": "TEXT",
+        "process_name": "TEXT",
+        "completed_at": "TEXT",
+        "created_at": "TEXT",
+        "updated_at": "TEXT",
+    }
+
+    for column_name, column_definition in column_definitions.items():
+        _add_column_if_missing(
+            connection=connection,
+            table_name="scheduled_run_states",
+            column_name=column_name,
+            column_definition=column_definition,
+        )
+
+    connection.execute(
+        """
+        UPDATE scheduled_run_states
+        SET created_at = CURRENT_TIMESTAMP
+        WHERE created_at IS NULL
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE scheduled_run_states
+        SET updated_at = CURRENT_TIMESTAMP
+        WHERE updated_at IS NULL
+        """
+    )
+
+
+def _create_scheduled_run_state_indexes(
+    connection: sqlite3.Connection,
+) -> None:
+    """定刻実行状態検索用のインデックスを作成する。"""
+
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_scheduled_run_states_identity
+        ON scheduled_run_states (
+            trading_date,
+            process_name
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_scheduled_run_states_completed_at
+        ON scheduled_run_states (
+            completed_at DESC
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_scheduled_run_states_process_date
+        ON scheduled_run_states (
+            process_name,
+            trading_date DESC
         )
         """
     )
