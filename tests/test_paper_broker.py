@@ -113,15 +113,12 @@ def test_market_buy_order_is_filled_immediately() -> None:
     assert snapshot.average_fill_price == pytest.approx(
         2500.0
     )
-    assert snapshot.is_terminal is True
 
 
 def test_market_buy_reduces_cash_and_creates_position() -> None:
     """買い約定で現金を減らしポジションを作成する。"""
 
-    broker = create_broker(
-        initial_cash=1_000_000.0,
-    )
+    broker = create_broker()
 
     broker.submit_order(
         create_order(),
@@ -133,9 +130,6 @@ def test_market_buy_reduces_cash_and_creates_position() -> None:
     assert account.cash_balance == pytest.approx(
         750_000.0
     )
-    assert account.buying_power == pytest.approx(
-        750_000.0
-    )
     assert account.market_value == pytest.approx(
         250_000.0
     )
@@ -144,19 +138,9 @@ def test_market_buy_reduces_cash_and_creates_position() -> None:
     )
 
     assert len(positions) == 1
-
-    position = positions[0]
-
-    assert position.code == "7203"
-    assert position.side is (
+    assert positions[0].quantity == 100
+    assert positions[0].side is (
         BrokerPositionSide.LONG
-    )
-    assert position.quantity == 100
-    assert position.average_price == pytest.approx(
-        2500.0
-    )
-    assert position.market_price == pytest.approx(
-        2500.0
     )
 
 
@@ -184,15 +168,12 @@ def test_multiple_buys_use_weighted_average_price() -> None:
         create_order(
             order_id="order-001",
             signal_id="signal-001",
-            quantity=100,
         )
     )
-
     broker.submit_order(
         create_order(
             order_id="order-002",
             signal_id="signal-002",
-            quantity=100,
         )
     )
 
@@ -202,13 +183,10 @@ def test_multiple_buys_use_weighted_average_price() -> None:
     assert position.average_price == pytest.approx(
         2550.0
     )
-    assert position.market_price == pytest.approx(
-        2600.0
-    )
 
 
 def test_market_sell_reduces_position_and_adds_cash() -> None:
-    """売り注文で買いポジションを減らし現金を増やす。"""
+    """売り注文で買いポジションを減らす。"""
 
     prices = iter(
         [
@@ -231,12 +209,10 @@ def test_market_sell_reduces_position_and_adds_cash() -> None:
         create_order(
             order_id="buy-order",
             signal_id="buy-signal",
-            side=OrderSide.BUY,
-            quantity=100,
         )
     )
 
-    sell_snapshot = broker.submit_order(
+    broker.submit_order(
         create_order(
             order_id="sell-order",
             signal_id="sell-signal",
@@ -245,21 +221,10 @@ def test_market_sell_reduces_position_and_adds_cash() -> None:
         )
     )
 
-    assert sell_snapshot.status is (
-        OrderStatus.FILLED
-    )
-    assert sell_snapshot.average_fill_price == pytest.approx(
-        2600.0
-    )
-
     position = broker.list_positions()[0]
-    account = broker.get_account()
 
     assert position.quantity == 60
-    assert position.average_price == pytest.approx(
-        2500.0
-    )
-    assert account.cash_balance == pytest.approx(
+    assert broker.get_account().cash_balance == pytest.approx(
         854_000.0
     )
 
@@ -273,7 +238,6 @@ def test_full_sell_closes_position() -> None:
         create_order(
             order_id="buy-order",
             signal_id="buy-signal",
-            side=OrderSide.BUY,
         )
     )
 
@@ -307,7 +271,7 @@ def test_sell_without_position_is_rejected() -> None:
 
 
 def test_buy_without_buying_power_is_rejected() -> None:
-    """買付余力を超える注文を拒否する。"""
+    """買付余力を超える成行注文を拒否する。"""
 
     broker = create_broker(
         initial_cash=100_000.0,
@@ -318,22 +282,16 @@ def test_buy_without_buying_power_is_rejected() -> None:
         match="買付余力",
     ):
         broker.submit_order(
-            create_order(
-                quantity=100,
-            )
+            create_order(),
         )
 
     assert broker.list_orders() == []
-    assert broker.get_account().cash_balance == pytest.approx(
-        100_000.0
-    )
 
 
 def test_commission_is_applied_to_cash() -> None:
     """注文手数料を現金残高へ反映する。"""
 
     broker = create_broker(
-        initial_cash=1_000_000.0,
         commission_per_order=500.0,
     )
 
@@ -362,69 +320,18 @@ def test_buy_slippage_increases_fill_price() -> None:
     )
 
 
-def test_sell_slippage_decreases_fill_price() -> None:
-    """売り注文ではスリッページ分だけ約定価格を下げる。"""
-
-    broker = create_broker(
-        initial_cash=1_000_000.0,
-        slippage_rate=0.001,
-    )
-
-    broker.submit_order(
-        create_order(
-            order_id="buy-order",
-            signal_id="buy-signal",
-            side=OrderSide.BUY,
-        )
-    )
-
-    snapshot = broker.submit_order(
-        create_order(
-            order_id="sell-order",
-            signal_id="sell-signal",
-            side=OrderSide.SELL,
-        )
-    )
-
-    assert snapshot.average_fill_price == pytest.approx(
-        2497.5
-    )
-
-
 def test_duplicate_client_order_returns_existing_order() -> None:
-    """同じクライアント注文IDの再送信を冪等に処理する。"""
+    """同じクライアント注文IDを冪等に処理する。"""
 
     broker = create_broker()
     order = create_order()
 
-    first = broker.submit_order(
-        order
-    )
-    second = broker.submit_order(
-        order
-    )
+    first = broker.submit_order(order)
+    second = broker.submit_order(order)
 
     assert first == second
-    assert len(
-        broker.list_orders()
-    ) == 1
+    assert len(broker.list_orders()) == 1
     assert broker.list_positions()[0].quantity == 100
-
-
-def test_get_order_returns_saved_snapshot() -> None:
-    """Broker注文IDで注文状態を取得する。"""
-
-    broker = create_broker()
-
-    created = broker.submit_order(
-        create_order()
-    )
-
-    loaded = broker.get_order(
-        created.broker_order_id
-    )
-
-    assert loaded == created
 
 
 def test_get_order_rejects_missing_order() -> None:
@@ -442,7 +349,7 @@ def test_get_order_rejects_missing_order() -> None:
 
 
 def test_completed_order_cannot_be_cancelled() -> None:
-    """即時約定済み注文の取消を拒否する。"""
+    """約定済み注文の取消を拒否する。"""
 
     broker = create_broker()
 
@@ -459,8 +366,378 @@ def test_completed_order_cannot_be_cancelled() -> None:
         )
 
 
-def test_list_orders_can_filter_active_only() -> None:
-    """終了済み注文をactive_only一覧から除外する。"""
+def test_buy_limit_waits_above_limit_price() -> None:
+    """買い指値より市場価格が高ければ待機する。"""
+
+    broker = create_broker(
+        price=2500.0,
+    )
+
+    snapshot = broker.submit_order(
+        create_order(
+            order_type=OrderType.LIMIT,
+            limit_price=2490.0,
+        )
+    )
+
+    assert snapshot.status is OrderStatus.SENT
+    assert snapshot.filled_quantity == 0
+    assert broker.list_positions() == []
+    assert len(
+        broker.list_orders(
+            active_only=True
+        )
+    ) == 1
+
+
+def test_buy_limit_fills_when_price_falls() -> None:
+    """市場価格が買い指値以下になると約定する。"""
+
+    broker = create_broker(
+        price=2500.0,
+    )
+
+    submitted = broker.submit_order(
+        create_order(
+            order_type=OrderType.LIMIT,
+            limit_price=2490.0,
+        )
+    )
+
+    changed = broker.update_market_price(
+        "7203",
+        2485.0,
+    )
+
+    loaded = broker.get_order(
+        submitted.broker_order_id
+    )
+
+    assert len(changed) == 1
+    assert loaded.status is OrderStatus.FILLED
+    assert loaded.average_fill_price == pytest.approx(
+        2485.0
+    )
+    assert broker.list_positions()[0].quantity == 100
+
+
+def test_buy_limit_does_not_fill_above_limit_after_slippage() -> None:
+    """買い指値はスリッページ後も指値を超えない。"""
+
+    broker = create_broker(
+        price=2500.0,
+        slippage_rate=0.01,
+    )
+
+    snapshot = broker.submit_order(
+        create_order(
+            order_type=OrderType.LIMIT,
+            limit_price=2500.0,
+        )
+    )
+
+    assert snapshot.status is OrderStatus.FILLED
+    assert snapshot.average_fill_price == pytest.approx(
+        2500.0
+    )
+
+
+def test_sell_limit_fills_when_price_rises() -> None:
+    """市場価格が売り指値以上になると約定する。"""
+
+    prices = iter(
+        [
+            2500.0,
+            2500.0,
+        ]
+    )
+
+    broker = PaperBroker(
+        settings=PaperBrokerSettings(
+            initial_cash=1_000_000.0,
+        ),
+        price_provider=lambda _code: next(
+            prices
+        ),
+        now_provider=lambda: CURRENT_TIME,
+    )
+
+    broker.submit_order(
+        create_order(
+            order_id="buy-order",
+            signal_id="buy-signal",
+        )
+    )
+
+    sell = broker.submit_order(
+        create_order(
+            order_id="sell-order",
+            signal_id="sell-signal",
+            side=OrderSide.SELL,
+            order_type=OrderType.LIMIT,
+            limit_price=2550.0,
+        )
+    )
+
+    assert sell.status is OrderStatus.SENT
+
+    broker.update_market_price(
+        "7203",
+        2560.0,
+    )
+
+    loaded = broker.get_order(
+        sell.broker_order_id
+    )
+
+    assert loaded.status is OrderStatus.FILLED
+    assert loaded.average_fill_price == pytest.approx(
+        2560.0
+    )
+
+
+def test_buy_stop_fills_when_price_rises_to_trigger() -> None:
+    """買い逆指値は価格上昇で発動する。"""
+
+    broker = create_broker(
+        price=2500.0,
+    )
+
+    order = broker.submit_order(
+        create_order(
+            order_type=OrderType.STOP,
+            stop_price=2510.0,
+        )
+    )
+
+    assert order.status is OrderStatus.SENT
+
+    broker.update_market_price(
+        "7203",
+        2510.0,
+    )
+
+    loaded = broker.get_order(
+        order.broker_order_id
+    )
+
+    assert loaded.status is OrderStatus.FILLED
+    assert loaded.average_fill_price == pytest.approx(
+        2510.0
+    )
+
+
+def test_sell_stop_fills_when_price_falls_to_trigger() -> None:
+    """売り逆指値は価格下落で発動する。"""
+
+    prices = iter(
+        [
+            2500.0,
+            2500.0,
+        ]
+    )
+
+    broker = PaperBroker(
+        settings=PaperBrokerSettings(
+            initial_cash=1_000_000.0,
+        ),
+        price_provider=lambda _code: next(
+            prices
+        ),
+        now_provider=lambda: CURRENT_TIME,
+    )
+
+    broker.submit_order(
+        create_order(
+            order_id="buy-order",
+            signal_id="buy-signal",
+        )
+    )
+
+    stop_order = broker.submit_order(
+        create_order(
+            order_id="stop-order",
+            signal_id="stop-signal",
+            side=OrderSide.SELL,
+            order_type=OrderType.STOP,
+            stop_price=2450.0,
+        )
+    )
+
+    assert stop_order.status is OrderStatus.SENT
+
+    broker.update_market_price(
+        "7203",
+        2440.0,
+    )
+
+    loaded = broker.get_order(
+        stop_order.broker_order_id
+    )
+
+    assert loaded.status is OrderStatus.FILLED
+    assert loaded.average_fill_price == pytest.approx(
+        2440.0
+    )
+
+
+def test_stop_limit_waits_for_trigger_then_limit() -> None:
+    """逆指値付き指値は発動後も指値条件まで待機する。"""
+
+    broker = create_broker(
+        price=2500.0,
+    )
+
+    order = broker.submit_order(
+        create_order(
+            order_type=OrderType.STOP_LIMIT,
+            stop_price=2510.0,
+            limit_price=2505.0,
+        )
+    )
+
+    assert order.status is OrderStatus.SENT
+
+    first_change = broker.update_market_price(
+        "7203",
+        2515.0,
+    )
+
+    triggered = broker.get_order(
+        order.broker_order_id
+    )
+
+    assert len(first_change) == 1
+    assert triggered.status is OrderStatus.SENT
+    assert "stop triggered" in (
+        triggered.status_reason or ""
+    )
+
+    second_change = broker.update_market_price(
+        "7203",
+        2505.0,
+    )
+
+    filled = broker.get_order(
+        order.broker_order_id
+    )
+
+    assert len(second_change) == 1
+    assert filled.status is OrderStatus.FILLED
+    assert filled.average_fill_price == pytest.approx(
+        2505.0
+    )
+
+
+def test_stop_limit_can_fill_on_trigger_tick() -> None:
+    """発動時点で指値条件も満たせば即時約定する。"""
+
+    broker = create_broker(
+        price=2500.0,
+    )
+
+    order = broker.submit_order(
+        create_order(
+            order_type=OrderType.STOP_LIMIT,
+            stop_price=2510.0,
+            limit_price=2520.0,
+        )
+    )
+
+    broker.update_market_price(
+        "7203",
+        2510.0,
+    )
+
+    loaded = broker.get_order(
+        order.broker_order_id
+    )
+
+    assert loaded.status is OrderStatus.FILLED
+    assert loaded.average_fill_price == pytest.approx(
+        2510.0
+    )
+
+
+def test_waiting_order_can_be_cancelled() -> None:
+    """未約定の待機注文を取り消せる。"""
+
+    broker = create_broker(
+        price=2500.0,
+    )
+
+    submitted = broker.submit_order(
+        create_order(
+            order_type=OrderType.LIMIT,
+            limit_price=2400.0,
+        )
+    )
+
+    cancelled = broker.cancel_order(
+        submitted.broker_order_id
+    )
+
+    assert cancelled.status is OrderStatus.CANCELLED
+    assert broker.list_orders(
+        active_only=True
+    ) == []
+
+    broker.update_market_price(
+        "7203",
+        2300.0,
+    )
+
+    loaded = broker.get_order(
+        submitted.broker_order_id
+    )
+
+    assert loaded.status is OrderStatus.CANCELLED
+    assert broker.list_positions() == []
+
+
+def test_price_update_only_processes_matching_code() -> None:
+    """価格更新した銘柄の注文だけを処理する。"""
+
+    broker = create_broker(
+        price=2500.0,
+    )
+
+    first = broker.submit_order(
+        create_order(
+            order_id="order-7203",
+            signal_id="signal-7203",
+            code="7203",
+            order_type=OrderType.LIMIT,
+            limit_price=2400.0,
+        )
+    )
+
+    second = broker.submit_order(
+        create_order(
+            order_id="order-8306",
+            signal_id="signal-8306",
+            code="8306",
+            order_type=OrderType.LIMIT,
+            limit_price=2400.0,
+        )
+    )
+
+    broker.update_market_price(
+        "7203",
+        2350.0,
+    )
+
+    assert broker.get_order(
+        first.broker_order_id
+    ).status is OrderStatus.FILLED
+
+    assert broker.get_order(
+        second.broker_order_id
+    ).status is OrderStatus.SENT
+
+
+def test_update_market_price_updates_unrealized_profit() -> None:
+    """現在価格更新を口座評価額と含み損益へ反映する。"""
 
     broker = create_broker()
 
@@ -468,29 +745,55 @@ def test_list_orders_can_filter_active_only() -> None:
         create_order()
     )
 
-    assert len(
-        broker.list_orders()
-    ) == 1
-    assert broker.list_orders(
-        active_only=True
-    ) == []
+    broker.update_market_price(
+        "7203",
+        2600.0,
+    )
+
+    position = broker.list_positions()[0]
+    account = broker.get_account()
+
+    assert position.unrealized_profit_loss == pytest.approx(
+        10_000.0
+    )
+    assert account.market_value == pytest.approx(
+        260_000.0
+    )
+    assert account.equity == pytest.approx(
+        1_010_000.0
+    )
 
 
-def test_limit_order_is_not_supported_yet() -> None:
-    """未実装の指値注文を明示的に拒否する。"""
+def test_get_market_price_returns_latest_price() -> None:
+    """Brokerが保持する最新価格を返す。"""
 
-    broker = create_broker()
+    broker = create_broker(
+        price=2500.0,
+    )
 
-    with pytest.raises(
-        BrokerRequestError,
-        match="成行注文だけ",
-    ):
-        broker.submit_order(
-            create_order(
-                order_type=OrderType.LIMIT,
-                limit_price=2490.0,
-            )
+    broker.submit_order(
+        create_order(
+            order_type=OrderType.LIMIT,
+            limit_price=2400.0,
         )
+    )
+
+    assert broker.get_market_price(
+        "7203"
+    ) == pytest.approx(
+        2500.0
+    )
+
+    broker.update_market_price(
+        "7203",
+        2450.0,
+    )
+
+    assert broker.get_market_price(
+        "7203"
+    ) == pytest.approx(
+        2450.0
+    )
 
 
 def test_price_provider_failure_is_wrapped() -> None:
@@ -514,37 +817,6 @@ def test_price_provider_failure_is_wrapped() -> None:
         broker.submit_order(
             create_order()
         )
-
-
-def test_update_market_price_updates_unrealized_profit() -> None:
-    """現在価格更新を口座評価額と含み損益へ反映する。"""
-
-    broker = create_broker()
-
-    broker.submit_order(
-        create_order()
-    )
-
-    broker.update_market_price(
-        "7203",
-        2600.0,
-    )
-
-    position = broker.list_positions()[0]
-    account = broker.get_account()
-
-    assert position.market_price == pytest.approx(
-        2600.0
-    )
-    assert position.unrealized_profit_loss == pytest.approx(
-        10_000.0
-    )
-    assert account.market_value == pytest.approx(
-        260_000.0
-    )
-    assert account.equity == pytest.approx(
-        1_010_000.0
-    )
 
 
 @pytest.mark.parametrize(

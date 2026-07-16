@@ -53,11 +53,6 @@ class PaperBrokerSettings:
                 "スリッページ率は0以上である必要があります。"
             )
 
-        if not normalized_currency:
-            raise ValueError(
-                "通貨コードを指定してください。"
-            )
-
         if (
             len(normalized_currency) != 3
             or not normalized_currency.isalpha()
@@ -95,6 +90,7 @@ class _PaperOrderState:
     submitted_at: datetime
     updated_at: datetime
     status_reason: str | None = None
+    stop_triggered: bool = False
 
 
 @dataclass(slots=True)
@@ -110,13 +106,13 @@ class _PaperPositionState:
 
 
 class PaperBroker:
-    """成行注文を即時約定させるインメモリBroker。"""
+    """市場価格を使ってPaper注文を処理するインメモリBroker。"""
 
     def __init__(
         self,
         *,
-        settings: PaperBrokerSettings | None = None,
         price_provider: Callable[[str], float],
+        settings: PaperBrokerSettings | None = None,
         now_provider: Callable[[], datetime] | None = None,
     ) -> None:
         """設定・現在価格取得処理・時計を受け取る。"""
@@ -146,11 +142,13 @@ class PaperBroker:
         ] = {}
 
         self._positions: dict[
-            tuple[
-                str,
-                BrokerPositionSide,
-            ],
+            tuple[str, BrokerPositionSide],
             _PaperPositionState,
+        ] = {}
+
+        self._market_prices: dict[
+            str,
+            float,
         ] = {}
 
         self._next_broker_order_number = 1
@@ -165,7 +163,7 @@ class PaperBroker:
         self,
         order: TradeOrder,
     ) -> BrokerOrderSnapshot:
-        """成行注文を即時約定させる。"""
+        """注文を登録し、条件成立時は即時約定する。"""
 
         existing_broker_order_id = (
             self._client_order_ids.get(
@@ -178,26 +176,14 @@ class PaperBroker:
                 existing_broker_order_id,
             )
 
-        if order.order_type is not OrderType.MARKET:
-            raise BrokerRequestError(
-                "現在のPaper Brokerは"
-                "成行注文だけをサポートします。 "
-                f"order_type={order.order_type.value}"
-            )
-
         current_time = self._current_time()
         market_price = self._get_market_price(
             order.code,
         )
-        fill_price = self._calculate_fill_price(
-            side=order.side,
-            market_price=market_price,
-        )
 
-        self._validate_execution(
-            order=order,
-            fill_price=fill_price,
-        )
+        self._market_prices[
+            order.code
+        ] = market_price
 
         broker_order_id = self._create_broker_order_id()
 
@@ -209,6 +195,7 @@ class PaperBroker:
             average_fill_price=None,
             submitted_at=current_time,
             updated_at=current_time,
+            status_reason="paper order accepted",
         )
 
         self._orders[
@@ -219,10 +206,10 @@ class PaperBroker:
         ] = broker_order_id
 
         try:
-            self._apply_fill(
+            self._process_order(
                 state=state,
-                fill_price=fill_price,
-                filled_at=current_time,
+                market_price=market_price,
+                processed_at=current_time,
             )
 
         except Exception:
@@ -297,24 +284,32 @@ class PaperBroker:
                 if not state.status.is_terminal
             ]
 
+        sorted_states = sorted(
+            states,
+            key=lambda item: (
+                item.submitted_at,
+                item.broker_order_id,
+            ),
+            reverse=True,
+        )
+
         return [
-            self._to_snapshot(
-                state,
-            )
-            for state in sorted(
-                states,
-                key=lambda item: (
-                    item.submitted_at,
-                    item.broker_order_id,
-                ),
-                reverse=True,
-            )
+            self._to_snapshot(state)
+            for state in sorted_states
         ]
 
     def list_positions(
         self,
     ) -> list[BrokerPosition]:
         """現在保有しているポジション一覧を返す。"""
+
+        states = sorted(
+            self._positions.values(),
+            key=lambda item: (
+                item.code,
+                item.side.value,
+            ),
+        )
 
         return [
             BrokerPosition(
@@ -325,13 +320,7 @@ class PaperBroker:
                 market_price=state.market_price,
                 updated_at=state.updated_at,
             )
-            for state in sorted(
-                self._positions.values(),
-                key=lambda item: (
-                    item.code,
-                    item.side.value,
-                ),
-            )
+            for state in states
             if state.quantity > 0
         ]
 
@@ -341,23 +330,26 @@ class PaperBroker:
         """現金・時価総額・純資産額を返す。"""
 
         current_time = self._current_time()
-        market_value = sum(
+
+        long_market_value = sum(
             position.market_price
             * position.quantity
             for position in self._positions.values()
-            if position.side is BrokerPositionSide.LONG
+            if position.side
+            is BrokerPositionSide.LONG
         )
 
         short_market_value = sum(
             position.market_price
             * position.quantity
             for position in self._positions.values()
-            if position.side is BrokerPositionSide.SHORT
+            if position.side
+            is BrokerPositionSide.SHORT
         )
 
         equity = (
             self._cash_balance
-            + market_value
+            + long_market_value
             - short_market_value
         )
 
@@ -366,7 +358,7 @@ class PaperBroker:
             cash_balance=self._cash_balance,
             buying_power=self._cash_balance,
             market_value=(
-                market_value
+                long_market_value
                 + short_market_value
             ),
             equity=equity,
@@ -377,8 +369,8 @@ class PaperBroker:
         self,
         code: str,
         market_price: float,
-    ) -> None:
-        """保有ポジションの現在価格を更新する。"""
+    ) -> list[BrokerOrderSnapshot]:
+        """価格を更新し、条件成立した待機注文を処理する。"""
 
         normalized_code = self._normalize_code(
             code,
@@ -391,6 +383,10 @@ class PaperBroker:
 
         current_time = self._current_time()
 
+        self._market_prices[
+            normalized_code
+        ] = market_price
+
         for (
             position_code,
             _position_side,
@@ -401,16 +397,193 @@ class PaperBroker:
             position.market_price = market_price
             position.updated_at = current_time
 
-    def _apply_fill(
+        changed_snapshots: list[
+            BrokerOrderSnapshot
+        ] = []
+
+        active_states = sorted(
+            (
+                state
+                for state in self._orders.values()
+                if (
+                    state.order.code
+                    == normalized_code
+                    and not state.status.is_terminal
+                )
+            ),
+            key=lambda item: (
+                item.submitted_at,
+                item.broker_order_id,
+            ),
+        )
+
+        for state in active_states:
+            previous_status = state.status
+            previous_triggered = state.stop_triggered
+
+            self._process_order(
+                state=state,
+                market_price=market_price,
+                processed_at=current_time,
+            )
+
+            if (
+                state.status is not previous_status
+                or state.stop_triggered
+                is not previous_triggered
+            ):
+                changed_snapshots.append(
+                    self._to_snapshot(
+                        state,
+                    )
+                )
+
+        return changed_snapshots
+
+    def get_market_price(
+        self,
+        code: str,
+    ) -> float | None:
+        """Paper Brokerが保持する最新価格を返す。"""
+
+        normalized_code = self._normalize_code(
+            code,
+        )
+
+        return self._market_prices.get(
+            normalized_code,
+        )
+
+    def _process_order(
+        self,
+        *,
+        state: _PaperOrderState,
+        market_price: float,
+        processed_at: datetime,
+    ) -> None:
+        """注文種別に応じて発動・約定条件を判定する。"""
+
+        if state.status.is_terminal:
+            return
+
+        order = state.order
+
+        if order.order_type is OrderType.MARKET:
+            fill_price = self._calculate_market_fill_price(
+                side=order.side,
+                market_price=market_price,
+            )
+
+            self._execute_fill(
+                state=state,
+                fill_price=fill_price,
+                filled_at=processed_at,
+            )
+            return
+
+        if order.order_type is OrderType.LIMIT:
+            if not self._is_limit_marketable(
+                order=order,
+                market_price=market_price,
+            ):
+                state.status_reason = (
+                    "waiting for limit price"
+                )
+                return
+
+            fill_price = self._calculate_limit_fill_price(
+                order=order,
+                market_price=market_price,
+            )
+
+            self._execute_fill(
+                state=state,
+                fill_price=fill_price,
+                filled_at=processed_at,
+            )
+            return
+
+        if order.order_type is OrderType.STOP:
+            if not self._is_stop_triggered(
+                order=order,
+                market_price=market_price,
+            ):
+                state.status_reason = (
+                    "waiting for stop trigger"
+                )
+                return
+
+            state.stop_triggered = True
+
+            fill_price = self._calculate_market_fill_price(
+                side=order.side,
+                market_price=market_price,
+            )
+
+            self._execute_fill(
+                state=state,
+                fill_price=fill_price,
+                filled_at=processed_at,
+            )
+            return
+
+        if order.order_type is OrderType.STOP_LIMIT:
+            if not state.stop_triggered:
+                if not self._is_stop_triggered(
+                    order=order,
+                    market_price=market_price,
+                ):
+                    state.status_reason = (
+                        "waiting for stop trigger"
+                    )
+                    return
+
+                state.stop_triggered = True
+                state.updated_at = processed_at
+                state.status_reason = (
+                    "stop triggered; "
+                    "waiting for limit price"
+                )
+
+            if not self._is_limit_marketable(
+                order=order,
+                market_price=market_price,
+            ):
+                return
+
+            fill_price = self._calculate_limit_fill_price(
+                order=order,
+                market_price=market_price,
+            )
+
+            self._execute_fill(
+                state=state,
+                fill_price=fill_price,
+                filled_at=processed_at,
+            )
+            return
+
+        raise BrokerRequestError(
+            "未対応の注文種別です。 "
+            f"order_type={order.order_type.value}"
+        )
+
+    def _execute_fill(
         self,
         *,
         state: _PaperOrderState,
         fill_price: float,
         filled_at: datetime,
     ) -> None:
-        """注文を全約定させ、資金とポジションへ反映する。"""
+        """全約定を資金とポジションへ反映する。"""
 
         order = state.order
+
+        self._validate_execution(
+            order=order,
+            fill_price=fill_price,
+        )
+
         gross_amount = (
             fill_price
             * order.quantity
@@ -420,19 +593,10 @@ class PaperBroker:
         )
 
         if order.side is OrderSide.BUY:
-            total_cost = (
+            self._cash_balance -= (
                 gross_amount
                 + commission
             )
-
-            if total_cost > self._cash_balance:
-                raise BrokerOrderRejectedError(
-                    "買付余力が不足しています。 "
-                    f"required={total_cost} "
-                    f"available={self._cash_balance}"
-                )
-
-            self._cash_balance -= total_cost
 
             self._increase_position(
                 code=order.code,
@@ -455,7 +619,7 @@ class PaperBroker:
         state.filled_quantity = order.quantity
         state.average_fill_price = fill_price
         state.updated_at = filled_at
-        state.status_reason = "paper market fill"
+        state.status_reason = "paper order filled"
 
     def _execute_sell(
         self,
@@ -477,16 +641,13 @@ class PaperBroker:
             position_key,
         )
 
-        if (
-            position is None
-            or position.quantity < quantity
-        ):
-            available_quantity = (
-                position.quantity
-                if position is not None
-                else 0
-            )
+        available_quantity = (
+            position.quantity
+            if position is not None
+            else 0
+        )
 
+        if available_quantity < quantity:
             raise BrokerOrderRejectedError(
                 "売却可能数量が不足しています。 "
                 f"code={code} "
@@ -501,6 +662,9 @@ class PaperBroker:
         )
 
         self._cash_balance += proceeds
+
+        assert position is not None
+
         position.quantity -= quantity
         position.market_price = fill_price
         position.updated_at = filled_at
@@ -566,7 +730,7 @@ class PaperBroker:
         order: TradeOrder,
         fill_price: float,
     ) -> None:
-        """注文の約定可否を事前検証する。"""
+        """約定直前の資金・保有数量を検証する。"""
 
         if order.side is OrderSide.BUY:
             required_cash = (
@@ -604,13 +768,13 @@ class PaperBroker:
                 f"available={available_quantity}"
             )
 
-    def _calculate_fill_price(
+    def _calculate_market_fill_price(
         self,
         *,
         side: OrderSide,
         market_price: float,
     ) -> float:
-        """スリッページを反映した約定価格を返す。"""
+        """成行約定価格へスリッページを反映する。"""
 
         if side is OrderSide.BUY:
             return market_price * (
@@ -621,6 +785,81 @@ class PaperBroker:
         return market_price * (
             1.0
             - self.settings.slippage_rate
+        )
+
+    def _calculate_limit_fill_price(
+        self,
+        *,
+        order: TradeOrder,
+        market_price: float,
+    ) -> float:
+        """指値より不利にならない約定価格を返す。"""
+
+        if order.limit_price is None:
+            raise BrokerRequestError(
+                "指値価格が設定されていません。"
+            )
+
+        slipped_price = (
+            self._calculate_market_fill_price(
+                side=order.side,
+                market_price=market_price,
+            )
+        )
+
+        if order.side is OrderSide.BUY:
+            return min(
+                slipped_price,
+                order.limit_price,
+            )
+
+        return max(
+            slipped_price,
+            order.limit_price,
+        )
+
+    @staticmethod
+    def _is_limit_marketable(
+        *,
+        order: TradeOrder,
+        market_price: float,
+    ) -> bool:
+        """指値注文が現在価格で約定可能か返す。"""
+
+        if order.limit_price is None:
+            return False
+
+        if order.side is OrderSide.BUY:
+            return (
+                market_price
+                <= order.limit_price
+            )
+
+        return (
+            market_price
+            >= order.limit_price
+        )
+
+    @staticmethod
+    def _is_stop_triggered(
+        *,
+        order: TradeOrder,
+        market_price: float,
+    ) -> bool:
+        """逆指値条件へ到達したか返す。"""
+
+        if order.stop_price is None:
+            return False
+
+        if order.side is OrderSide.BUY:
+            return (
+                market_price
+                >= order.stop_price
+            )
+
+        return (
+            market_price
+            <= order.stop_price
         )
 
     def _get_market_price(
@@ -749,29 +988,19 @@ class PaperBroker:
         """内部注文状態を公開Snapshotへ変換する。"""
 
         return BrokerOrderSnapshot(
-            broker_order_id=(
-                state.broker_order_id
-            ),
-            client_order_id=(
-                state.order.order_id
-            ),
+            broker_order_id=state.broker_order_id,
+            client_order_id=state.order.order_id,
             code=state.order.code,
             side=state.order.side,
             status=state.status,
             quantity=state.order.quantity,
-            filled_quantity=(
-                state.filled_quantity
-            ),
+            filled_quantity=state.filled_quantity,
             average_fill_price=(
                 state.average_fill_price
             ),
-            submitted_at=(
-                state.submitted_at
-            ),
+            submitted_at=state.submitted_at,
             updated_at=state.updated_at,
-            status_reason=(
-                state.status_reason
-            ),
+            status_reason=state.status_reason,
         )
 
 
