@@ -122,7 +122,7 @@ def test_initialize_database_creates_update_runs_table(
     assert version_row == (
         SCHEMA_VERSION,
     )
-    assert SCHEMA_VERSION == 4
+    assert SCHEMA_VERSION == 5
 
 
 def test_initialize_database_is_idempotent(

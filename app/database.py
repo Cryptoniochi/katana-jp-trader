@@ -3,7 +3,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def initialize_database(
@@ -17,6 +17,10 @@ def initialize_database(
     )
 
     with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "PRAGMA foreign_keys = ON"
+        )
+
         _create_schema_version_table(connection)
         _migrate_schema_version_table(connection)
 
@@ -33,6 +37,10 @@ def initialize_database(
         _create_trade_signals_table(connection)
         _migrate_trade_signals_table(connection)
         _create_trade_signal_indexes(connection)
+
+        _create_trade_orders_table(connection)
+        _migrate_trade_orders_table(connection)
+        _create_trade_order_indexes(connection)
 
         _update_schema_version(connection)
 
@@ -541,6 +549,168 @@ def _create_trade_signal_indexes(
         ON trade_signals (
             strategy_name,
             generated_at DESC
+        )
+        """
+    )
+
+
+def _create_trade_orders_table(
+    connection: sqlite3.Connection,
+) -> None:
+    """証券会社へ送信する注文の永続化テーブルを作成する。"""
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trade_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id TEXT NOT NULL UNIQUE,
+            signal_id TEXT NOT NULL UNIQUE,
+            code TEXT NOT NULL,
+            side TEXT NOT NULL,
+            order_type TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            limit_price REAL,
+            stop_price REAL,
+            status TEXT NOT NULL
+                DEFAULT 'new',
+            filled_quantity INTEGER NOT NULL
+                DEFAULT 0,
+            average_fill_price REAL,
+            broker_order_id TEXT,
+            status_reason TEXT,
+            error_message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            submitted_at TEXT,
+            completed_at TEXT,
+            FOREIGN KEY(signal_id)
+                REFERENCES trade_signals(signal_id)
+        )
+        """
+    )
+
+
+def _migrate_trade_orders_table(
+    connection: sqlite3.Connection,
+) -> None:
+    """既存trade_ordersへ不足している列を追加する。"""
+
+    column_definitions = {
+        "order_id": "TEXT",
+        "signal_id": "TEXT",
+        "code": "TEXT",
+        "side": "TEXT",
+        "order_type": "TEXT",
+        "quantity": "INTEGER",
+        "limit_price": "REAL",
+        "stop_price": "REAL",
+        "status": "TEXT DEFAULT 'new'",
+        "filled_quantity": "INTEGER DEFAULT 0",
+        "average_fill_price": "REAL",
+        "broker_order_id": "TEXT",
+        "status_reason": "TEXT",
+        "error_message": "TEXT",
+        "created_at": "TEXT",
+        "updated_at": "TEXT",
+        "submitted_at": "TEXT",
+        "completed_at": "TEXT",
+    }
+
+    for column_name, column_definition in column_definitions.items():
+        _add_column_if_missing(
+            connection=connection,
+            table_name="trade_orders",
+            column_name=column_name,
+            column_definition=column_definition,
+        )
+
+    connection.execute(
+        """
+        UPDATE trade_orders
+        SET status = 'new'
+        WHERE status IS NULL
+           OR TRIM(status) = ''
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE trade_orders
+        SET filled_quantity = 0
+        WHERE filled_quantity IS NULL
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE trade_orders
+        SET created_at = CURRENT_TIMESTAMP
+        WHERE created_at IS NULL
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE trade_orders
+        SET updated_at = CURRENT_TIMESTAMP
+        WHERE updated_at IS NULL
+        """
+    )
+
+
+def _create_trade_order_indexes(
+    connection: sqlite3.Connection,
+) -> None:
+    """注文検索用のインデックスを作成する。"""
+
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_trade_orders_order_id
+        ON trade_orders (
+            order_id
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_trade_orders_signal_id
+        ON trade_orders (
+            signal_id
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_trade_orders_status_created_at
+        ON trade_orders (
+            status,
+            created_at DESC
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_trade_orders_code_created_at
+        ON trade_orders (
+            code,
+            created_at DESC
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_trade_orders_broker_order_id
+        ON trade_orders (
+            broker_order_id
         )
         """
     )
