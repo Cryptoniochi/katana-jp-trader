@@ -3,7 +3,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 def initialize_database(
@@ -56,6 +56,9 @@ def initialize_database(
 
         _create_position_applied_executions_table(connection)
         _create_position_applied_execution_indexes(connection)
+
+        _create_portfolio_snapshot_tables(connection)
+        _create_portfolio_snapshot_indexes(connection)
 
         _update_schema_version(connection)
 
@@ -1119,6 +1122,83 @@ def _create_position_applied_execution_indexes(
             idx_position_applied_executions_applied_at
         ON position_applied_executions (
             applied_at DESC
+        )
+        """
+    )
+
+
+def _create_portfolio_snapshot_tables(
+    connection: sqlite3.Connection,
+) -> None:
+    """ポートフォリオ履歴テーブルを作成する。"""
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            generated_at TEXT NOT NULL UNIQUE,
+            currency TEXT NOT NULL,
+            cash_balance REAL NOT NULL,
+            buying_power REAL NOT NULL,
+            broker_market_value REAL NOT NULL,
+            broker_equity REAL NOT NULL,
+            total_acquisition_value REAL NOT NULL,
+            total_market_value REAL NOT NULL,
+            total_unrealized_profit_loss REAL NOT NULL,
+            total_realized_profit_loss REAL NOT NULL,
+            calculated_equity REAL NOT NULL,
+            position_count INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS portfolio_snapshot_positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id INTEGER NOT NULL,
+            position_id TEXT NOT NULL,
+            code TEXT NOT NULL,
+            side TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            average_cost REAL NOT NULL,
+            market_price REAL NOT NULL,
+            realized_profit_loss REAL NOT NULL,
+            acquisition_value REAL NOT NULL,
+            market_value REAL NOT NULL,
+            unrealized_profit_loss REAL NOT NULL,
+            FOREIGN KEY(snapshot_id)
+                REFERENCES portfolio_snapshots(id)
+                ON DELETE CASCADE,
+            UNIQUE(snapshot_id, position_id)
+        )
+        """
+    )
+
+
+def _create_portfolio_snapshot_indexes(
+    connection: sqlite3.Connection,
+) -> None:
+    """ポートフォリオ履歴検索用インデックスを作成する。"""
+
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_portfolio_snapshots_generated_at
+        ON portfolio_snapshots (
+            generated_at
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_portfolio_snapshot_positions_snapshot
+        ON portfolio_snapshot_positions (
+            snapshot_id,
+            code,
+            side
         )
         """
     )
