@@ -108,7 +108,7 @@ def test_initialize_database_creates_positions_table(
 
     assert table_row == ("positions",)
     assert version_row == (SCHEMA_VERSION,)
-    assert SCHEMA_VERSION == 8
+    assert SCHEMA_VERSION == 9
 
 
 def test_repository_creates_and_reads_position(

@@ -258,6 +258,41 @@ class PositionRepository:
 
         return self.get(normalized_position.position_id)
 
+
+    def delete(
+        self,
+        position_id: str,
+    ) -> TradingPositionRecord:
+        """現在ポジションを削除し、削除前レコードを返す。"""
+
+        current = self.get(position_id)
+
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    DELETE FROM positions
+                    WHERE position_id = ?
+                    """,
+                    (current.position_id,),
+                )
+                connection.commit()
+
+                if cursor.rowcount != 1:
+                    raise PositionNotFoundError(
+                        "削除対象ポジションが存在しません。 "
+                        f"position_id={current.position_id}"
+                    )
+        except PositionNotFoundError:
+            raise
+        except sqlite3.Error as error:
+            raise PositionRepositoryError(
+                "ポジションを削除できませんでした。 "
+                f"position_id={current.position_id}"
+            ) from error
+
+        return current
+
     def list_recent(
         self,
         *,

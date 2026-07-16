@@ -3,7 +3,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 def initialize_database(
@@ -53,6 +53,9 @@ def initialize_database(
         _create_positions_table(connection)
         _migrate_positions_table(connection)
         _create_position_indexes(connection)
+
+        _create_position_applied_executions_table(connection)
+        _create_position_applied_execution_indexes(connection)
 
         _update_schema_version(connection)
 
@@ -1083,6 +1086,39 @@ def _create_position_indexes(
             idx_positions_updated_at
         ON positions (
             updated_at DESC
+        )
+        """
+    )
+
+
+def _create_position_applied_executions_table(
+    connection: sqlite3.Connection,
+) -> None:
+    """ポジションへ反映済みの約定IDを保存する。"""
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS position_applied_executions (
+            execution_id TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL,
+            FOREIGN KEY(execution_id)
+                REFERENCES trade_executions(execution_id)
+        )
+        """
+    )
+
+
+def _create_position_applied_execution_indexes(
+    connection: sqlite3.Connection,
+) -> None:
+    """反映済み約定の検索用インデックスを作成する。"""
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_position_applied_executions_applied_at
+        ON position_applied_executions (
+            applied_at DESC
         )
         """
     )
