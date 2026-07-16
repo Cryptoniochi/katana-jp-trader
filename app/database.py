@@ -3,7 +3,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def initialize_database(
@@ -45,6 +45,10 @@ def initialize_database(
         _create_scheduled_run_states_table(connection)
         _migrate_scheduled_run_states_table(connection)
         _create_scheduled_run_state_indexes(connection)
+
+        _create_trade_executions_table(connection)
+        _migrate_trade_executions_table(connection)
+        _create_trade_execution_indexes(connection)
 
         _update_schema_version(connection)
 
@@ -820,6 +824,154 @@ def _create_scheduled_run_state_indexes(
         """
     )
 
+
+
+def _create_trade_executions_table(
+    connection: sqlite3.Connection,
+) -> None:
+    """Brokerで成立した約定履歴テーブルを作成する。"""
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trade_executions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            execution_id TEXT NOT NULL UNIQUE,
+            signal_id TEXT NOT NULL,
+            order_id TEXT NOT NULL,
+            broker_order_id TEXT NOT NULL,
+            code TEXT NOT NULL,
+            side TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            execution_price REAL NOT NULL,
+            executed_at TEXT NOT NULL,
+            broker_name TEXT NOT NULL,
+            commission REAL NOT NULL DEFAULT 0,
+            slippage REAL NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(signal_id)
+                REFERENCES trade_signals(signal_id),
+            FOREIGN KEY(order_id)
+                REFERENCES trade_orders(order_id)
+        )
+        """
+    )
+
+
+def _migrate_trade_executions_table(
+    connection: sqlite3.Connection,
+) -> None:
+    """既存trade_executionsへ不足している列を追加する。"""
+
+    column_definitions = {
+        "execution_id": "TEXT",
+        "signal_id": "TEXT",
+        "order_id": "TEXT",
+        "broker_order_id": "TEXT",
+        "code": "TEXT",
+        "side": "TEXT",
+        "quantity": "INTEGER",
+        "execution_price": "REAL",
+        "executed_at": "TEXT",
+        "broker_name": "TEXT",
+        "commission": "REAL DEFAULT 0",
+        "slippage": "REAL DEFAULT 0",
+        "metadata_json": "TEXT DEFAULT '{}'",
+        "created_at": "TEXT",
+        "updated_at": "TEXT",
+    }
+
+    for column_name, column_definition in column_definitions.items():
+        _add_column_if_missing(
+            connection=connection,
+            table_name="trade_executions",
+            column_name=column_name,
+            column_definition=column_definition,
+        )
+
+    connection.execute(
+        """
+        UPDATE trade_executions
+        SET commission = 0
+        WHERE commission IS NULL
+        """
+    )
+    connection.execute(
+        """
+        UPDATE trade_executions
+        SET slippage = 0
+        WHERE slippage IS NULL
+        """
+    )
+    connection.execute(
+        """
+        UPDATE trade_executions
+        SET metadata_json = '{}'
+        WHERE metadata_json IS NULL
+           OR TRIM(metadata_json) = ''
+        """
+    )
+    connection.execute(
+        """
+        UPDATE trade_executions
+        SET created_at = CURRENT_TIMESTAMP
+        WHERE created_at IS NULL
+        """
+    )
+    connection.execute(
+        """
+        UPDATE trade_executions
+        SET updated_at = CURRENT_TIMESTAMP
+        WHERE updated_at IS NULL
+        """
+    )
+
+
+def _create_trade_execution_indexes(
+    connection: sqlite3.Connection,
+) -> None:
+    """約定履歴検索用のインデックスを作成する。"""
+
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_trade_executions_execution_id
+        ON trade_executions (
+            execution_id
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_trade_executions_order_executed_at
+        ON trade_executions (
+            order_id,
+            executed_at DESC
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_trade_executions_signal_executed_at
+        ON trade_executions (
+            signal_id,
+            executed_at DESC
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_trade_executions_code_executed_at
+        ON trade_executions (
+            code,
+            executed_at DESC
+        )
+        """
+    )
 
 def _update_schema_version(
     connection: sqlite3.Connection,

@@ -173,7 +173,7 @@ def test_initialize_database_creates_trade_signals_table(
     assert version_row == (
         SCHEMA_VERSION,
     )
-    assert SCHEMA_VERSION == 6
+    assert SCHEMA_VERSION == 7
 
 
 def test_initialize_database_remains_idempotent(
