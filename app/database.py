@@ -3,7 +3,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def initialize_database(
@@ -49,6 +49,10 @@ def initialize_database(
         _create_trade_executions_table(connection)
         _migrate_trade_executions_table(connection)
         _create_trade_execution_indexes(connection)
+
+        _create_positions_table(connection)
+        _migrate_positions_table(connection)
+        _create_position_indexes(connection)
 
         _update_schema_version(connection)
 
@@ -969,6 +973,116 @@ def _create_trade_execution_indexes(
         ON trade_executions (
             code,
             executed_at DESC
+        )
+        """
+    )
+
+
+def _create_positions_table(
+    connection: sqlite3.Connection,
+) -> None:
+    """現在保有ポジションテーブルを作成する。"""
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            position_id TEXT NOT NULL UNIQUE,
+            code TEXT NOT NULL,
+            side TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            average_cost REAL NOT NULL,
+            realized_profit_loss REAL NOT NULL DEFAULT 0,
+            opened_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(
+                code,
+                side
+            )
+        )
+        """
+    )
+
+
+def _migrate_positions_table(
+    connection: sqlite3.Connection,
+) -> None:
+    """既存positionsへ不足している列を追加する。"""
+
+    column_definitions = {
+        "position_id": "TEXT",
+        "code": "TEXT",
+        "side": "TEXT",
+        "quantity": "INTEGER",
+        "average_cost": "REAL",
+        "realized_profit_loss": "REAL DEFAULT 0",
+        "opened_at": "TEXT",
+        "created_at": "TEXT",
+        "updated_at": "TEXT",
+    }
+
+    for column_name, column_definition in column_definitions.items():
+        _add_column_if_missing(
+            connection=connection,
+            table_name="positions",
+            column_name=column_name,
+            column_definition=column_definition,
+        )
+
+    connection.execute(
+        """
+        UPDATE positions
+        SET realized_profit_loss = 0
+        WHERE realized_profit_loss IS NULL
+        """
+    )
+    connection.execute(
+        """
+        UPDATE positions
+        SET created_at = CURRENT_TIMESTAMP
+        WHERE created_at IS NULL
+        """
+    )
+    connection.execute(
+        """
+        UPDATE positions
+        SET updated_at = CURRENT_TIMESTAMP
+        WHERE updated_at IS NULL
+        """
+    )
+
+
+def _create_position_indexes(
+    connection: sqlite3.Connection,
+) -> None:
+    """現在ポジション検索用のインデックスを作成する。"""
+
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_positions_position_id
+        ON positions (
+            position_id
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_positions_code_side
+        ON positions (
+            code,
+            side
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_positions_updated_at
+        ON positions (
+            updated_at DESC
         )
         """
     )

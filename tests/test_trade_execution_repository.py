@@ -134,7 +134,7 @@ def test_initialize_database_creates_trade_executions_table(
 
     assert table_row == ("trade_executions",)
     assert version_row == (SCHEMA_VERSION,)
-    assert SCHEMA_VERSION == 7
+    assert SCHEMA_VERSION == 8
 
 
 def test_repository_saves_and_reads_execution(
