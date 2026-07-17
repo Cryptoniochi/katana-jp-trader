@@ -17,6 +17,15 @@ from app.backtest.backtest_report_writer import (
     BacktestReportWriter,
 )
 from app.backtest.backtest_session import BacktestSession
+from app.backtest.composite_ranking import (
+    CompositeOptimizationRankingService,
+)
+from app.backtest.composite_score_models import (
+    CompositeScoreWeights,
+)
+from app.backtest.composite_score_service import (
+    CompositeOptimizationScoreService,
+)
 from app.backtest.event_driven_backtest_runner import (
     EventDrivenBacktestRunResult,
     EventDrivenBacktestRunner,
@@ -93,6 +102,7 @@ from app.trading.trade_execution_repository import (
 
 
 JST = ZoneInfo("Asia/Tokyo")
+COMPOSITE_RANKING = "composite"
 
 
 @dataclass(slots=True)
@@ -159,17 +169,56 @@ def build_parser() -> argparse.ArgumentParser:
         default="09:10,09:15,09:20",
     )
     parser.add_argument(
+        "--ranking",
+        choices=[
+            metric.value
+            for metric in RankingMetric
+        ]
+        + [COMPOSITE_RANKING],
+        default=None,
+        help=(
+            "最適化ランキング方式。"
+            "未指定時は--optimization-metricを使用します。"
+        ),
+    )
+    parser.add_argument(
         "--optimization-metric",
         choices=[
             metric.value
             for metric in RankingMetric
         ],
         default=RankingMetric.NET_PROFIT.value,
+        help=(
+            "互換用の単一指標ランキング指定。"
+            "新規利用では--rankingを推奨します。"
+        ),
     )
     parser.add_argument(
+        "--top-n",
         "--optimization-top-n",
+        dest="optimization_top_n",
         type=int,
         default=10,
+    )
+    parser.add_argument(
+        "--weight-net-profit",
+        type=float,
+        default=0.4,
+    )
+    parser.add_argument(
+        "--weight-profit-factor",
+        type=float,
+        default=0.3,
+    )
+    parser.add_argument(
+        "--weight-win-rate",
+        type=float,
+        default=0.2,
+    )
+    parser.add_argument(
+        "--weight-drawdown",
+        type=float,
+        default=0.1,
     )
     parser.add_argument("--stop-loss-rate", type=float)
     parser.add_argument("--take-profit-rate", type=float)
@@ -539,14 +588,15 @@ def run_optimization(
     stop_loss_candidates: tuple[float | None, ...],
     take_profit_candidates: tuple[float | None, ...],
     opening_range_end_candidates: tuple[time, ...],
-    ranking_metric: RankingMetric,
+    ranking_method: str,
     top_n: int,
+    composite_weights: CompositeScoreWeights,
 ) -> int:
     """ORBパラメータ最適化を実行する。"""
 
     if top_n <= 0:
         raise ValueError(
-            "optimization-top-nは0より大きい必要があります。"
+            "top-nは0より大きい必要があります。"
         )
 
     grid = OrbOptimizationGridService().create_grid(
@@ -620,16 +670,41 @@ def run_optimization(
         continue_on_error=True,
     )
 
-    ranking = OptimizationRankingService().rank(
-        optimization_result,
-        metric=ranking_metric,
-        top_n=top_n,
-    )
+    normalized_method = ranking_method.strip().lower()
+    composite_score_report = None
+    report_weights = None
+
+    if normalized_method == COMPOSITE_RANKING:
+        composite_score_report = (
+            CompositeOptimizationScoreService()
+            .create_report(
+                optimization_result,
+                weights=composite_weights,
+            )
+        )
+        ranking = (
+            CompositeOptimizationRankingService()
+            .rank(
+                composite_score_report,
+                top_n=top_n,
+            )
+        )
+        report_weights = composite_weights
+    else:
+        metric = RankingMetric(normalized_method)
+        ranking = OptimizationRankingService().rank(
+            optimization_result,
+            metric=metric,
+            top_n=top_n,
+        )
 
     paths = OptimizationReportWriter().write(
         output_directory=report_directory,
         result=optimization_result,
         ranking=ranking,
+        ranking_method=normalized_method,
+        composite_score_report=composite_score_report,
+        weights=report_weights,
     )
 
     print("Project KATANA ORB Optimization")
@@ -642,16 +717,40 @@ def run_optimization(
         f"failed: "
         f"{optimization_result.failed_count}"
     )
+    print(f"ranking_method: {normalized_method}")
 
-    for item in ranking:
-        print(
-            f"rank={item.rank} "
-            f"parameter={item.run.parameter_id} "
-            f"net_profit={item.run.net_profit_loss} "
-            f"profit_factor={item.run.profit_factor} "
-            f"win_rate={item.run.win_rate} "
-            f"max_drawdown={item.run.maximum_drawdown}"
-        )
+    if normalized_method == COMPOSITE_RANKING:
+        for item in ranking.items:
+            run = item.item.run
+            components = item.item.components
+
+            print(
+                f"rank={item.rank} "
+                f"parameter={item.parameter_id} "
+                f"composite_score={item.score:.6f} "
+                f"net_profit_score="
+                f"{components.net_profit:.6f} "
+                f"profit_factor_score="
+                f"{components.profit_factor:.6f} "
+                f"win_rate_score="
+                f"{components.win_rate:.6f} "
+                f"drawdown_score="
+                f"{components.maximum_drawdown:.6f} "
+                f"net_profit={run.net_profit_loss} "
+                f"profit_factor={run.profit_factor} "
+                f"win_rate={run.win_rate} "
+                f"max_drawdown={run.maximum_drawdown}"
+            )
+    else:
+        for item in ranking:
+            print(
+                f"rank={item.rank} "
+                f"parameter={item.run.parameter_id} "
+                f"net_profit={item.run.net_profit_loss} "
+                f"profit_factor={item.run.profit_factor} "
+                f"win_rate={item.run.win_rate} "
+                f"max_drawdown={item.run.maximum_drawdown}"
+            )
 
     print(
         f"optimization_csv: "
@@ -698,6 +797,12 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.optimize:
+        ranking_method = (
+            args.ranking
+            if args.ranking is not None
+            else args.optimization_metric
+        )
+
         return run_optimization(
             series=series,
             report_directory=report_directory,
@@ -721,10 +826,14 @@ def main(argv: list[str] | None = None) -> int:
                     args.opening_range_end_candidates
                 )
             ),
-            ranking_metric=RankingMetric(
-                args.optimization_metric
-            ),
+            ranking_method=ranking_method,
             top_n=args.optimization_top_n,
+            composite_weights=CompositeScoreWeights(
+                net_profit=args.weight_net_profit,
+                profit_factor=args.weight_profit_factor,
+                win_rate=args.weight_win_rate,
+                maximum_drawdown=args.weight_drawdown,
+            ),
         )
 
     state_database_path = (

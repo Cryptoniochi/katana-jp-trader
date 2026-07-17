@@ -1,0 +1,2876 @@
+# Project KATANA Sprint50-3 Context
+
+Project root: C:\projects\katana
+Collected files: 12
+Missing files: 0
+
+## Target
+
+Sprint50-3:
+- Composite Ranking CLI integration
+- Optimization CSV/JSON report extension
+- Existing test compatibility
+
+## Collected source files
+
+====================================================================================================
+FILE: app/backtest/run_backtest.py
+====================================================================================================
+```python
+"""保存済み5分足でORBバックテストと最適化を実行するCLI。"""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from datetime import date, datetime, time, timezone
+from pathlib import Path
+from uuid import uuid4
+from zoneinfo import ZoneInfo
+
+from app.backtest.backtest_portfolio_update_service import (
+    BacktestPortfolioUpdateService,
+)
+from app.backtest.backtest_report_writer import (
+    BacktestReportPaths,
+    BacktestReportWriter,
+)
+from app.backtest.backtest_session import BacktestSession
+from app.backtest.event_driven_backtest_runner import (
+    EventDrivenBacktestRunResult,
+    EventDrivenBacktestRunner,
+)
+from app.backtest.historical_models import (
+    HistoricalBar,
+    HistoricalBarSeries,
+    MarketTimeframe,
+)
+from app.backtest.market_replay import MarketReplayEngine
+from app.backtest.optimization_models import (
+    OrbOptimizationParameters,
+)
+from app.backtest.optimization_ranking import (
+    OptimizationRankingService,
+    RankingMetric,
+)
+from app.backtest.optimization_report_writer import (
+    OptimizationReportWriter,
+)
+from app.backtest.optimization_runner import (
+    OrbOptimizationExecutionOutput,
+    OrbOptimizationRunner,
+)
+from app.backtest.optimization_service import (
+    OrbOptimizationGridService,
+)
+from app.backtest.orb_signal_strategy import (
+    OrbSignalStrategy,
+    OrbSignalStrategySettings,
+)
+from app.backtest.order_queue import BacktestOrderQueue
+from app.backtest.order_queue_service import (
+    BacktestOrderQueueService,
+)
+from app.backtest.performance_metrics_models import (
+    BacktestPerformanceMetrics,
+)
+from app.backtest.performance_metrics_service import (
+    BacktestPerformanceMetricsService,
+)
+from app.backtest.queue_execution_service import (
+    BacktestQueueExecutionService,
+)
+from app.backtest.strategy_runner import BacktestStrategyRunner
+from app.backtest.trade_report_models import (
+    BacktestTradeReport,
+)
+from app.backtest.trade_report_service import (
+    TradeReportService,
+)
+from app.database import initialize_database
+from app.market.bar_repository import MarketBarRepository
+from app.settings import settings
+from app.trading.equity_curve_models import EquityCurveReport
+from app.trading.equity_curve_service import EquityCurveService
+from app.trading.order_broker_sync_service import (
+    OrderBrokerSyncService,
+)
+from app.trading.order_repository import OrderRepository
+from app.trading.order_service import SignalOrderService
+from app.trading.paper_broker import (
+    PaperBroker,
+    PaperBrokerSettings,
+)
+from app.trading.portfolio_repository import PortfolioRepository
+from app.trading.portfolio_service import PortfolioService
+from app.trading.position_repository import PositionRepository
+from app.trading.position_service import PositionService
+from app.trading.signal_repository import SignalRepository
+from app.trading.trade_execution_repository import (
+    TradeExecutionRepository,
+)
+
+
+JST = ZoneInfo("Asia/Tokyo")
+
+
+@dataclass(slots=True)
+class MutableClock:
+    """バックテスト時刻を保持する。"""
+
+    current: datetime
+
+    def now(self) -> datetime:
+        return self.current
+
+    def set(self, value: datetime) -> None:
+        if value.tzinfo is None:
+            raise ValueError(
+                "現在日時にはタイムゾーンが必要です。"
+            )
+        self.current = value.astimezone(timezone.utc)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """CLI引数Parserを作成する。"""
+
+    parser = argparse.ArgumentParser(
+        description="Project KATANA ORB backtest"
+    )
+    parser.add_argument("--code", required=True)
+    parser.add_argument("--from", dest="start_date", required=True)
+    parser.add_argument("--to", dest="end_date", required=True)
+    parser.add_argument(
+        "--database",
+        type=Path,
+        default=settings.database_path,
+    )
+    parser.add_argument(
+        "--state-database",
+        type=Path,
+        default=None,
+    )
+    parser.add_argument(
+        "--report-dir",
+        type=Path,
+        default=None,
+    )
+    parser.add_argument(
+        "--initial-cash",
+        type=float,
+        default=10_000_000.0,
+    )
+    parser.add_argument("--quantity", type=int, default=100)
+    parser.add_argument(
+        "--optimize",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--stop-loss-candidates",
+        default="0.01,0.02,0.03",
+    )
+    parser.add_argument(
+        "--take-profit-candidates",
+        default="0.02,0.04,0.06",
+    )
+    parser.add_argument(
+        "--opening-range-end-candidates",
+        default="09:10,09:15,09:20",
+    )
+    parser.add_argument(
+        "--optimization-metric",
+        choices=[
+            metric.value
+            for metric in RankingMetric
+        ],
+        default=RankingMetric.NET_PROFIT.value,
+    )
+    parser.add_argument(
+        "--optimization-top-n",
+        type=int,
+        default=10,
+    )
+    parser.add_argument("--stop-loss-rate", type=float)
+    parser.add_argument("--take-profit-rate", type=float)
+    parser.add_argument(
+        "--opening-range-end",
+        type=_parse_time,
+        default=time(9, 15),
+    )
+    parser.add_argument(
+        "--force-exit-time",
+        type=_parse_time,
+        default=time(15, 30),
+    )
+    parser.add_argument(
+        "--commission",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--slippage-rate",
+        type=float,
+        default=0.0,
+    )
+    return parser
+
+
+def load_series(
+    *,
+    database_path: Path,
+    code: str,
+    start_date: date,
+    end_date: date,
+) -> HistoricalBarSeries:
+    """SQLiteから指定期間の5分足を読み込む。"""
+
+    if end_date < start_date:
+        raise ValueError(
+            "終了日は開始日以後である必要があります。"
+        )
+
+    start_at = datetime.combine(
+        start_date,
+        time.min,
+        tzinfo=JST,
+    )
+    end_at = datetime.combine(
+        end_date,
+        time.max,
+        tzinfo=JST,
+    )
+
+    prices = MarketBarRepository(
+        database_path
+    ).read(
+        code=code,
+        interval_minutes=5,
+        start_at=start_at,
+        end_at=end_at,
+    )
+
+    if not prices:
+        raise ValueError(
+            "指定条件に一致する5分足がありません。 "
+            f"code={code} from={start_date} to={end_date}"
+        )
+
+    bars = tuple(
+        HistoricalBar(
+            code=price.code,
+            timeframe=MarketTimeframe.MINUTE_5,
+            opened_at=_normalize_market_datetime(
+                price.datetime
+            ),
+            open_price=price.open,
+            high_price=price.high,
+            low_price=price.low,
+            close_price=price.close,
+            volume=float(price.volume),
+        )
+        for price in prices
+    )
+
+    return HistoricalBarSeries(
+        code=code,
+        timeframe=MarketTimeframe.MINUTE_5,
+        bars=bars,
+    )
+
+
+def _normalize_market_datetime(
+    value: datetime,
+) -> datetime:
+    """市場データ日時へ日本時間を補完する。"""
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=JST)
+
+    return value.astimezone(JST)
+
+
+def build_runner(
+    *,
+    series: HistoricalBarSeries,
+    state_database_path: Path,
+    initial_cash: float,
+    strategy_settings: OrbSignalStrategySettings,
+    commission: float,
+    slippage_rate: float,
+) -> EventDrivenBacktestRunner:
+    """依存関係を組み立ててRunnerを返す。"""
+
+    state_database_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    initialize_database(state_database_path)
+
+    initial_time = (
+        series.started_at.astimezone(timezone.utc)
+        if series.started_at is not None
+        else datetime.now(timezone.utc)
+    )
+    clock = MutableClock(initial_time)
+
+    signal_repository = SignalRepository(
+        state_database_path,
+        now_provider=clock.now,
+    )
+    order_repository = OrderRepository(
+        state_database_path,
+        now_provider=clock.now,
+    )
+    execution_repository = TradeExecutionRepository(
+        state_database_path,
+        now_provider=clock.now,
+    )
+    position_repository = PositionRepository(
+        state_database_path,
+        now_provider=clock.now,
+    )
+    portfolio_repository = PortfolioRepository(
+        state_database_path,
+        now_provider=clock.now,
+    )
+
+    session_id = (
+        f"orb-{series.code}-"
+        f"{uuid4().hex[:12]}"
+    )
+    strategy = OrbSignalStrategy(
+        settings=strategy_settings
+    )
+    session = BacktestSession(
+        session_id=session_id,
+        strategy_runner=BacktestStrategyRunner(
+            replay_engine=MarketReplayEngine(series),
+            strategy=strategy,
+        ),
+        now_provider=clock.now,
+    )
+
+    queue = BacktestOrderQueue()
+    queue_service = BacktestOrderQueueService(
+        signal_repository=signal_repository,
+        order_service=SignalOrderService(
+            signal_repository=signal_repository,
+            order_repository=order_repository,
+        ),
+        order_queue=queue,
+        now_provider=clock.now,
+    )
+
+    latest_price = {
+        series.code: series.bars[0].close_price
+    }
+    broker = PaperBroker(
+        price_provider=lambda code: latest_price[code],
+        settings=PaperBrokerSettings(
+            initial_cash=initial_cash,
+            commission_per_order=commission,
+            slippage_rate=slippage_rate,
+        ),
+        now_provider=clock.now,
+    )
+
+    def update_price(code: str, price: float) -> object:
+        latest_price[code] = price
+        return broker.update_market_price(code, price)
+
+    queue_execution_service = BacktestQueueExecutionService(
+        order_queue=queue,
+        broker_sync_service=OrderBrokerSyncService(
+            order_repository=order_repository,
+            broker=broker,
+        ),
+        execution_repository=execution_repository,
+        broker_name=broker.broker_name,
+        commission_per_execution=commission,
+    )
+
+    portfolio_update_service = BacktestPortfolioUpdateService(
+        position_service=PositionService(
+            database_path=state_database_path,
+            position_repository=position_repository,
+        ),
+        portfolio_service=PortfolioService(
+            position_repository=position_repository,
+            broker=broker,
+        ),
+        portfolio_repository=portfolio_repository,
+        equity_curve_service=EquityCurveService(
+            portfolio_repository=portfolio_repository,
+        ),
+    )
+
+    return EventDrivenBacktestRunner(
+        session=session,
+        order_queue_service=queue_service,
+        queue_execution_service=queue_execution_service,
+        portfolio_update_service=portfolio_update_service,
+        market_price_updater=update_price,
+        clock_updater=clock.set,
+    )
+
+
+def create_reports(
+    *,
+    state_database_path: Path,
+    output_directory: Path,
+    equity_curve_report: EquityCurveReport | None,
+) -> tuple[
+    BacktestTradeReport,
+    BacktestPerformanceMetrics,
+    BacktestReportPaths,
+]:
+    """保存済み約定から統計とレポートを作成する。"""
+
+    execution_repository = TradeExecutionRepository(
+        state_database_path
+    )
+    signal_repository = SignalRepository(
+        state_database_path
+    )
+
+    trade_report = TradeReportService(
+        execution_repository=execution_repository,
+        signal_repository=signal_repository,
+    ).create_report()
+
+    metrics = (
+        BacktestPerformanceMetricsService()
+        .create_metrics(trade_report)
+    )
+
+    paths = BacktestReportWriter().write(
+        output_directory=output_directory,
+        trade_report=trade_report,
+        metrics=metrics,
+        equity_curve_report=equity_curve_report,
+    )
+
+    return trade_report, metrics, paths
+
+
+def print_result(
+    result: EventDrivenBacktestRunResult,
+    *,
+    state_database_path: Path,
+    trade_report: BacktestTradeReport,
+    metrics: BacktestPerformanceMetrics,
+    report_paths: BacktestReportPaths,
+) -> None:
+    """バックテスト結果と分析指標を表示する。"""
+
+    report = result.equity_curve_report
+
+    print("Project KATANA ORB Backtest")
+    print(f"frames: {result.frame_count}")
+    print(f"signals: {result.signal_count}")
+    print(f"orders: {result.queued_count}")
+    print(f"executions: {result.execution_count}")
+    print(
+        f"portfolio_updates: "
+        f"{result.portfolio_update_count}"
+    )
+    print(f"trades: {metrics.trade_count}")
+    print(
+        "win_rate: "
+        + (
+            "N/A"
+            if metrics.win_rate is None
+            else f"{metrics.win_rate:.2%}"
+        )
+    )
+    print(
+        "profit_factor: "
+        + (
+            "N/A"
+            if metrics.profit_factor is None
+            else f"{metrics.profit_factor:.4f}"
+        )
+    )
+    print(
+        "expectancy: "
+        + (
+            "N/A"
+            if metrics.expectancy is None
+            else f"{metrics.expectancy:.2f}"
+        )
+    )
+    print(
+        f"net_profit_loss: "
+        f"{metrics.net_profit_loss:.2f}"
+    )
+    print(
+        f"maximum_consecutive_wins: "
+        f"{metrics.maximum_consecutive_wins}"
+    )
+    print(
+        f"maximum_consecutive_losses: "
+        f"{metrics.maximum_consecutive_losses}"
+    )
+    print(
+        f"unmatched_buy_quantity: "
+        f"{trade_report.unmatched_buy_quantity}"
+    )
+    print(
+        f"unmatched_sell_quantity: "
+        f"{trade_report.unmatched_sell_quantity}"
+    )
+
+    if report is not None:
+        print(f"initial_equity: {report.initial_equity:.2f}")
+        print(f"final_equity: {report.final_equity:.2f}")
+        print(
+            f"total_return_rate: "
+            f"{report.total_return:.4f}"
+        )
+        print(
+            f"maximum_drawdown_rate: "
+            f"{report.maximum_drawdown:.4f}"
+        )
+
+    print(f"state_database: {state_database_path}")
+    print(
+        f"report_directory: "
+        f"{report_paths.output_directory}"
+    )
+    print(f"trades_csv: {report_paths.trades_csv}")
+    print(
+        f"equity_curve_csv: "
+        f"{report_paths.equity_curve_csv}"
+    )
+    print(f"metrics_csv: {report_paths.metrics_csv}")
+    print(f"summary_json: {report_paths.summary_json}")
+
+
+def run_optimization(
+    *,
+    series: HistoricalBarSeries,
+    report_directory: Path,
+    initial_cash: float,
+    quantity: int,
+    force_exit_time: time,
+    commission: float,
+    slippage_rate: float,
+    stop_loss_candidates: tuple[float | None, ...],
+    take_profit_candidates: tuple[float | None, ...],
+    opening_range_end_candidates: tuple[time, ...],
+    ranking_metric: RankingMetric,
+    top_n: int,
+) -> int:
+    """ORBパラメータ最適化を実行する。"""
+
+    if top_n <= 0:
+        raise ValueError(
+            "optimization-top-nは0より大きい必要があります。"
+        )
+
+    grid = OrbOptimizationGridService().create_grid(
+        stop_loss_rates=stop_loss_candidates,
+        take_profit_rates=take_profit_candidates,
+        opening_range_ends=opening_range_end_candidates,
+    )
+    runs_directory = report_directory / "runs"
+
+    def executor(
+        parameter: OrbOptimizationParameters,
+    ) -> OrbOptimizationExecutionOutput:
+        run_directory = (
+            runs_directory / parameter.parameter_id
+        )
+        state_database_path = (
+            run_directory / "state.db"
+        )
+
+        runner = build_runner(
+            series=series,
+            state_database_path=state_database_path,
+            initial_cash=initial_cash,
+            strategy_settings=OrbSignalStrategySettings(
+                quantity=quantity,
+                opening_range_end=(
+                    parameter.opening_range_end
+                ),
+                force_exit_time=force_exit_time,
+                stop_loss_rate=(
+                    parameter.stop_loss_rate
+                ),
+                take_profit_rate=(
+                    parameter.take_profit_rate
+                ),
+            ),
+            commission=commission,
+            slippage_rate=slippage_rate,
+        )
+        result = runner.run()
+
+        (
+            trade_report,
+            metrics,
+            _paths,
+        ) = create_reports(
+            state_database_path=state_database_path,
+            output_directory=run_directory,
+            equity_curve_report=result.equity_curve_report,
+        )
+
+        if (
+            trade_report.unmatched_buy_quantity > 0
+            or trade_report.unmatched_sell_quantity > 0
+        ):
+            raise RuntimeError(
+                "最適化試行に未対応約定が残っています。"
+            )
+
+        return OrbOptimizationExecutionOutput(
+            metrics=metrics,
+            equity_curve_report=(
+                result.equity_curve_report
+            ),
+        )
+
+    optimization_result = OrbOptimizationRunner(
+        executor=executor
+    ).run(
+        grid,
+        continue_on_error=True,
+    )
+
+    ranking = OptimizationRankingService().rank(
+        optimization_result,
+        metric=ranking_metric,
+        top_n=top_n,
+    )
+
+    paths = OptimizationReportWriter().write(
+        output_directory=report_directory,
+        result=optimization_result,
+        ranking=ranking,
+    )
+
+    print("Project KATANA ORB Optimization")
+    print(f"combinations: {grid.combination_count}")
+    print(
+        f"completed: "
+        f"{optimization_result.completed_count}"
+    )
+    print(
+        f"failed: "
+        f"{optimization_result.failed_count}"
+    )
+
+    for item in ranking:
+        print(
+            f"rank={item.rank} "
+            f"parameter={item.run.parameter_id} "
+            f"net_profit={item.run.net_profit_loss} "
+            f"profit_factor={item.run.profit_factor} "
+            f"win_rate={item.run.win_rate} "
+            f"max_drawdown={item.run.maximum_drawdown}"
+        )
+
+    print(
+        f"optimization_csv: "
+        f"{paths.optimization_csv}"
+    )
+    print(
+        f"optimization_json: "
+        f"{paths.optimization_json}"
+    )
+
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLIエントリーポイント。"""
+
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    start_date = _parse_date(args.start_date)
+    end_date = _parse_date(args.end_date)
+
+    series = load_series(
+        database_path=args.database,
+        code=args.code,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    run_token = uuid4().hex[:12]
+    report_prefix = (
+        "optimization"
+        if args.optimize
+        else "backtest"
+    )
+    report_directory = (
+        args.report_dir
+        if args.report_dir is not None
+        else settings.reports_dir
+        / (
+            f"{report_prefix}_{args.code}_"
+            f"{run_token}"
+        )
+    )
+
+    if args.optimize:
+        return run_optimization(
+            series=series,
+            report_directory=report_directory,
+            initial_cash=args.initial_cash,
+            quantity=args.quantity,
+            force_exit_time=args.force_exit_time,
+            commission=args.commission,
+            slippage_rate=args.slippage_rate,
+            stop_loss_candidates=(
+                _parse_rate_candidates(
+                    args.stop_loss_candidates
+                )
+            ),
+            take_profit_candidates=(
+                _parse_rate_candidates(
+                    args.take_profit_candidates
+                )
+            ),
+            opening_range_end_candidates=(
+                _parse_time_candidates(
+                    args.opening_range_end_candidates
+                )
+            ),
+            ranking_metric=RankingMetric(
+                args.optimization_metric
+            ),
+            top_n=args.optimization_top_n,
+        )
+
+    state_database_path = (
+        args.state_database
+        if args.state_database is not None
+        else report_directory / "state.db"
+    )
+
+    runner = build_runner(
+        series=series,
+        state_database_path=state_database_path,
+        initial_cash=args.initial_cash,
+        strategy_settings=OrbSignalStrategySettings(
+            quantity=args.quantity,
+            opening_range_end=args.opening_range_end,
+            force_exit_time=args.force_exit_time,
+            stop_loss_rate=args.stop_loss_rate,
+            take_profit_rate=args.take_profit_rate,
+        ),
+        commission=args.commission,
+        slippage_rate=args.slippage_rate,
+    )
+    result = runner.run()
+
+    (
+        trade_report,
+        metrics,
+        report_paths,
+    ) = create_reports(
+        state_database_path=state_database_path,
+        output_directory=report_directory,
+        equity_curve_report=result.equity_curve_report,
+    )
+
+    print_result(
+        result,
+        state_database_path=state_database_path,
+        trade_report=trade_report,
+        metrics=metrics,
+        report_paths=report_paths,
+    )
+    return 0
+
+
+def _parse_rate_candidates(
+    value: str,
+) -> tuple[float | None, ...]:
+    """カンマ区切り率候補を解析する。"""
+
+    candidates: list[float | None] = []
+
+    for raw in value.split(","):
+        normalized = raw.strip().lower()
+
+        if not normalized:
+            continue
+
+        if normalized in {"none", "null"}:
+            candidates.append(None)
+        else:
+            candidates.append(float(normalized))
+
+    if not candidates:
+        raise ValueError(
+            "率候補を1件以上指定してください。"
+        )
+
+    return tuple(candidates)
+
+
+def _parse_time_candidates(
+    value: str,
+) -> tuple[time, ...]:
+    """カンマ区切り時刻候補を解析する。"""
+
+    candidates = tuple(
+        _parse_time(raw.strip())
+        for raw in value.split(",")
+        if raw.strip()
+    )
+
+    if not candidates:
+        raise ValueError(
+            "時刻候補を1件以上指定してください。"
+        )
+
+    return candidates
+
+
+def _parse_date(value: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "日付はYYYY-MM-DD形式で指定してください。"
+        ) from error
+
+
+def _parse_time(value: str) -> time:
+    try:
+        return time.fromisoformat(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "時刻はHH:MM形式で指定してください。"
+        ) from error
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+====================================================================================================
+FILE: app/backtest/optimization_report_writer.py
+====================================================================================================
+```python
+"""ORB最適化結果をCSV・JSONへ出力する。"""
+
+from __future__ import annotations
+
+import csv
+import json
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+from app.backtest.optimization_ranking import (
+    RankedOptimizationResult,
+)
+from app.backtest.optimization_result_models import (
+    OrbOptimizationResult,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class OptimizationReportPaths:
+    """最適化レポートの出力先。"""
+
+    output_directory: Path
+    optimization_csv: Path
+    optimization_json: Path
+
+
+class OptimizationReportWriter:
+    """最適化結果とランキングを分析用ファイルへ保存する。"""
+
+    def write(
+        self,
+        *,
+        output_directory: Path,
+        result: OrbOptimizationResult,
+        ranking: tuple[RankedOptimizationResult, ...],
+    ) -> OptimizationReportPaths:
+        """CSVとJSONを出力する。"""
+
+        output_directory.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        paths = OptimizationReportPaths(
+            output_directory=output_directory,
+            optimization_csv=(
+                output_directory / "optimization.csv"
+            ),
+            optimization_json=(
+                output_directory / "optimization.json"
+            ),
+        )
+
+        rank_by_parameter_id = {
+            item.run.parameter_id: item.rank
+            for item in ranking
+        }
+
+        self._write_csv(
+            paths.optimization_csv,
+            result=result,
+            rank_by_parameter_id=rank_by_parameter_id,
+        )
+        self._write_json(
+            paths.optimization_json,
+            result=result,
+            ranking=ranking,
+        )
+
+        return paths
+
+    @staticmethod
+    def _write_csv(
+        path: Path,
+        *,
+        result: OrbOptimizationResult,
+        rank_by_parameter_id: dict[str, int],
+    ) -> None:
+        """全試行結果をCSVへ保存する。"""
+
+        fieldnames = [
+            "rank",
+            "parameter_id",
+            "status",
+            "stop_loss_rate",
+            "take_profit_rate",
+            "opening_range_end",
+            "trade_count",
+            "net_profit_loss",
+            "profit_factor",
+            "win_rate",
+            "expectancy",
+            "maximum_drawdown",
+            "error_message",
+        ]
+
+        with path.open(
+            "w",
+            encoding="utf-8-sig",
+            newline="",
+        ) as file:
+            writer = csv.DictWriter(
+                file,
+                fieldnames=fieldnames,
+            )
+            writer.writeheader()
+
+            for run in result.runs:
+                metrics = run.metrics
+
+                writer.writerow(
+                    {
+                        "rank": rank_by_parameter_id.get(
+                            run.parameter_id,
+                            "",
+                        ),
+                        "parameter_id": run.parameter_id,
+                        "status": run.status.value,
+                        "stop_loss_rate": (
+                            ""
+                            if run.parameter.stop_loss_rate is None
+                            else run.parameter.stop_loss_rate
+                        ),
+                        "take_profit_rate": (
+                            ""
+                            if run.parameter.take_profit_rate is None
+                            else run.parameter.take_profit_rate
+                        ),
+                        "opening_range_end": (
+                            run.parameter.opening_range_end.strftime(
+                                "%H:%M"
+                            )
+                        ),
+                        "trade_count": (
+                            ""
+                            if metrics is None
+                            else metrics.trade_count
+                        ),
+                        "net_profit_loss": (
+                            ""
+                            if metrics is None
+                            else metrics.net_profit_loss
+                        ),
+                        "profit_factor": (
+                            ""
+                            if run.profit_factor is None
+                            else run.profit_factor
+                        ),
+                        "win_rate": (
+                            ""
+                            if run.win_rate is None
+                            else run.win_rate
+                        ),
+                        "expectancy": (
+                            ""
+                            if metrics is None
+                            or metrics.expectancy is None
+                            else metrics.expectancy
+                        ),
+                        "maximum_drawdown": (
+                            ""
+                            if run.maximum_drawdown is None
+                            else run.maximum_drawdown
+                        ),
+                        "error_message": (
+                            run.error_message or ""
+                        ),
+                    }
+                )
+
+    @staticmethod
+    def _write_json(
+        path: Path,
+        *,
+        result: OrbOptimizationResult,
+        ranking: tuple[RankedOptimizationResult, ...],
+    ) -> None:
+        """全試行結果とランキングをJSONへ保存する。"""
+
+        payload = {
+            "run_count": result.run_count,
+            "completed_count": result.completed_count,
+            "failed_count": result.failed_count,
+            "ranking": [
+                {
+                    "rank": item.rank,
+                    "parameter_id": item.run.parameter_id,
+                }
+                for item in ranking
+            ],
+            "runs": [
+                {
+                    "parameter_id": run.parameter_id,
+                    "status": run.status.value,
+                    "parameter": {
+                        "stop_loss_rate": (
+                            run.parameter.stop_loss_rate
+                        ),
+                        "take_profit_rate": (
+                            run.parameter.take_profit_rate
+                        ),
+                        "opening_range_end": (
+                            run.parameter.opening_range_end
+                            .isoformat(timespec="minutes")
+                        ),
+                    },
+                    "metrics": (
+                        None
+                        if run.metrics is None
+                        else asdict(run.metrics)
+                    ),
+                    "maximum_drawdown": (
+                        run.maximum_drawdown
+                    ),
+                    "error_message": run.error_message,
+                }
+                for run in result.runs
+            ],
+        }
+
+        path.write_text(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+```
+
+====================================================================================================
+FILE: app/backtest/composite_score_models.py
+====================================================================================================
+```python
+"""ORB最適化の複合スコアモデル。"""
+
+from dataclasses import dataclass
+
+from app.backtest.optimization_result_models import (
+    OrbOptimizationRunResult,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CompositeScoreWeights:
+    """複合スコアに使用する指標別の重み。"""
+
+    net_profit: float = 0.4
+    profit_factor: float = 0.3
+    win_rate: float = 0.2
+    maximum_drawdown: float = 0.1
+
+    def __post_init__(self) -> None:
+        """重みを検証する。"""
+
+        values = {
+            "純損益": self.net_profit,
+            "Profit Factor": self.profit_factor,
+            "勝率": self.win_rate,
+            "最大ドローダウン": self.maximum_drawdown,
+        }
+
+        for name, value in values.items():
+            if value < 0:
+                raise ValueError(
+                    f"{name}の重みは0以上である必要があります。"
+                )
+
+        if self.total <= 0:
+            raise ValueError(
+                "複合スコアの重み合計は"
+                "0より大きい必要があります。"
+            )
+
+    @property
+    def total(self) -> float:
+        """重み合計を返す。"""
+
+        return (
+            self.net_profit
+            + self.profit_factor
+            + self.win_rate
+            + self.maximum_drawdown
+        )
+
+    @property
+    def normalized(self) -> CompositeScoreWeights:
+        """合計1.0へ正規化した重みを返す。"""
+
+        total = self.total
+
+        return CompositeScoreWeights(
+            net_profit=self.net_profit / total,
+            profit_factor=self.profit_factor / total,
+            win_rate=self.win_rate / total,
+            maximum_drawdown=(
+                self.maximum_drawdown / total
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CompositeScoreComponents:
+    """複合スコアを構成する正規化済み指標。"""
+
+    net_profit: float
+    profit_factor: float
+    win_rate: float
+    maximum_drawdown: float
+
+    def __post_init__(self) -> None:
+        """各構成値が0以上1以下か検証する。"""
+
+        for name, value in {
+            "純損益スコア": self.net_profit,
+            "Profit Factorスコア": self.profit_factor,
+            "勝率スコア": self.win_rate,
+            "最大ドローダウンスコア": (
+                self.maximum_drawdown
+            ),
+        }.items():
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(
+                    f"{name}は0以上1以下である必要があります。"
+                )
+
+
+@dataclass(frozen=True, slots=True)
+class CompositeOptimizationScore:
+    """1試行の複合スコア。"""
+
+    run: OrbOptimizationRunResult
+    score: float
+    components: CompositeScoreComponents
+    weights: CompositeScoreWeights
+
+    def __post_init__(self) -> None:
+        """複合スコアを検証する。"""
+
+        if not 0.0 <= self.score <= 1.0:
+            raise ValueError(
+                "複合スコアは0以上1以下である必要があります。"
+            )
+
+        if not self.run.is_completed:
+            raise ValueError(
+                "複合スコアは正常完了した試行だけに"
+                "設定できます。"
+            )
+
+    @property
+    def parameter_id(self) -> str:
+        """パラメータIDを返す。"""
+
+        return self.run.parameter_id
+
+
+@dataclass(frozen=True, slots=True)
+class CompositeOptimizationScoreReport:
+    """最適化結果全体の複合スコア一覧。"""
+
+    scores: tuple[CompositeOptimizationScore, ...]
+
+    def __post_init__(self) -> None:
+        """パラメータID重複を拒否する。"""
+
+        parameter_ids = [
+            item.parameter_id
+            for item in self.scores
+        ]
+
+        if len(parameter_ids) != len(set(parameter_ids)):
+            raise ValueError(
+                "複合スコアのパラメータIDが"
+                "重複しています。"
+            )
+
+    @property
+    def score_count(self) -> int:
+        """スコア件数を返す。"""
+
+        return len(self.scores)
+
+    def get(
+        self,
+        parameter_id: str,
+    ) -> CompositeOptimizationScore:
+        """パラメータIDに一致するスコアを返す。"""
+
+        normalized = parameter_id.strip()
+
+        if not normalized:
+            raise ValueError(
+                "パラメータIDを指定してください。"
+            )
+
+        for item in self.scores:
+            if item.parameter_id == normalized:
+                return item
+
+        raise KeyError(
+            "指定された複合スコアが存在しません。 "
+            f"parameter_id={normalized}"
+        )
+```
+
+====================================================================================================
+FILE: app/backtest/composite_score_service.py
+====================================================================================================
+```python
+"""ORB最適化結果の複合スコアを算出する。"""
+
+from collections.abc import Callable
+
+from app.backtest.composite_score_models import (
+    CompositeOptimizationScore,
+    CompositeOptimizationScoreReport,
+    CompositeScoreComponents,
+    CompositeScoreWeights,
+)
+from app.backtest.optimization_result_models import (
+    OrbOptimizationResult,
+    OrbOptimizationRunResult,
+)
+
+
+class CompositeOptimizationScoreService:
+    """複数指標を正規化して複合スコアを算出する。"""
+
+    def create_report(
+        self,
+        result: OrbOptimizationResult,
+        *,
+        weights: CompositeScoreWeights | None = None,
+    ) -> CompositeOptimizationScoreReport:
+        """正常完了した試行へ複合スコアを付与する。"""
+
+        completed_runs = result.completed_runs
+
+        if not completed_runs:
+            return CompositeOptimizationScoreReport(
+                scores=()
+            )
+
+        normalized_weights = (
+            weights
+            if weights is not None
+            else CompositeScoreWeights()
+        ).normalized
+
+        net_profit_scores = self._normalize_metric(
+            completed_runs,
+            extractor=lambda run: run.net_profit_loss,
+            missing_value=0.0,
+        )
+        profit_factor_scores = self._normalize_metric(
+            completed_runs,
+            extractor=lambda run: run.profit_factor,
+            missing_value=0.0,
+        )
+        win_rate_scores = self._normalize_metric(
+            completed_runs,
+            extractor=lambda run: run.win_rate,
+            missing_value=0.0,
+        )
+        drawdown_scores = self._normalize_metric(
+            completed_runs,
+            extractor=lambda run: run.maximum_drawdown,
+            missing_value=1.0,
+            inverse=True,
+        )
+
+        scores = tuple(
+            self._create_score(
+                run=run,
+                weights=normalized_weights,
+                net_profit_score=(
+                    net_profit_scores[run.parameter_id]
+                ),
+                profit_factor_score=(
+                    profit_factor_scores[run.parameter_id]
+                ),
+                win_rate_score=(
+                    win_rate_scores[run.parameter_id]
+                ),
+                drawdown_score=(
+                    drawdown_scores[run.parameter_id]
+                ),
+            )
+            for run in completed_runs
+        )
+
+        return CompositeOptimizationScoreReport(
+            scores=scores
+        )
+
+    @staticmethod
+    def _create_score(
+        *,
+        run: OrbOptimizationRunResult,
+        weights: CompositeScoreWeights,
+        net_profit_score: float,
+        profit_factor_score: float,
+        win_rate_score: float,
+        drawdown_score: float,
+    ) -> CompositeOptimizationScore:
+        """構成値と重みから1試行のスコアを作成する。"""
+
+        components = CompositeScoreComponents(
+            net_profit=net_profit_score,
+            profit_factor=profit_factor_score,
+            win_rate=win_rate_score,
+            maximum_drawdown=drawdown_score,
+        )
+
+        raw_score = (
+            components.net_profit
+            * weights.net_profit
+            + components.profit_factor
+            * weights.profit_factor
+            + components.win_rate
+            * weights.win_rate
+            + components.maximum_drawdown
+            * weights.maximum_drawdown
+        )
+
+        score = min(1.0, max(0.0, raw_score))
+
+        return CompositeOptimizationScore(
+            run=run,
+            score=score,
+            components=components,
+            weights=weights,
+        )
+
+    @staticmethod
+    def _normalize_metric(
+        runs: tuple[OrbOptimizationRunResult, ...],
+        *,
+        extractor: Callable[
+            [OrbOptimizationRunResult],
+            float | None,
+        ],
+        missing_value: float,
+        inverse: bool = False,
+    ) -> dict[str, float]:
+        """指標を0〜1へMin-Max正規化する。"""
+
+        values = {
+            run.parameter_id: (
+                missing_value
+                if extractor(run) is None
+                else float(extractor(run))
+            )
+            for run in runs
+        }
+
+        minimum = min(values.values())
+        maximum = max(values.values())
+
+        if maximum == minimum:
+            return {
+                parameter_id: 1.0
+                for parameter_id in values
+            }
+
+        normalized = {
+            parameter_id: min(
+                1.0,
+                max(
+                    0.0,
+                    (value - minimum)
+                    / (maximum - minimum),
+                ),
+            )
+            for parameter_id, value in values.items()
+        }
+
+        if inverse:
+            normalized = {
+                parameter_id: min(
+                    1.0,
+                    max(0.0, 1.0 - value),
+                )
+                for parameter_id, value in normalized.items()
+            }
+
+        return normalized
+```
+
+====================================================================================================
+FILE: app/backtest/composite_ranking.py
+====================================================================================================
+```python
+"""複合最適化スコアのランキング。"""
+
+from dataclasses import dataclass
+
+from app.backtest.composite_score_models import (
+    CompositeOptimizationScore,
+    CompositeOptimizationScoreReport,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RankedCompositeOptimizationScore:
+    """順位付き複合スコア。"""
+
+    rank: int
+    item: CompositeOptimizationScore
+
+    def __post_init__(self) -> None:
+        """順位を検証する。"""
+
+        if self.rank <= 0:
+            raise ValueError(
+                "順位は0より大きい必要があります。"
+            )
+
+    @property
+    def parameter_id(self) -> str:
+        """パラメータIDを返す。"""
+
+        return self.item.parameter_id
+
+    @property
+    def score(self) -> float:
+        """複合スコアを返す。"""
+
+        return self.item.score
+
+
+@dataclass(frozen=True, slots=True)
+class CompositeOptimizationRanking:
+    """複合スコア順のランキング。"""
+
+    items: tuple[RankedCompositeOptimizationScore, ...]
+
+    def __post_init__(self) -> None:
+        """順位とパラメータIDの重複を検証する。"""
+
+        ranks = [
+            item.rank
+            for item in self.items
+        ]
+        parameter_ids = [
+            item.parameter_id
+            for item in self.items
+        ]
+
+        if len(ranks) != len(set(ranks)):
+            raise ValueError(
+                "ランキングの順位が重複しています。"
+            )
+
+        if len(parameter_ids) != len(set(parameter_ids)):
+            raise ValueError(
+                "ランキングのパラメータIDが"
+                "重複しています。"
+            )
+
+        expected_ranks = list(
+            range(1, len(self.items) + 1)
+        )
+
+        if ranks != expected_ranks:
+            raise ValueError(
+                "ランキングの順位は1からの連番で"
+                "指定してください。"
+            )
+
+    @property
+    def item_count(self) -> int:
+        """ランキング件数を返す。"""
+
+        return len(self.items)
+
+    @property
+    def best(
+        self,
+    ) -> RankedCompositeOptimizationScore | None:
+        """最上位結果を返す。"""
+
+        if not self.items:
+            return None
+
+        return self.items[0]
+
+    def get(
+        self,
+        parameter_id: str,
+    ) -> RankedCompositeOptimizationScore:
+        """パラメータIDに一致する順位結果を返す。"""
+
+        normalized = parameter_id.strip()
+
+        if not normalized:
+            raise ValueError(
+                "パラメータIDを指定してください。"
+            )
+
+        for item in self.items:
+            if item.parameter_id == normalized:
+                return item
+
+        raise KeyError(
+            "指定されたランキング結果が存在しません。 "
+            f"parameter_id={normalized}"
+        )
+
+
+class CompositeOptimizationRankingService:
+    """複合スコア一覧を順位付けする。"""
+
+    def rank(
+        self,
+        report: CompositeOptimizationScoreReport,
+        *,
+        top_n: int | None = None,
+    ) -> CompositeOptimizationRanking:
+        """スコア降順で安定したランキングを返す。"""
+
+        if top_n is not None and top_n <= 0:
+            raise ValueError(
+                "top_nは0より大きい必要があります。"
+            )
+
+        ordered = sorted(
+            report.scores,
+            key=lambda item: (
+                -item.score,
+                item.parameter_id,
+            ),
+        )
+
+        if top_n is not None:
+            ordered = ordered[:top_n]
+
+        items = tuple(
+            RankedCompositeOptimizationScore(
+                rank=index,
+                item=item,
+            )
+            for index, item in enumerate(
+                ordered,
+                start=1,
+            )
+        )
+
+        return CompositeOptimizationRanking(
+            items=items
+        )
+```
+
+====================================================================================================
+FILE: app/backtest/optimization_ranking.py
+====================================================================================================
+```python
+from dataclasses import dataclass
+from enum import StrEnum
+from app.backtest.optimization_result_models import OrbOptimizationResult, OrbOptimizationRunResult
+
+class RankingMetric(StrEnum):
+    NET_PROFIT='net_profit'
+    PROFIT_FACTOR='profit_factor'
+    WIN_RATE='win_rate'
+    MAX_DRAWDOWN='max_drawdown'
+
+@dataclass(frozen=True, slots=True)
+class RankedOptimizationResult:
+    rank:int
+    run:OrbOptimizationRunResult
+
+class OptimizationRankingService:
+    def rank(self,result:OrbOptimizationResult,*,metric:RankingMetric,top_n:int|None=None):
+        runs=list(result.completed_runs)
+        if metric is RankingMetric.NET_PROFIT:
+            runs.sort(key=lambda r:(r.net_profit_loss or float('-inf'),r.parameter_id),reverse=True)
+        elif metric is RankingMetric.PROFIT_FACTOR:
+            runs.sort(key=lambda r:(r.profit_factor or float('-inf'),r.parameter_id),reverse=True)
+        elif metric is RankingMetric.WIN_RATE:
+            runs.sort(key=lambda r:(r.win_rate or float('-inf'),r.parameter_id),reverse=True)
+        else:
+            runs.sort(key=lambda r:(r.maximum_drawdown if r.maximum_drawdown is not None else float('inf'),r.parameter_id))
+        if top_n is not None:
+            runs=runs[:top_n]
+        return tuple(RankedOptimizationResult(i+1,r) for i,r in enumerate(runs))
+```
+
+====================================================================================================
+FILE: app/backtest/optimization_result_models.py
+====================================================================================================
+```python
+"""ORB最適化実行結果の共通モデル。"""
+
+from dataclasses import dataclass
+from enum import StrEnum
+
+from app.backtest.optimization_models import (
+    OrbOptimizationParameters,
+)
+from app.backtest.performance_metrics_models import (
+    BacktestPerformanceMetrics,
+)
+from app.trading.equity_curve_models import (
+    EquityCurveReport,
+)
+
+
+class OptimizationRunStatus(StrEnum):
+    """1試行の終了状態。"""
+
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class OrbOptimizationRunResult:
+    """1つのパラメータ組み合わせの実行結果。"""
+
+    parameter: OrbOptimizationParameters
+    status: OptimizationRunStatus
+    metrics: BacktestPerformanceMetrics | None
+    equity_curve_report: EquityCurveReport | None
+    error_message: str | None = None
+
+    def __post_init__(self) -> None:
+        """実行結果の整合性を検証する。"""
+
+        if self.status is OptimizationRunStatus.COMPLETED:
+            if self.metrics is None:
+                raise ValueError(
+                    "完了結果には成績指標が必要です。"
+                )
+
+            if self.error_message is not None:
+                raise ValueError(
+                    "完了結果にはエラーメッセージを"
+                    "設定できません。"
+                )
+
+        if self.status is OptimizationRunStatus.FAILED:
+            if not (self.error_message or "").strip():
+                raise ValueError(
+                    "失敗結果にはエラーメッセージが必要です。"
+                )
+
+    @property
+    def parameter_id(self) -> str:
+        """パラメータIDを返す。"""
+
+        return self.parameter.parameter_id
+
+    @property
+    def is_completed(self) -> bool:
+        """正常完了したか返す。"""
+
+        return self.status is OptimizationRunStatus.COMPLETED
+
+    @property
+    def is_failed(self) -> bool:
+        """失敗したか返す。"""
+
+        return self.status is OptimizationRunStatus.FAILED
+
+    @property
+    def net_profit_loss(self) -> float | None:
+        """純損益を返す。"""
+
+        if self.metrics is None:
+            return None
+
+        return self.metrics.net_profit_loss
+
+    @property
+    def profit_factor(self) -> float | None:
+        """Profit Factorを返す。"""
+
+        if self.metrics is None:
+            return None
+
+        return self.metrics.profit_factor
+
+    @property
+    def win_rate(self) -> float | None:
+        """勝率を返す。"""
+
+        if self.metrics is None:
+            return None
+
+        return self.metrics.win_rate
+
+    @property
+    def maximum_drawdown(self) -> float | None:
+        """最大ドローダウン率を返す。"""
+
+        if self.equity_curve_report is None:
+            return None
+
+        return self.equity_curve_report.maximum_drawdown
+
+
+@dataclass(frozen=True, slots=True)
+class OrbOptimizationResult:
+    """最適化グリッド全体の実行結果。"""
+
+    runs: tuple[OrbOptimizationRunResult, ...]
+
+    def __post_init__(self) -> None:
+        """パラメータIDの重複を拒否する。"""
+
+        parameter_ids = [
+            run.parameter_id
+            for run in self.runs
+        ]
+
+        if len(parameter_ids) != len(set(parameter_ids)):
+            raise ValueError(
+                "最適化実行結果のパラメータIDが"
+                "重複しています。"
+            )
+
+    @property
+    def run_count(self) -> int:
+        """試行件数を返す。"""
+
+        return len(self.runs)
+
+    @property
+    def completed_count(self) -> int:
+        """正常完了件数を返す。"""
+
+        return sum(
+            run.is_completed
+            for run in self.runs
+        )
+
+    @property
+    def failed_count(self) -> int:
+        """失敗件数を返す。"""
+
+        return sum(
+            run.is_failed
+            for run in self.runs
+        )
+
+    @property
+    def completed_runs(
+        self,
+    ) -> tuple[OrbOptimizationRunResult, ...]:
+        """正常完了した試行だけ返す。"""
+
+        return tuple(
+            run
+            for run in self.runs
+            if run.is_completed
+        )
+
+    @property
+    def failed_runs(
+        self,
+    ) -> tuple[OrbOptimizationRunResult, ...]:
+        """失敗した試行だけ返す。"""
+
+        return tuple(
+            run
+            for run in self.runs
+            if run.is_failed
+        )
+
+    def get(
+        self,
+        parameter_id: str,
+    ) -> OrbOptimizationRunResult:
+        """パラメータIDに一致する結果を返す。"""
+
+        normalized = parameter_id.strip()
+
+        if not normalized:
+            raise ValueError(
+                "パラメータIDを指定してください。"
+            )
+
+        for run in self.runs:
+            if run.parameter_id == normalized:
+                return run
+
+        raise KeyError(
+            "指定された最適化結果が存在しません。 "
+            f"parameter_id={normalized}"
+        )
+```
+
+====================================================================================================
+FILE: tests/test_run_backtest.py
+====================================================================================================
+```python
+"""イベント駆動BacktestRunnerとCLIのテスト。"""
+
+from datetime import date, datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import pytest
+
+from app.backtest.historical_models import (
+    HistoricalBarSeries,
+)
+from app.backtest.run_backtest import (
+    _normalize_market_datetime,
+    _parse_date,
+    build_runner,
+    load_series,
+    main,
+)
+from app.backtest.orb_signal_strategy import (
+    OrbSignalStrategySettings,
+)
+from app.database import initialize_database
+from app.market.bar_repository import MarketBarRepository
+from app.market.models import StockPrice
+from app.trading.order_models import OrderSide
+from app.trading.trade_execution_repository import (
+    TradeExecutionRepository,
+)
+
+
+JST = ZoneInfo("Asia/Tokyo")
+
+
+def create_prices() -> list[StockPrice]:
+    """BUYと利確EXITが発生する5分足を作成する。"""
+
+    values = [
+        (9, 0, 1000, 1000, 990, 995),
+        (9, 5, 995, 1000, 990, 998),
+        (9, 10, 998, 1000, 995, 999),
+        (9, 15, 999, 1000, 995, 999),
+        (9, 20, 1000, 1010, 999, 1005),
+        (9, 25, 1005, 1020, 1000, 1015),
+    ]
+
+    return [
+        StockPrice(
+            code="7203",
+            datetime=datetime(
+                2026,
+                7,
+                1,
+                hour,
+                minute,
+                tzinfo=JST,
+            ),
+            open=float(open_price),
+            high=float(high),
+            low=float(low),
+            close=float(close),
+            volume=1000,
+        )
+        for (
+            hour,
+            minute,
+            open_price,
+            high,
+            low,
+            close,
+        ) in values
+    ]
+
+
+def create_market_database(path: Path) -> None:
+    initialize_database(path)
+    MarketBarRepository(path).save_all(
+        create_prices(),
+        interval_minutes=5,
+        data_source="test",
+    )
+
+
+def test_load_series_reads_five_minute_bars(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "market.db"
+    create_market_database(database_path)
+
+    series = load_series(
+        database_path=database_path,
+        code="7203",
+        start_date=date(2026, 7, 1),
+        end_date=date(2026, 7, 1),
+    )
+
+    assert isinstance(series, HistoricalBarSeries)
+    assert series.bar_count == 6
+    assert series.code == "7203"
+
+
+def test_event_runner_executes_buy_and_exit_at_signal_prices(
+    tmp_path: Path,
+) -> None:
+    market_database = tmp_path / "market.db"
+    state_database = tmp_path / "state.db"
+    create_market_database(market_database)
+
+    series = load_series(
+        database_path=market_database,
+        code="7203",
+        start_date=date(2026, 7, 1),
+        end_date=date(2026, 7, 1),
+    )
+    runner = build_runner(
+        series=series,
+        state_database_path=state_database,
+        initial_cash=1_000_000.0,
+        strategy_settings=OrbSignalStrategySettings(
+            quantity=100,
+            take_profit_rate=0.01,
+        ),
+        commission=0.0,
+        slippage_rate=0.0,
+    )
+
+    result = runner.run()
+
+    assert result.signal_count == 2
+    assert result.execution_count == 2
+    assert result.portfolio_update_count == 2
+
+    records = TradeExecutionRepository(
+        state_database
+    ).list_recent(limit=10)
+
+    by_side = {
+        record.execution.side: record.execution
+        for record in records
+    }
+
+    assert by_side[OrderSide.BUY].execution_price == pytest.approx(
+        1005.0
+    )
+    assert by_side[OrderSide.SELL].execution_price == pytest.approx(
+        1015.05
+    )
+
+
+def test_cli_runs_and_prints_summary(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    market_database = tmp_path / "market.db"
+    state_database = tmp_path / "state.db"
+    create_market_database(market_database)
+
+    exit_code = main(
+        [
+            "--code",
+            "7203",
+            "--from",
+            "2026-07-01",
+            "--to",
+            "2026-07-01",
+            "--database",
+            str(market_database),
+            "--state-database",
+            str(state_database),
+            "--initial-cash",
+            "1000000",
+            "--take-profit-rate",
+            "0.01",
+        ]
+    )
+
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "Project KATANA ORB Backtest" in output
+    assert "signals: 2" in output
+    assert "executions: 2" in output
+    assert "trades: 1" in output
+    assert "win_rate: 100.00%" in output
+    assert "profit_factor: N/A" in output
+    assert state_database.exists()
+
+
+def test_cli_writes_reports_to_requested_directory(
+    tmp_path: Path,
+) -> None:
+    """--report-dirへ4種類のレポートを出力する。"""
+
+    market_database = tmp_path / "market.db"
+    state_database = tmp_path / "state.db"
+    report_directory = tmp_path / "reports" / "run-001"
+    create_market_database(market_database)
+
+    exit_code = main(
+        [
+            "--code",
+            "7203",
+            "--from",
+            "2026-07-01",
+            "--to",
+            "2026-07-01",
+            "--database",
+            str(market_database),
+            "--state-database",
+            str(state_database),
+            "--report-dir",
+            str(report_directory),
+            "--initial-cash",
+            "1000000",
+            "--take-profit-rate",
+            "0.01",
+        ]
+    )
+
+    assert exit_code == 0
+    assert (report_directory / "trades.csv").exists()
+    assert (
+        report_directory / "equity_curve.csv"
+    ).exists()
+    assert (report_directory / "metrics.csv").exists()
+    assert (report_directory / "summary.json").exists()
+
+
+def test_load_series_rejects_empty_period(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "market.db"
+    initialize_database(database_path)
+
+    with pytest.raises(ValueError, match="5分足"):
+        load_series(
+            database_path=database_path,
+            code="7203",
+            start_date=date(2026, 7, 1),
+            end_date=date(2026, 7, 1),
+        )
+
+
+def test_normalize_market_datetime_adds_jst() -> None:
+    """タイムゾーンなし日時を日本時間として扱う。"""
+
+    value = datetime(2026, 7, 1, 9, 0)
+
+    normalized = _normalize_market_datetime(value)
+
+    assert normalized.tzinfo == JST
+    assert normalized.hour == 9
+
+
+def test_normalize_market_datetime_converts_aware_value() -> None:
+    """タイムゾーン付き日時も日本時間へ統一する。"""
+
+    value = datetime(
+        2026,
+        7,
+        1,
+        0,
+        0,
+        tzinfo=ZoneInfo("UTC"),
+    )
+
+    normalized = _normalize_market_datetime(value)
+
+    assert normalized.tzinfo == JST
+    assert normalized.hour == 9
+
+
+def test_parse_date_rejects_invalid_format() -> None:
+    with pytest.raises(Exception, match="YYYY-MM-DD"):
+        _parse_date("2026/07/01")
+
+
+def test_cli_runs_optimization_and_writes_reports(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """--optimizeで全組み合わせとランキングを出力する。"""
+
+    market_database = tmp_path / "market.db"
+    report_directory = tmp_path / "optimization"
+    create_market_database(market_database)
+
+    exit_code = main(
+        [
+            "--code",
+            "7203",
+            "--from",
+            "2026-07-01",
+            "--to",
+            "2026-07-01",
+            "--database",
+            str(market_database),
+            "--report-dir",
+            str(report_directory),
+            "--initial-cash",
+            "1000000",
+            "--optimize",
+            "--stop-loss-candidates",
+            "0.01,0.02",
+            "--take-profit-candidates",
+            "0.01",
+            "--opening-range-end-candidates",
+            "09:15",
+            "--optimization-top-n",
+            "2",
+        ]
+    )
+
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "Project KATANA ORB Optimization" in output
+    assert "combinations: 2" in output
+    assert (report_directory / "optimization.csv").exists()
+    assert (report_directory / "optimization.json").exists()
+```
+
+====================================================================================================
+FILE: tests/test_optimization_report_writer.py
+====================================================================================================
+```python
+"""OptimizationReportWriterのテスト。"""
+
+import csv
+import json
+from datetime import time
+from pathlib import Path
+
+from app.backtest.optimization_models import (
+    OrbOptimizationParameters,
+)
+from app.backtest.optimization_ranking import (
+    OptimizationRankingService,
+    RankingMetric,
+)
+from app.backtest.optimization_report_writer import (
+    OptimizationReportWriter,
+)
+from app.backtest.optimization_result_models import (
+    OptimizationRunStatus,
+    OrbOptimizationResult,
+    OrbOptimizationRunResult,
+)
+from app.backtest.performance_metrics_models import (
+    BacktestPerformanceMetrics,
+)
+
+
+def create_metrics(
+    profit: float,
+) -> BacktestPerformanceMetrics:
+    winner = profit > 0
+    loser = profit < 0
+    flat = profit == 0
+
+    return BacktestPerformanceMetrics(
+        trade_count=1,
+        winning_trade_count=int(winner),
+        losing_trade_count=int(loser),
+        flat_trade_count=int(flat),
+        gross_profit=max(0.0, profit),
+        gross_loss=max(0.0, -profit),
+        net_profit_loss=profit,
+        win_rate=1.0 if winner else 0.0,
+        profit_factor=None if not loser else 0.0,
+        average_profit=profit if winner else None,
+        average_loss=-profit if loser else None,
+        expectancy=profit,
+        maximum_consecutive_wins=int(winner),
+        maximum_consecutive_losses=int(loser),
+        unmatched_buy_quantity=0,
+        unmatched_sell_quantity=0,
+    )
+
+
+def create_run(
+    minute: int,
+    profit: float,
+) -> OrbOptimizationRunResult:
+    return OrbOptimizationRunResult(
+        parameter=OrbOptimizationParameters(
+            stop_loss_rate=0.02,
+            take_profit_rate=0.04,
+            opening_range_end=time(9, minute),
+        ),
+        status=OptimizationRunStatus.COMPLETED,
+        metrics=create_metrics(profit),
+        equity_curve_report=None,
+    )
+
+
+def test_writer_creates_ranked_files(
+    tmp_path: Path,
+) -> None:
+    result = OrbOptimizationResult(
+        runs=(
+            create_run(10, 1000.0),
+            create_run(15, 2000.0),
+        )
+    )
+    ranking = OptimizationRankingService().rank(
+        result,
+        metric=RankingMetric.NET_PROFIT,
+    )
+
+    paths = OptimizationReportWriter().write(
+        output_directory=tmp_path,
+        result=result,
+        ranking=ranking,
+    )
+
+    with paths.optimization_csv.open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as file:
+        rows = list(csv.DictReader(file))
+
+    payload = json.loads(
+        paths.optimization_json.read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert paths.optimization_csv.exists()
+    assert paths.optimization_json.exists()
+    assert len(rows) == 2
+    assert payload["run_count"] == 2
+    assert payload["completed_count"] == 2
+    assert payload["ranking"][0]["rank"] == 1
+```
+
+====================================================================================================
+FILE: tests/test_composite_score_service.py
+====================================================================================================
+```python
+"""複合最適化スコアのテスト。"""
+
+from datetime import datetime, time, timezone
+
+import pytest
+
+from app.backtest.composite_score_models import (
+    CompositeScoreWeights,
+)
+from app.backtest.composite_score_service import (
+    CompositeOptimizationScoreService,
+)
+from app.backtest.optimization_models import (
+    OrbOptimizationParameters,
+)
+from app.backtest.optimization_result_models import (
+    OptimizationRunStatus,
+    OrbOptimizationResult,
+    OrbOptimizationRunResult,
+)
+from app.backtest.performance_metrics_models import (
+    BacktestPerformanceMetrics,
+)
+from app.trading.equity_curve_models import (
+    EquityCurvePoint,
+    EquityCurveReport,
+)
+
+
+NOW = datetime(
+    2026,
+    7,
+    1,
+    tzinfo=timezone.utc,
+)
+
+
+def metrics(
+    *,
+    net_profit: float,
+    profit_factor: float | None,
+    win_rate: float | None,
+) -> BacktestPerformanceMetrics:
+    """テスト用成績指標を作成する。"""
+
+    return BacktestPerformanceMetrics(
+        trade_count=1,
+        winning_trade_count=int(net_profit > 0),
+        losing_trade_count=int(net_profit < 0),
+        flat_trade_count=int(net_profit == 0),
+        gross_profit=max(0.0, net_profit),
+        gross_loss=max(0.0, -net_profit),
+        net_profit_loss=net_profit,
+        win_rate=win_rate,
+        profit_factor=profit_factor,
+        average_profit=None,
+        average_loss=None,
+        expectancy=net_profit,
+        maximum_consecutive_wins=0,
+        maximum_consecutive_losses=0,
+        unmatched_buy_quantity=0,
+        unmatched_sell_quantity=0,
+    )
+
+
+def equity(
+    *,
+    drawdown: float,
+) -> EquityCurveReport:
+    """テスト用資産曲線を作成する。"""
+
+    point = EquityCurvePoint(
+        generated_at=NOW,
+        equity=1_000_000.0,
+        cash_balance=1_000_000.0,
+        market_value=0.0,
+        realized_profit_loss=0.0,
+        unrealized_profit_loss=0.0,
+        period_return=None,
+        cumulative_return=0.0,
+    )
+
+    return EquityCurveReport(
+        points=(point,),
+        initial_equity=1_000_000.0,
+        final_equity=1_000_000.0,
+        absolute_profit_loss=0.0,
+        total_return=0.0,
+        maximum_drawdown=drawdown,
+        maximum_drawdown_amount=(
+            drawdown * 1_000_000.0
+        ),
+        winning_period_count=0,
+        losing_period_count=0,
+        flat_period_count=0,
+    )
+
+
+def run(
+    *,
+    minute: int,
+    net_profit: float,
+    profit_factor: float | None,
+    win_rate: float | None,
+    drawdown: float | None,
+) -> OrbOptimizationRunResult:
+    """正常完了した試行を作成する。"""
+
+    return OrbOptimizationRunResult(
+        parameter=OrbOptimizationParameters(
+            stop_loss_rate=0.02,
+            take_profit_rate=0.04,
+            opening_range_end=time(9, minute),
+        ),
+        status=OptimizationRunStatus.COMPLETED,
+        metrics=metrics(
+            net_profit=net_profit,
+            profit_factor=profit_factor,
+            win_rate=win_rate,
+        ),
+        equity_curve_report=(
+            None
+            if drawdown is None
+            else equity(drawdown=drawdown)
+        ),
+    )
+
+
+def test_service_normalizes_and_scores_runs() -> None:
+    """各指標を正規化して重み付けする。"""
+
+    first = run(
+        minute=10,
+        net_profit=100.0,
+        profit_factor=1.0,
+        win_rate=0.4,
+        drawdown=0.20,
+    )
+    second = run(
+        minute=15,
+        net_profit=300.0,
+        profit_factor=2.0,
+        win_rate=0.6,
+        drawdown=0.10,
+    )
+
+    report = (
+        CompositeOptimizationScoreService()
+        .create_report(
+            OrbOptimizationResult(
+                runs=(first, second)
+            )
+        )
+    )
+
+    first_score = report.get(
+        first.parameter_id
+    )
+    second_score = report.get(
+        second.parameter_id
+    )
+
+    assert first_score.score == pytest.approx(0.0)
+    assert second_score.score == pytest.approx(1.0)
+    assert second_score.components.net_profit == 1.0
+    assert second_score.components.profit_factor == 1.0
+    assert second_score.components.win_rate == 1.0
+    assert second_score.components.maximum_drawdown == 1.0
+
+
+def test_service_inverts_drawdown_score() -> None:
+    """小さいドローダウンほど高得点にする。"""
+
+    high_drawdown = run(
+        minute=10,
+        net_profit=100.0,
+        profit_factor=1.0,
+        win_rate=0.5,
+        drawdown=0.30,
+    )
+    low_drawdown = run(
+        minute=15,
+        net_profit=100.0,
+        profit_factor=1.0,
+        win_rate=0.5,
+        drawdown=0.05,
+    )
+
+    report = (
+        CompositeOptimizationScoreService()
+        .create_report(
+            OrbOptimizationResult(
+                runs=(
+                    high_drawdown,
+                    low_drawdown,
+                )
+            ),
+            weights=CompositeScoreWeights(
+                net_profit=0.0,
+                profit_factor=0.0,
+                win_rate=0.0,
+                maximum_drawdown=1.0,
+            ),
+        )
+    )
+
+    assert report.get(
+        low_drawdown.parameter_id
+    ).score == pytest.approx(1.0)
+    assert report.get(
+        high_drawdown.parameter_id
+    ).score == pytest.approx(0.0)
+
+
+def test_service_normalizes_weights() -> None:
+    """重み合計が1でなくても正規化する。"""
+
+    value = run(
+        minute=15,
+        net_profit=100.0,
+        profit_factor=1.5,
+        win_rate=0.5,
+        drawdown=0.1,
+    )
+
+    report = (
+        CompositeOptimizationScoreService()
+        .create_report(
+            OrbOptimizationResult(
+                runs=(value,)
+            ),
+            weights=CompositeScoreWeights(
+                net_profit=4.0,
+                profit_factor=3.0,
+                win_rate=2.0,
+                maximum_drawdown=1.0,
+            ),
+        )
+    )
+
+    score = report.scores[0]
+
+    assert score.score == pytest.approx(1.0)
+    assert 0.0 <= score.score <= 1.0
+    assert score.weights.total == pytest.approx(1.0)
+    assert score.weights.net_profit == pytest.approx(0.4)
+
+
+def test_service_handles_missing_metrics() -> None:
+    """欠損PF・勝率・資産曲線を最低評価として扱う。"""
+
+    missing = run(
+        minute=10,
+        net_profit=100.0,
+        profit_factor=None,
+        win_rate=None,
+        drawdown=None,
+    )
+    complete = run(
+        minute=15,
+        net_profit=100.0,
+        profit_factor=2.0,
+        win_rate=0.7,
+        drawdown=0.1,
+    )
+
+    report = (
+        CompositeOptimizationScoreService()
+        .create_report(
+            OrbOptimizationResult(
+                runs=(missing, complete)
+            )
+        )
+    )
+
+    missing_score = report.get(
+        missing.parameter_id
+    )
+    complete_score = report.get(
+        complete.parameter_id
+    )
+
+    assert (
+        missing_score.components.profit_factor
+        == pytest.approx(0.0)
+    )
+    assert (
+        missing_score.components.win_rate
+        == pytest.approx(0.0)
+    )
+    assert (
+        missing_score.components.maximum_drawdown
+        == pytest.approx(0.0)
+    )
+    assert complete_score.score > missing_score.score
+    assert 0.0 <= complete_score.score <= 1.0
+
+
+def test_service_returns_empty_report() -> None:
+    """正常完了試行がなければ空レポートを返す。"""
+
+    report = (
+        CompositeOptimizationScoreService()
+        .create_report(
+            OrbOptimizationResult(runs=())
+        )
+    )
+
+    assert report.scores == ()
+    assert report.score_count == 0
+
+
+def test_weights_reject_all_zero() -> None:
+    """重み合計0を拒否する。"""
+
+    with pytest.raises(ValueError, match="重み合計"):
+        CompositeScoreWeights(
+            net_profit=0.0,
+            profit_factor=0.0,
+            win_rate=0.0,
+            maximum_drawdown=0.0,
+        )
+
+
+def test_weights_reject_negative_value() -> None:
+    """負の重みを拒否する。"""
+
+    with pytest.raises(ValueError, match="0以上"):
+        CompositeScoreWeights(
+            net_profit=-1.0,
+        )
+```
+
+====================================================================================================
+FILE: tests/test_composite_ranking.py
+====================================================================================================
+```python
+"""複合最適化スコアランキングのテスト。"""
+
+from datetime import time
+
+import pytest
+
+from app.backtest.composite_ranking import (
+    CompositeOptimizationRanking,
+    CompositeOptimizationRankingService,
+)
+from app.backtest.composite_score_models import (
+    CompositeOptimizationScore,
+    CompositeOptimizationScoreReport,
+    CompositeScoreComponents,
+    CompositeScoreWeights,
+)
+from app.backtest.optimization_models import (
+    OrbOptimizationParameters,
+)
+from app.backtest.optimization_result_models import (
+    OptimizationRunStatus,
+    OrbOptimizationRunResult,
+)
+from app.backtest.performance_metrics_models import (
+    BacktestPerformanceMetrics,
+)
+
+
+def metrics() -> BacktestPerformanceMetrics:
+    """テスト用成績指標を作成する。"""
+
+    return BacktestPerformanceMetrics(
+        trade_count=1,
+        winning_trade_count=1,
+        losing_trade_count=0,
+        flat_trade_count=0,
+        gross_profit=1000.0,
+        gross_loss=0.0,
+        net_profit_loss=1000.0,
+        win_rate=1.0,
+        profit_factor=None,
+        average_profit=1000.0,
+        average_loss=None,
+        expectancy=1000.0,
+        maximum_consecutive_wins=1,
+        maximum_consecutive_losses=0,
+        unmatched_buy_quantity=0,
+        unmatched_sell_quantity=0,
+    )
+
+
+def score(
+    *,
+    minute: int,
+    value: float,
+) -> CompositeOptimizationScore:
+    """指定値の複合スコアを作成する。"""
+
+    run = OrbOptimizationRunResult(
+        parameter=OrbOptimizationParameters(
+            stop_loss_rate=0.02,
+            take_profit_rate=0.04,
+            opening_range_end=time(9, minute),
+        ),
+        status=OptimizationRunStatus.COMPLETED,
+        metrics=metrics(),
+        equity_curve_report=None,
+    )
+
+    return CompositeOptimizationScore(
+        run=run,
+        score=value,
+        components=CompositeScoreComponents(
+            net_profit=value,
+            profit_factor=value,
+            win_rate=value,
+            maximum_drawdown=value,
+        ),
+        weights=CompositeScoreWeights(),
+    )
+
+
+def test_service_ranks_scores_descending() -> None:
+    """複合スコア降順に順位付けする。"""
+
+    low = score(minute=10, value=0.2)
+    high = score(minute=15, value=0.9)
+    middle = score(minute=20, value=0.6)
+
+    ranking = (
+        CompositeOptimizationRankingService()
+        .rank(
+            CompositeOptimizationScoreReport(
+                scores=(low, high, middle)
+            )
+        )
+    )
+
+    assert [
+        item.score
+        for item in ranking.items
+    ] == [0.9, 0.6, 0.2]
+    assert [
+        item.rank
+        for item in ranking.items
+    ] == [1, 2, 3]
+    assert ranking.best is not None
+    assert ranking.best.parameter_id == (
+        high.parameter_id
+    )
+
+
+def test_service_uses_parameter_id_for_ties() -> None:
+    """同点時はパラメータID昇順で安定化する。"""
+
+    first = score(minute=10, value=0.5)
+    second = score(minute=15, value=0.5)
+
+    ranking = (
+        CompositeOptimizationRankingService()
+        .rank(
+            CompositeOptimizationScoreReport(
+                scores=(second, first)
+            )
+        )
+    )
+
+    assert [
+        item.parameter_id
+        for item in ranking.items
+    ] == sorted(
+        [
+            first.parameter_id,
+            second.parameter_id,
+        ]
+    )
+
+
+def test_service_supports_top_n() -> None:
+    """上位N件だけ返す。"""
+
+    ranking = (
+        CompositeOptimizationRankingService()
+        .rank(
+            CompositeOptimizationScoreReport(
+                scores=(
+                    score(minute=10, value=0.3),
+                    score(minute=15, value=0.8),
+                    score(minute=20, value=0.5),
+                )
+            ),
+            top_n=2,
+        )
+    )
+
+    assert ranking.item_count == 2
+    assert [
+        item.rank
+        for item in ranking.items
+    ] == [1, 2]
+
+
+def test_service_accepts_empty_report() -> None:
+    """空レポートでは空ランキングを返す。"""
+
+    ranking = (
+        CompositeOptimizationRankingService()
+        .rank(
+            CompositeOptimizationScoreReport(
+                scores=()
+            )
+        )
+    )
+
+    assert ranking.items == ()
+    assert ranking.best is None
+
+
+def test_service_rejects_invalid_top_n() -> None:
+    """0以下のTop Nを拒否する。"""
+
+    with pytest.raises(ValueError, match="top_n"):
+        CompositeOptimizationRankingService().rank(
+            CompositeOptimizationScoreReport(
+                scores=()
+            ),
+            top_n=0,
+        )
+
+
+def test_ranking_get_returns_item() -> None:
+    """パラメータIDから順位結果を取得する。"""
+
+    value = score(minute=15, value=0.7)
+
+    ranking = (
+        CompositeOptimizationRankingService()
+        .rank(
+            CompositeOptimizationScoreReport(
+                scores=(value,)
+            )
+        )
+    )
+
+    assert ranking.get(
+        value.parameter_id
+    ).rank == 1
+
+
+def test_ranking_get_rejects_unknown_id() -> None:
+    """存在しないパラメータIDを拒否する。"""
+
+    ranking = CompositeOptimizationRanking(
+        items=()
+    )
+
+    with pytest.raises(KeyError, match="存在しません"):
+        ranking.get("missing")
+```
+
+====================================================================================================
+FILE: tests/test_optimization_ranking.py
+====================================================================================================
+```python
+from datetime import time
+from app.backtest.optimization_models import OrbOptimizationParameters
+from app.backtest.optimization_result_models import OptimizationRunStatus,OrbOptimizationRunResult,OrbOptimizationResult
+from app.backtest.optimization_ranking import OptimizationRankingService,RankingMetric
+from app.backtest.performance_metrics_models import BacktestPerformanceMetrics
+
+def m(n):
+    return BacktestPerformanceMetrics(1,int(n>0),int(n<0),int(n==0),max(n,0),max(-n,0),n,1.0 if n>0 else 0.0,2.0 if n>0 else 0.0,None,None,n,1 if n>0 else 0,1 if n<0 else 0,0,0)
+def r(i,n):
+    return OrbOptimizationRunResult(parameter=OrbOptimizationParameters(0.02,0.04,time(9,10+i)),status=OptimizationRunStatus.COMPLETED,metrics=m(n),equity_curve_report=None)
+def test_rank():
+    res=OrbOptimizationResult(runs=(r(1,100),r(2,300),r(3,200)))
+    ranked=OptimizationRankingService().rank(res,metric=RankingMetric.NET_PROFIT)
+    assert ranked[0].run.net_profit_loss==300
+```

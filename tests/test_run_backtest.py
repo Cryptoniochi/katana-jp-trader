@@ -1,5 +1,7 @@
 """イベント駆動BacktestRunnerとCLIのテスト。"""
 
+import csv
+import json
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -9,15 +11,15 @@ import pytest
 from app.backtest.historical_models import (
     HistoricalBarSeries,
 )
+from app.backtest.orb_signal_strategy import (
+    OrbSignalStrategySettings,
+)
 from app.backtest.run_backtest import (
     _normalize_market_datetime,
     _parse_date,
     build_runner,
     load_series,
     main,
-)
-from app.backtest.orb_signal_strategy import (
-    OrbSignalStrategySettings,
 )
 from app.database import initialize_database
 from app.market.bar_repository import MarketBarRepository
@@ -315,5 +317,88 @@ def test_cli_runs_optimization_and_writes_reports(
     assert exit_code == 0
     assert "Project KATANA ORB Optimization" in output
     assert "combinations: 2" in output
+    assert "ranking_method: net_profit" in output
     assert (report_directory / "optimization.csv").exists()
     assert (report_directory / "optimization.json").exists()
+
+
+def test_cli_runs_composite_optimization(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """--ranking compositeで複合ランキングを出力する。"""
+
+    market_database = tmp_path / "market.db"
+    report_directory = tmp_path / "composite"
+    create_market_database(market_database)
+
+    exit_code = main(
+        [
+            "--code",
+            "7203",
+            "--from",
+            "2026-07-01",
+            "--to",
+            "2026-07-01",
+            "--database",
+            str(market_database),
+            "--report-dir",
+            str(report_directory),
+            "--initial-cash",
+            "1000000",
+            "--optimize",
+            "--stop-loss-candidates",
+            "0.01,0.02",
+            "--take-profit-candidates",
+            "0.01",
+            "--opening-range-end-candidates",
+            "09:15",
+            "--ranking",
+            "composite",
+            "--top-n",
+            "1",
+            "--weight-net-profit",
+            "4",
+            "--weight-profit-factor",
+            "3",
+            "--weight-win-rate",
+            "2",
+            "--weight-drawdown",
+            "1",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    csv_path = report_directory / "optimization.csv"
+    json_path = report_directory / "optimization.json"
+
+    with csv_path.open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as file:
+        rows = list(csv.DictReader(file))
+
+    payload = json.loads(
+        json_path.read_text(encoding="utf-8")
+    )
+
+    assert exit_code == 0
+    assert "ranking_method: composite" in output
+    assert "composite_score=" in output
+    assert csv_path.exists()
+    assert json_path.exists()
+    assert "composite_score" in rows[0]
+    assert "net_profit_score" in rows[0]
+    assert "profit_factor_score" in rows[0]
+    assert "win_rate_score" in rows[0]
+    assert "drawdown_score" in rows[0]
+    assert payload["ranking_method"] == "composite"
+    assert payload["best_parameter"] is not None
+    assert payload["best_score"] is not None
+    assert payload["weights"] == {
+        "maximum_drawdown": 0.1,
+        "net_profit": 0.4,
+        "profit_factor": 0.3,
+        "win_rate": 0.2,
+    }
+    assert len(payload["ranking"]) == 1
