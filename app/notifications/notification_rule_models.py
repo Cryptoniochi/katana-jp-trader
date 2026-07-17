@@ -41,10 +41,12 @@ class NotificationRulePolicy:
     error_channels: tuple[str, ...] = (
         "discord",
         "slack",
+        "line",
     )
     critical_channels: tuple[str, ...] = (
         "discord",
         "slack",
+        "line",
     )
 
     quiet_hours_start_hour: int = 22
