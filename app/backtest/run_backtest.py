@@ -77,6 +77,18 @@ from app.backtest.trade_report_models import (
 from app.backtest.trade_report_service import (
     TradeReportService,
 )
+from app.backtest.walk_forward_analyzer import (
+    WalkForwardAnalyzer,
+)
+from app.backtest.walk_forward_report_writer import (
+    WalkForwardReportWriter,
+)
+from app.backtest.walk_forward_runner import (
+    WalkForwardRunner,
+)
+from app.backtest.walk_forward_window_service import (
+    WalkForwardWindowService,
+)
 from app.database import initialize_database
 from app.market.bar_repository import MarketBarRepository
 from app.settings import settings
@@ -155,6 +167,43 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--optimize",
         action="store_true",
+    )
+    parser.add_argument(
+        "--walk-forward",
+        action="store_true",
+        help=(
+            "Walk-Forward Optimizationを実行します。"
+        ),
+    )
+    parser.add_argument(
+        "--training-days",
+        type=int,
+        default=60,
+        help="Walk-Forwardの学習取引日数です。",
+    )
+    parser.add_argument(
+        "--validation-days",
+        type=int,
+        default=20,
+        help="Walk-Forwardの検証取引日数です。",
+    )
+    parser.add_argument(
+        "--step-days",
+        type=int,
+        default=None,
+        help=(
+            "Walk-Forwardの前進取引日数です。"
+            "未指定時は検証日数を使用します。"
+        ),
+    )
+    parser.add_argument(
+        "--walk-forward-report",
+        type=Path,
+        default=None,
+        help=(
+            "Walk-Forwardレポートの出力先です。"
+            "未指定時は--report-dirまたは既定値を使用します。"
+        ),
     )
     parser.add_argument(
         "--save-best",
@@ -857,11 +906,236 @@ def run_optimization(
     return 0
 
 
+
+def run_walk_forward(
+    *,
+    series: HistoricalBarSeries,
+    report_directory: Path,
+    initial_cash: float,
+    quantity: int,
+    force_exit_time: time,
+    commission: float,
+    slippage_rate: float,
+    stop_loss_candidates: tuple[float | None, ...],
+    take_profit_candidates: tuple[float | None, ...],
+    opening_range_end_candidates: tuple[time, ...],
+    ranking_method: str,
+    composite_weights: CompositeScoreWeights,
+    training_days: int,
+    validation_days: int,
+    step_days: int | None,
+) -> int:
+    """Walk-Forward Optimizationを実行してレポートを保存する。"""
+
+    plan = WalkForwardWindowService().create_plan(
+        series,
+        training_days=training_days,
+        validation_days=validation_days,
+        step_days=step_days,
+    )
+
+    if plan.window_count == 0:
+        raise ValueError(
+            "Walk-Forwardウィンドウを作成できません。"
+            "指定期間の取引日数または各日数設定を確認してください。"
+        )
+
+    grid = OrbOptimizationGridService().create_grid(
+        stop_loss_rates=stop_loss_candidates,
+        take_profit_rates=take_profit_candidates,
+        opening_range_ends=opening_range_end_candidates,
+    )
+    windows_directory = report_directory / "windows"
+
+    def execute(
+        execution_series: HistoricalBarSeries,
+        parameter: OrbOptimizationParameters,
+        *,
+        output_directory: Path,
+    ) -> OrbOptimizationExecutionOutput:
+        state_database_path = output_directory / "state.db"
+        runner = build_runner(
+            series=execution_series,
+            state_database_path=state_database_path,
+            initial_cash=initial_cash,
+            strategy_settings=OrbSignalStrategySettings(
+                quantity=quantity,
+                opening_range_end=parameter.opening_range_end,
+                force_exit_time=force_exit_time,
+                stop_loss_rate=parameter.stop_loss_rate,
+                take_profit_rate=parameter.take_profit_rate,
+            ),
+            commission=commission,
+            slippage_rate=slippage_rate,
+        )
+        run_result = runner.run()
+        trade_report, metrics, _paths = create_reports(
+            state_database_path=state_database_path,
+            output_directory=output_directory,
+            equity_curve_report=run_result.equity_curve_report,
+        )
+
+        if (
+            trade_report.unmatched_buy_quantity > 0
+            or trade_report.unmatched_sell_quantity > 0
+        ):
+            raise RuntimeError(
+                "Walk-Forward試行に未対応約定が残っています。"
+            )
+
+        return OrbOptimizationExecutionOutput(
+            metrics=metrics,
+            equity_curve_report=run_result.equity_curve_report,
+        )
+
+    training_window_ids = {
+        (
+            window.training_series.started_at,
+            window.training_series.ended_at,
+        ): window.window_id
+        for window in plan.windows
+    }
+    validation_window_ids = {
+        (
+            window.validation_series.started_at,
+            window.validation_series.ended_at,
+        ): window.window_id
+        for window in plan.windows
+    }
+
+    def resolve_window_id(
+        execution_series: HistoricalBarSeries,
+        *,
+        lookup: dict[
+            tuple[datetime | None, datetime | None],
+            str,
+        ],
+        period_name: str,
+    ) -> str:
+        key = (
+            execution_series.started_at,
+            execution_series.ended_at,
+        )
+        window_id = lookup.get(key)
+
+        if window_id is None:
+            raise RuntimeError(
+                f"{period_name}系列に対応する"
+                "Walk-Forwardウィンドウが見つかりません。"
+            )
+
+        return window_id
+
+    def training_executor(
+        execution_series: HistoricalBarSeries,
+        parameter: OrbOptimizationParameters,
+    ) -> OrbOptimizationExecutionOutput:
+        window_id = resolve_window_id(
+            execution_series,
+            lookup=training_window_ids,
+            period_name="学習",
+        )
+
+        return execute(
+            execution_series,
+            parameter,
+            output_directory=(
+                windows_directory
+                / window_id
+                / "training"
+                / parameter.parameter_id
+            ),
+        )
+
+    def validation_executor(
+        execution_series: HistoricalBarSeries,
+        parameter: OrbOptimizationParameters,
+    ) -> OrbOptimizationExecutionOutput:
+        window_id = resolve_window_id(
+            execution_series,
+            lookup=validation_window_ids,
+            period_name="検証",
+        )
+
+        return execute(
+            execution_series,
+            parameter,
+            output_directory=(
+                windows_directory
+                / window_id
+                / "validation"
+            ),
+        )
+
+    walk_forward_result = WalkForwardRunner(
+        training_executor=training_executor,
+        validation_executor=validation_executor,
+    ).run(
+        plan,
+        grid=grid,
+        ranking_method=ranking_method,
+        composite_weights=composite_weights,
+        continue_on_error=True,
+    )
+    summary = WalkForwardAnalyzer().create_summary(
+        walk_forward_result
+    )
+    paths = WalkForwardReportWriter().write(
+        output_directory=report_directory,
+        result=walk_forward_result,
+        summary=summary,
+    )
+
+    print("Project KATANA ORB Walk-Forward Optimization")
+    print(f"windows: {walk_forward_result.window_count}")
+    print(f"completed: {walk_forward_result.completed_count}")
+    print(f"failed: {walk_forward_result.failed_count}")
+    print(f"ranking_method: {ranking_method}")
+    print(
+        "validation_net_profit_loss: "
+        f"{summary.validation.net_profit_loss:.2f}"
+    )
+    print(
+        "validation_win_rate: "
+        + (
+            "N/A"
+            if summary.validation.win_rate is None
+            else f"{summary.validation.win_rate:.2%}"
+        )
+    )
+    print(
+        "validation_profit_factor: "
+        + (
+            "N/A"
+            if summary.validation.profit_factor is None
+            else f"{summary.validation.profit_factor:.4f}"
+        )
+    )
+    print(
+        "validation_maximum_drawdown: "
+        + (
+            "N/A"
+            if summary.validation.maximum_drawdown is None
+            else f"{summary.validation.maximum_drawdown:.4f}"
+        )
+    )
+    print(f"summary_csv: {paths.summary_csv}")
+    print(f"windows_csv: {paths.windows_csv}")
+    print(f"summary_json: {paths.summary_json}")
+
+    return 0
+
 def main(argv: list[str] | None = None) -> int:
     """CLIエントリーポイント。"""
 
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.optimize and args.walk_forward:
+        parser.error(
+            "--optimizeと--walk-forwardは"
+            "同時に指定できません。"
+        )
 
     if (args.save_best or args.apply_best) and not args.optimize:
         parser.error(
@@ -881,13 +1155,23 @@ def main(argv: list[str] | None = None) -> int:
 
     run_token = uuid4().hex[:12]
     report_prefix = (
-        "optimization"
-        if args.optimize
-        else "backtest"
+        "walk_forward"
+        if args.walk_forward
+        else (
+            "optimization"
+            if args.optimize
+            else "backtest"
+        )
+    )
+    explicit_report_directory = (
+        args.walk_forward_report
+        if args.walk_forward
+        and args.walk_forward_report is not None
+        else args.report_dir
     )
     report_directory = (
-        args.report_dir
-        if args.report_dir is not None
+        explicit_report_directory
+        if explicit_report_directory is not None
         else settings.reports_dir
         / (
             f"{report_prefix}_{args.code}_"
@@ -895,13 +1179,50 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
-    if args.optimize:
-        ranking_method = (
-            args.ranking
-            if args.ranking is not None
-            else args.optimization_metric
+    ranking_method = (
+        args.ranking
+        if args.ranking is not None
+        else args.optimization_metric
+    )
+    composite_weights = CompositeScoreWeights(
+        net_profit=args.weight_net_profit,
+        profit_factor=args.weight_profit_factor,
+        win_rate=args.weight_win_rate,
+        maximum_drawdown=args.weight_drawdown,
+    )
+
+    if args.walk_forward:
+        return run_walk_forward(
+            series=series,
+            report_directory=report_directory,
+            initial_cash=args.initial_cash,
+            quantity=args.quantity,
+            force_exit_time=args.force_exit_time,
+            commission=args.commission,
+            slippage_rate=args.slippage_rate,
+            stop_loss_candidates=(
+                _parse_rate_candidates(
+                    args.stop_loss_candidates
+                )
+            ),
+            take_profit_candidates=(
+                _parse_rate_candidates(
+                    args.take_profit_candidates
+                )
+            ),
+            opening_range_end_candidates=(
+                _parse_time_candidates(
+                    args.opening_range_end_candidates
+                )
+            ),
+            ranking_method=ranking_method,
+            composite_weights=composite_weights,
+            training_days=args.training_days,
+            validation_days=args.validation_days,
+            step_days=args.step_days,
         )
 
+    if args.optimize:
         return run_optimization(
             series=series,
             report_directory=report_directory,
@@ -927,12 +1248,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
             ranking_method=ranking_method,
             top_n=args.optimization_top_n,
-            composite_weights=CompositeScoreWeights(
-                net_profit=args.weight_net_profit,
-                profit_factor=args.weight_profit_factor,
-                win_rate=args.weight_win_rate,
-                maximum_drawdown=args.weight_drawdown,
-            ),
+            composite_weights=composite_weights,
             save_best=args.save_best,
             apply_best=args.apply_best,
         )
