@@ -39,6 +39,7 @@ class OptimizationReportPaths:
     output_directory: Path
     optimization_csv: Path
     optimization_json: Path
+    best_parameters_json: Path | None = None
 
 
 class OptimizationReportWriter:
@@ -55,8 +56,9 @@ class OptimizationReportWriter:
             CompositeOptimizationScoreReport | None
         ) = None,
         weights: CompositeScoreWeights | None = None,
+        save_best: bool = False,
     ) -> OptimizationReportPaths:
-        """CSVとJSONを出力する。"""
+        """CSVとJSONを出力し、必要なら最良パラメータも保存する。"""
 
         normalized_method = ranking_method.strip().lower()
 
@@ -96,6 +98,11 @@ class OptimizationReportWriter:
             exist_ok=True,
         )
 
+        best_path = (
+            output_directory / "best_parameters.json"
+            if save_best
+            else None
+        )
         paths = OptimizationReportPaths(
             output_directory=output_directory,
             optimization_csv=(
@@ -104,6 +111,7 @@ class OptimizationReportWriter:
             optimization_json=(
                 output_directory / "optimization.json"
             ),
+            best_parameters_json=best_path,
         )
 
         rank_by_parameter_id = (
@@ -132,7 +140,56 @@ class OptimizationReportWriter:
             weights=weights,
         )
 
+        if paths.best_parameters_json is not None:
+            self._write_best_parameters(
+                paths.best_parameters_json,
+                ranking=ranking,
+                ranking_method=normalized_method,
+                weights=weights,
+            )
+
         return paths
+
+    @staticmethod
+    def best_run(
+        ranking: OptimizationRanking,
+    ) -> OrbOptimizationRunResult | None:
+        """ランキング先頭の試行を返す。"""
+
+        if isinstance(
+            ranking,
+            CompositeOptimizationRanking,
+        ):
+            best = ranking.best
+            return None if best is None else best.item.run
+
+        if not ranking:
+            return None
+
+        return ranking[0].run
+
+    @staticmethod
+    def best_score(
+        ranking: OptimizationRanking,
+        *,
+        ranking_method: str,
+    ) -> float | None:
+        """ランキング先頭の評価値を返す。"""
+
+        if isinstance(
+            ranking,
+            CompositeOptimizationRanking,
+        ):
+            best = ranking.best
+            return None if best is None else best.score
+
+        if not ranking:
+            return None
+
+        return OptimizationReportWriter._metric_value(
+            ranking[0].run,
+            ranking_method,
+        )
 
     @staticmethod
     def _create_rank_map(
@@ -387,6 +444,57 @@ class OptimizationReportWriter:
                 }
                 for run in result.runs
             ],
+        }
+
+        path.write_text(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+    @classmethod
+    def _write_best_parameters(
+        cls,
+        path: Path,
+        *,
+        ranking: OptimizationRanking,
+        ranking_method: str,
+        weights: CompositeScoreWeights | None,
+    ) -> None:
+        """ランキング1位のパラメータをJSONへ保存する。"""
+
+        run = cls.best_run(ranking)
+
+        if run is None:
+            raise ValueError(
+                "最良パラメータを保存できる"
+                "正常完了試行がありません。"
+            )
+
+        payload = {
+            "ranking_method": ranking_method,
+            "parameter_id": run.parameter_id,
+            "stop_loss_rate": run.parameter.stop_loss_rate,
+            "take_profit_rate": run.parameter.take_profit_rate,
+            "opening_range_end": (
+                run.parameter.opening_range_end
+                .isoformat(timespec="minutes")
+            ),
+            "score": cls.best_score(
+                ranking,
+                ranking_method=ranking_method,
+            ),
+            "weights": (
+                None
+                if weights is None
+                else asdict(weights.normalized)
+            ),
         }
 
         path.write_text(

@@ -82,6 +82,36 @@ def create_market_database(path: Path) -> None:
     )
 
 
+def optimization_args(
+    *,
+    market_database: Path,
+    report_directory: Path,
+) -> list[str]:
+    """最小構成の最適化CLI引数を返す。"""
+
+    return [
+        "--code",
+        "7203",
+        "--from",
+        "2026-07-01",
+        "--to",
+        "2026-07-01",
+        "--database",
+        str(market_database),
+        "--report-dir",
+        str(report_directory),
+        "--initial-cash",
+        "1000000",
+        "--optimize",
+        "--stop-loss-candidates",
+        "0.01,0.02",
+        "--take-profit-candidates",
+        "0.01",
+        "--opening-range-end-candidates",
+        "09:15",
+    ]
+
+
 def test_load_series_reads_five_minute_bars(
     tmp_path: Path,
 ) -> None:
@@ -286,32 +316,13 @@ def test_cli_runs_optimization_and_writes_reports(
     report_directory = tmp_path / "optimization"
     create_market_database(market_database)
 
-    exit_code = main(
-        [
-            "--code",
-            "7203",
-            "--from",
-            "2026-07-01",
-            "--to",
-            "2026-07-01",
-            "--database",
-            str(market_database),
-            "--report-dir",
-            str(report_directory),
-            "--initial-cash",
-            "1000000",
-            "--optimize",
-            "--stop-loss-candidates",
-            "0.01,0.02",
-            "--take-profit-candidates",
-            "0.01",
-            "--opening-range-end-candidates",
-            "09:15",
-            "--optimization-top-n",
-            "2",
-        ]
+    args = optimization_args(
+        market_database=market_database,
+        report_directory=report_directory,
     )
+    args.extend(["--optimization-top-n", "2"])
 
+    exit_code = main(args)
     output = capsys.readouterr().out
 
     assert exit_code == 0
@@ -332,27 +343,12 @@ def test_cli_runs_composite_optimization(
     report_directory = tmp_path / "composite"
     create_market_database(market_database)
 
-    exit_code = main(
+    args = optimization_args(
+        market_database=market_database,
+        report_directory=report_directory,
+    )
+    args.extend(
         [
-            "--code",
-            "7203",
-            "--from",
-            "2026-07-01",
-            "--to",
-            "2026-07-01",
-            "--database",
-            str(market_database),
-            "--report-dir",
-            str(report_directory),
-            "--initial-cash",
-            "1000000",
-            "--optimize",
-            "--stop-loss-candidates",
-            "0.01,0.02",
-            "--take-profit-candidates",
-            "0.01",
-            "--opening-range-end-candidates",
-            "09:15",
             "--ranking",
             "composite",
             "--top-n",
@@ -368,6 +364,7 @@ def test_cli_runs_composite_optimization(
         ]
     )
 
+    exit_code = main(args)
     output = capsys.readouterr().out
     csv_path = report_directory / "optimization.csv"
     json_path = report_directory / "optimization.json"
@@ -402,3 +399,91 @@ def test_cli_runs_composite_optimization(
         "win_rate": 0.2,
     }
     assert len(payload["ranking"]) == 1
+
+
+def test_cli_save_best_writes_parameter_file(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """--save-bestで最良パラメータJSONを保存する。"""
+
+    market_database = tmp_path / "market.db"
+    report_directory = tmp_path / "save-best"
+    create_market_database(market_database)
+
+    args = optimization_args(
+        market_database=market_database,
+        report_directory=report_directory,
+    )
+    args.append("--save-best")
+
+    exit_code = main(args)
+    output = capsys.readouterr().out
+    best_path = report_directory / "best_parameters.json"
+
+    assert exit_code == 0
+    assert best_path.exists()
+    assert "best_parameters_json:" in output
+
+    payload = json.loads(
+        best_path.read_text(encoding="utf-8")
+    )
+    assert payload["parameter_id"]
+    assert payload["ranking_method"] == "net_profit"
+    assert payload["opening_range_end"] == "09:15"
+
+
+def test_cli_apply_best_runs_follow_up_backtest(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """--apply-bestで1位パラメータの追試を実行する。"""
+
+    market_database = tmp_path / "market.db"
+    report_directory = tmp_path / "apply-best"
+    create_market_database(market_database)
+
+    args = optimization_args(
+        market_database=market_database,
+        report_directory=report_directory,
+    )
+    args.append("--apply-best")
+
+    exit_code = main(args)
+    output = capsys.readouterr().out
+    best_directory = report_directory / "best_backtest"
+
+    assert exit_code == 0
+    assert "Applied Best Parameter Backtest" in output
+    assert (
+        report_directory / "best_parameters.json"
+    ).exists()
+    assert (best_directory / "state.db").exists()
+    assert (best_directory / "trades.csv").exists()
+    assert (best_directory / "equity_curve.csv").exists()
+    assert (best_directory / "metrics.csv").exists()
+    assert (best_directory / "summary.json").exists()
+
+
+def test_cli_rejects_save_best_without_optimize(
+    tmp_path: Path,
+) -> None:
+    """--save-best単独指定を拒否する。"""
+
+    market_database = tmp_path / "market.db"
+    create_market_database(market_database)
+
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "--code",
+                "7203",
+                "--from",
+                "2026-07-01",
+                "--to",
+                "2026-07-01",
+                "--database",
+                str(market_database),
+                "--save-best",
+            ]
+        )

@@ -157,6 +157,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
     )
     parser.add_argument(
+        "--save-best",
+        action="store_true",
+        help="最適化1位をbest_parameters.jsonへ保存します。",
+    )
+    parser.add_argument(
+        "--apply-best",
+        action="store_true",
+        help=(
+            "最適化1位のパラメータで追試バックテストを実行します。"
+            "best_parameters.jsonも保存します。"
+        ),
+    )
+    parser.add_argument(
         "--stop-loss-candidates",
         default="0.01,0.02,0.03",
     )
@@ -576,6 +589,55 @@ def print_result(
     print(f"summary_json: {report_paths.summary_json}")
 
 
+def run_best_backtest(
+    *,
+    series: HistoricalBarSeries,
+    report_directory: Path,
+    initial_cash: float,
+    quantity: int,
+    force_exit_time: time,
+    commission: float,
+    slippage_rate: float,
+    parameter: OrbOptimizationParameters,
+) -> None:
+    """最良パラメータで追試バックテストを実行する。"""
+
+    output_directory = report_directory / "best_backtest"
+    state_database_path = output_directory / "state.db"
+
+    runner = build_runner(
+        series=series,
+        state_database_path=state_database_path,
+        initial_cash=initial_cash,
+        strategy_settings=OrbSignalStrategySettings(
+            quantity=quantity,
+            opening_range_end=parameter.opening_range_end,
+            force_exit_time=force_exit_time,
+            stop_loss_rate=parameter.stop_loss_rate,
+            take_profit_rate=parameter.take_profit_rate,
+        ),
+        commission=commission,
+        slippage_rate=slippage_rate,
+    )
+    result = runner.run()
+
+    trade_report, metrics, report_paths = create_reports(
+        state_database_path=state_database_path,
+        output_directory=output_directory,
+        equity_curve_report=result.equity_curve_report,
+    )
+
+    print("Applied Best Parameter Backtest")
+    print(f"parameter_id: {parameter.parameter_id}")
+    print_result(
+        result,
+        state_database_path=state_database_path,
+        trade_report=trade_report,
+        metrics=metrics,
+        report_paths=report_paths,
+    )
+
+
 def run_optimization(
     *,
     series: HistoricalBarSeries,
@@ -591,6 +653,8 @@ def run_optimization(
     ranking_method: str,
     top_n: int,
     composite_weights: CompositeScoreWeights,
+    save_best: bool = False,
+    apply_best: bool = False,
 ) -> int:
     """ORBパラメータ最適化を実行する。"""
 
@@ -698,6 +762,7 @@ def run_optimization(
             top_n=top_n,
         )
 
+    should_save_best = save_best or apply_best
     paths = OptimizationReportWriter().write(
         output_directory=report_directory,
         result=optimization_result,
@@ -705,6 +770,7 @@ def run_optimization(
         ranking_method=normalized_method,
         composite_score_report=composite_score_report,
         weights=report_weights,
+        save_best=should_save_best,
     )
 
     print("Project KATANA ORB Optimization")
@@ -761,6 +827,33 @@ def run_optimization(
         f"{paths.optimization_json}"
     )
 
+    if paths.best_parameters_json is not None:
+        print(
+            f"best_parameters_json: "
+            f"{paths.best_parameters_json}"
+        )
+
+    if apply_best:
+        best_run = OptimizationReportWriter.best_run(
+            ranking
+        )
+
+        if best_run is None:
+            raise RuntimeError(
+                "追試へ適用できる最良パラメータがありません。"
+            )
+
+        run_best_backtest(
+            series=series,
+            report_directory=report_directory,
+            initial_cash=initial_cash,
+            quantity=quantity,
+            force_exit_time=force_exit_time,
+            commission=commission,
+            slippage_rate=slippage_rate,
+            parameter=best_run.parameter,
+        )
+
     return 0
 
 
@@ -769,6 +862,12 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if (args.save_best or args.apply_best) and not args.optimize:
+        parser.error(
+            "--save-bestと--apply-bestは"
+            "--optimizeと一緒に指定してください。"
+        )
 
     start_date = _parse_date(args.start_date)
     end_date = _parse_date(args.end_date)
@@ -834,6 +933,8 @@ def main(argv: list[str] | None = None) -> int:
                 win_rate=args.weight_win_rate,
                 maximum_drawdown=args.weight_drawdown,
             ),
+            save_best=args.save_best,
+            apply_best=args.apply_best,
         )
 
     state_database_path = (

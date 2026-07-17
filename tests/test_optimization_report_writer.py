@@ -111,6 +111,7 @@ def test_writer_creates_ranked_files(
 
     assert paths.optimization_csv.exists()
     assert paths.optimization_json.exists()
+    assert paths.best_parameters_json is None
     assert len(rows) == 2
     assert "composite_score" in rows[0]
     assert payload["run_count"] == 2
@@ -202,3 +203,42 @@ def test_writer_outputs_composite_scores(
         payload["runs"][0]["composite_score"]
         is not None
     )
+
+
+def test_writer_saves_best_parameters_json(
+    tmp_path: Path,
+) -> None:
+    result = OrbOptimizationResult(
+        runs=(
+            create_run(10, 1000.0),
+            create_run(15, 2000.0),
+        )
+    )
+    ranking = OptimizationRankingService().rank(
+        result,
+        metric=RankingMetric.NET_PROFIT,
+    )
+
+    paths = OptimizationReportWriter().write(
+        output_directory=tmp_path,
+        result=result,
+        ranking=ranking,
+        save_best=True,
+    )
+
+    assert paths.best_parameters_json is not None
+    payload = json.loads(
+        paths.best_parameters_json.read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert payload == {
+        "opening_range_end": "09:15",
+        "parameter_id": ranking[0].run.parameter_id,
+        "ranking_method": "net_profit",
+        "score": 2000.0,
+        "stop_loss_rate": 0.02,
+        "take_profit_rate": 0.04,
+        "weights": None,
+    }
