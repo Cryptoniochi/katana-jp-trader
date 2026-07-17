@@ -15,6 +15,9 @@ from app.monitoring.runtime_metrics import (
 from app.monitoring.system_health_models import (
     SystemHealthReport,
 )
+from app.runtime.resource_models import (
+    RuntimeResourceEvaluation,
+)
 from app.trading.order_models import (
     OrderStatus,
     TradeOrderRecord,
@@ -210,6 +213,7 @@ class DashboardSnapshot:
     live_summary: LiveDailyOperationSummary | None
     broker: DashboardBrokerStatus | None
     errors: tuple[DashboardComponentError, ...]
+    runtime_resource: RuntimeResourceEvaluation | None = None
 
     def __post_init__(self) -> None:
         """Snapshotの基本整合性を検証する。"""

@@ -5,6 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 from app.dashboard.dashboard_models import DashboardSnapshot
+from app.runtime.resource_report import (
+    runtime_resource_evaluation_to_dict,
+)
 
 
 def dashboard_snapshot_to_dict(
@@ -18,6 +21,7 @@ def dashboard_snapshot_to_dict(
     orders = snapshot.orders
     live_summary = snapshot.live_summary
     broker = snapshot.broker
+    runtime_resource = snapshot.runtime_resource
 
     return {
         "generated_at": snapshot.generated_at.isoformat(),
@@ -61,6 +65,13 @@ def dashboard_snapshot_to_dict(
                 ),
             }
             if runtime_metrics is not None
+            else None
+        ),
+        "runtime_resource": (
+            runtime_resource_evaluation_to_dict(
+                runtime_resource
+            )
+            if runtime_resource is not None
             else None
         ),
         "portfolio": (
