@@ -179,7 +179,50 @@ def test_cli_runs_and_prints_summary(
     assert "Project KATANA ORB Backtest" in output
     assert "signals: 2" in output
     assert "executions: 2" in output
+    assert "trades: 1" in output
+    assert "win_rate: 100.00%" in output
+    assert "profit_factor: N/A" in output
     assert state_database.exists()
+
+
+def test_cli_writes_reports_to_requested_directory(
+    tmp_path: Path,
+) -> None:
+    """--report-dirへ4種類のレポートを出力する。"""
+
+    market_database = tmp_path / "market.db"
+    state_database = tmp_path / "state.db"
+    report_directory = tmp_path / "reports" / "run-001"
+    create_market_database(market_database)
+
+    exit_code = main(
+        [
+            "--code",
+            "7203",
+            "--from",
+            "2026-07-01",
+            "--to",
+            "2026-07-01",
+            "--database",
+            str(market_database),
+            "--state-database",
+            str(state_database),
+            "--report-dir",
+            str(report_directory),
+            "--initial-cash",
+            "1000000",
+            "--take-profit-rate",
+            "0.01",
+        ]
+    )
+
+    assert exit_code == 0
+    assert (report_directory / "trades.csv").exists()
+    assert (
+        report_directory / "equity_curve.csv"
+    ).exists()
+    assert (report_directory / "metrics.csv").exists()
+    assert (report_directory / "summary.json").exists()
 
 
 def test_load_series_rejects_empty_period(
@@ -229,3 +272,48 @@ def test_normalize_market_datetime_converts_aware_value() -> None:
 def test_parse_date_rejects_invalid_format() -> None:
     with pytest.raises(Exception, match="YYYY-MM-DD"):
         _parse_date("2026/07/01")
+
+
+def test_cli_runs_optimization_and_writes_reports(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """--optimizeで全組み合わせとランキングを出力する。"""
+
+    market_database = tmp_path / "market.db"
+    report_directory = tmp_path / "optimization"
+    create_market_database(market_database)
+
+    exit_code = main(
+        [
+            "--code",
+            "7203",
+            "--from",
+            "2026-07-01",
+            "--to",
+            "2026-07-01",
+            "--database",
+            str(market_database),
+            "--report-dir",
+            str(report_directory),
+            "--initial-cash",
+            "1000000",
+            "--optimize",
+            "--stop-loss-candidates",
+            "0.01,0.02",
+            "--take-profit-candidates",
+            "0.01",
+            "--opening-range-end-candidates",
+            "09:15",
+            "--optimization-top-n",
+            "2",
+        ]
+    )
+
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "Project KATANA ORB Optimization" in output
+    assert "combinations: 2" in output
+    assert (report_directory / "optimization.csv").exists()
+    assert (report_directory / "optimization.json").exists()

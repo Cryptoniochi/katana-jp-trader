@@ -5,4 +5,5 @@ __pycache__/
 logs/
 data/
 .pytest_cache/
-.mypy_cache/
+.mypy_cache/reports/backtest_*/
+reports/optimization_*/

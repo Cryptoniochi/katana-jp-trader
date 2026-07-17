@@ -1,4 +1,4 @@
-"""保存済み5分足でORBバックテストを実行するCLI。"""
+"""保存済み5分足でORBバックテストと最適化を実行するCLI。"""
 
 from __future__ import annotations
 
@@ -12,6 +12,10 @@ from zoneinfo import ZoneInfo
 from app.backtest.backtest_portfolio_update_service import (
     BacktestPortfolioUpdateService,
 )
+from app.backtest.backtest_report_writer import (
+    BacktestReportPaths,
+    BacktestReportWriter,
+)
 from app.backtest.backtest_session import BacktestSession
 from app.backtest.event_driven_backtest_runner import (
     EventDrivenBacktestRunResult,
@@ -23,6 +27,23 @@ from app.backtest.historical_models import (
     MarketTimeframe,
 )
 from app.backtest.market_replay import MarketReplayEngine
+from app.backtest.optimization_models import (
+    OrbOptimizationParameters,
+)
+from app.backtest.optimization_ranking import (
+    OptimizationRankingService,
+    RankingMetric,
+)
+from app.backtest.optimization_report_writer import (
+    OptimizationReportWriter,
+)
+from app.backtest.optimization_runner import (
+    OrbOptimizationExecutionOutput,
+    OrbOptimizationRunner,
+)
+from app.backtest.optimization_service import (
+    OrbOptimizationGridService,
+)
 from app.backtest.orb_signal_strategy import (
     OrbSignalStrategy,
     OrbSignalStrategySettings,
@@ -31,13 +52,26 @@ from app.backtest.order_queue import BacktestOrderQueue
 from app.backtest.order_queue_service import (
     BacktestOrderQueueService,
 )
+from app.backtest.performance_metrics_models import (
+    BacktestPerformanceMetrics,
+)
+from app.backtest.performance_metrics_service import (
+    BacktestPerformanceMetricsService,
+)
 from app.backtest.queue_execution_service import (
     BacktestQueueExecutionService,
 )
 from app.backtest.strategy_runner import BacktestStrategyRunner
+from app.backtest.trade_report_models import (
+    BacktestTradeReport,
+)
+from app.backtest.trade_report_service import (
+    TradeReportService,
+)
 from app.database import initialize_database
 from app.market.bar_repository import MarketBarRepository
 from app.settings import settings
+from app.trading.equity_curve_models import EquityCurveReport
 from app.trading.equity_curve_service import EquityCurveService
 from app.trading.order_broker_sync_service import (
     OrderBrokerSyncService,
@@ -98,11 +132,45 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
     )
     parser.add_argument(
+        "--report-dir",
+        type=Path,
+        default=None,
+    )
+    parser.add_argument(
         "--initial-cash",
         type=float,
         default=10_000_000.0,
     )
     parser.add_argument("--quantity", type=int, default=100)
+    parser.add_argument(
+        "--optimize",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--stop-loss-candidates",
+        default="0.01,0.02,0.03",
+    )
+    parser.add_argument(
+        "--take-profit-candidates",
+        default="0.02,0.04,0.06",
+    )
+    parser.add_argument(
+        "--opening-range-end-candidates",
+        default="09:10,09:15,09:20",
+    )
+    parser.add_argument(
+        "--optimization-metric",
+        choices=[
+            metric.value
+            for metric in RankingMetric
+        ],
+        default=RankingMetric.NET_PROFIT.value,
+    )
+    parser.add_argument(
+        "--optimization-top-n",
+        type=int,
+        default=10,
+    )
     parser.add_argument("--stop-loss-rate", type=float)
     parser.add_argument("--take-profit-rate", type=float)
     parser.add_argument(
@@ -213,6 +281,10 @@ def build_runner(
 ) -> EventDrivenBacktestRunner:
     """依存関係を組み立ててRunnerを返す。"""
 
+    state_database_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
     initialize_database(state_database_path)
 
     initial_time = (
@@ -323,12 +395,54 @@ def build_runner(
     )
 
 
+def create_reports(
+    *,
+    state_database_path: Path,
+    output_directory: Path,
+    equity_curve_report: EquityCurveReport | None,
+) -> tuple[
+    BacktestTradeReport,
+    BacktestPerformanceMetrics,
+    BacktestReportPaths,
+]:
+    """保存済み約定から統計とレポートを作成する。"""
+
+    execution_repository = TradeExecutionRepository(
+        state_database_path
+    )
+    signal_repository = SignalRepository(
+        state_database_path
+    )
+
+    trade_report = TradeReportService(
+        execution_repository=execution_repository,
+        signal_repository=signal_repository,
+    ).create_report()
+
+    metrics = (
+        BacktestPerformanceMetricsService()
+        .create_metrics(trade_report)
+    )
+
+    paths = BacktestReportWriter().write(
+        output_directory=output_directory,
+        trade_report=trade_report,
+        metrics=metrics,
+        equity_curve_report=equity_curve_report,
+    )
+
+    return trade_report, metrics, paths
+
+
 def print_result(
     result: EventDrivenBacktestRunResult,
     *,
     state_database_path: Path,
+    trade_report: BacktestTradeReport,
+    metrics: BacktestPerformanceMetrics,
+    report_paths: BacktestReportPaths,
 ) -> None:
-    """バックテスト結果を標準出力へ表示する。"""
+    """バックテスト結果と分析指標を表示する。"""
 
     report = result.equity_curve_report
 
@@ -340,6 +454,51 @@ def print_result(
     print(
         f"portfolio_updates: "
         f"{result.portfolio_update_count}"
+    )
+    print(f"trades: {metrics.trade_count}")
+    print(
+        "win_rate: "
+        + (
+            "N/A"
+            if metrics.win_rate is None
+            else f"{metrics.win_rate:.2%}"
+        )
+    )
+    print(
+        "profit_factor: "
+        + (
+            "N/A"
+            if metrics.profit_factor is None
+            else f"{metrics.profit_factor:.4f}"
+        )
+    )
+    print(
+        "expectancy: "
+        + (
+            "N/A"
+            if metrics.expectancy is None
+            else f"{metrics.expectancy:.2f}"
+        )
+    )
+    print(
+        f"net_profit_loss: "
+        f"{metrics.net_profit_loss:.2f}"
+    )
+    print(
+        f"maximum_consecutive_wins: "
+        f"{metrics.maximum_consecutive_wins}"
+    )
+    print(
+        f"maximum_consecutive_losses: "
+        f"{metrics.maximum_consecutive_losses}"
+    )
+    print(
+        f"unmatched_buy_quantity: "
+        f"{trade_report.unmatched_buy_quantity}"
+    )
+    print(
+        f"unmatched_sell_quantity: "
+        f"{trade_report.unmatched_sell_quantity}"
     )
 
     if report is not None:
@@ -355,6 +514,155 @@ def print_result(
         )
 
     print(f"state_database: {state_database_path}")
+    print(
+        f"report_directory: "
+        f"{report_paths.output_directory}"
+    )
+    print(f"trades_csv: {report_paths.trades_csv}")
+    print(
+        f"equity_curve_csv: "
+        f"{report_paths.equity_curve_csv}"
+    )
+    print(f"metrics_csv: {report_paths.metrics_csv}")
+    print(f"summary_json: {report_paths.summary_json}")
+
+
+def run_optimization(
+    *,
+    series: HistoricalBarSeries,
+    report_directory: Path,
+    initial_cash: float,
+    quantity: int,
+    force_exit_time: time,
+    commission: float,
+    slippage_rate: float,
+    stop_loss_candidates: tuple[float | None, ...],
+    take_profit_candidates: tuple[float | None, ...],
+    opening_range_end_candidates: tuple[time, ...],
+    ranking_metric: RankingMetric,
+    top_n: int,
+) -> int:
+    """ORBパラメータ最適化を実行する。"""
+
+    if top_n <= 0:
+        raise ValueError(
+            "optimization-top-nは0より大きい必要があります。"
+        )
+
+    grid = OrbOptimizationGridService().create_grid(
+        stop_loss_rates=stop_loss_candidates,
+        take_profit_rates=take_profit_candidates,
+        opening_range_ends=opening_range_end_candidates,
+    )
+    runs_directory = report_directory / "runs"
+
+    def executor(
+        parameter: OrbOptimizationParameters,
+    ) -> OrbOptimizationExecutionOutput:
+        run_directory = (
+            runs_directory / parameter.parameter_id
+        )
+        state_database_path = (
+            run_directory / "state.db"
+        )
+
+        runner = build_runner(
+            series=series,
+            state_database_path=state_database_path,
+            initial_cash=initial_cash,
+            strategy_settings=OrbSignalStrategySettings(
+                quantity=quantity,
+                opening_range_end=(
+                    parameter.opening_range_end
+                ),
+                force_exit_time=force_exit_time,
+                stop_loss_rate=(
+                    parameter.stop_loss_rate
+                ),
+                take_profit_rate=(
+                    parameter.take_profit_rate
+                ),
+            ),
+            commission=commission,
+            slippage_rate=slippage_rate,
+        )
+        result = runner.run()
+
+        (
+            trade_report,
+            metrics,
+            _paths,
+        ) = create_reports(
+            state_database_path=state_database_path,
+            output_directory=run_directory,
+            equity_curve_report=result.equity_curve_report,
+        )
+
+        if (
+            trade_report.unmatched_buy_quantity > 0
+            or trade_report.unmatched_sell_quantity > 0
+        ):
+            raise RuntimeError(
+                "最適化試行に未対応約定が残っています。"
+            )
+
+        return OrbOptimizationExecutionOutput(
+            metrics=metrics,
+            equity_curve_report=(
+                result.equity_curve_report
+            ),
+        )
+
+    optimization_result = OrbOptimizationRunner(
+        executor=executor
+    ).run(
+        grid,
+        continue_on_error=True,
+    )
+
+    ranking = OptimizationRankingService().rank(
+        optimization_result,
+        metric=ranking_metric,
+        top_n=top_n,
+    )
+
+    paths = OptimizationReportWriter().write(
+        output_directory=report_directory,
+        result=optimization_result,
+        ranking=ranking,
+    )
+
+    print("Project KATANA ORB Optimization")
+    print(f"combinations: {grid.combination_count}")
+    print(
+        f"completed: "
+        f"{optimization_result.completed_count}"
+    )
+    print(
+        f"failed: "
+        f"{optimization_result.failed_count}"
+    )
+
+    for item in ranking:
+        print(
+            f"rank={item.rank} "
+            f"parameter={item.run.parameter_id} "
+            f"net_profit={item.run.net_profit_loss} "
+            f"profit_factor={item.run.profit_factor} "
+            f"win_rate={item.run.win_rate} "
+            f"max_drawdown={item.run.maximum_drawdown}"
+        )
+
+    print(
+        f"optimization_csv: "
+        f"{paths.optimization_csv}"
+    )
+    print(
+        f"optimization_json: "
+        f"{paths.optimization_json}"
+    )
+
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -373,14 +681,56 @@ def main(argv: list[str] | None = None) -> int:
         end_date=end_date,
     )
 
+    run_token = uuid4().hex[:12]
+    report_prefix = (
+        "optimization"
+        if args.optimize
+        else "backtest"
+    )
+    report_directory = (
+        args.report_dir
+        if args.report_dir is not None
+        else settings.reports_dir
+        / (
+            f"{report_prefix}_{args.code}_"
+            f"{run_token}"
+        )
+    )
+
+    if args.optimize:
+        return run_optimization(
+            series=series,
+            report_directory=report_directory,
+            initial_cash=args.initial_cash,
+            quantity=args.quantity,
+            force_exit_time=args.force_exit_time,
+            commission=args.commission,
+            slippage_rate=args.slippage_rate,
+            stop_loss_candidates=(
+                _parse_rate_candidates(
+                    args.stop_loss_candidates
+                )
+            ),
+            take_profit_candidates=(
+                _parse_rate_candidates(
+                    args.take_profit_candidates
+                )
+            ),
+            opening_range_end_candidates=(
+                _parse_time_candidates(
+                    args.opening_range_end_candidates
+                )
+            ),
+            ranking_metric=RankingMetric(
+                args.optimization_metric
+            ),
+            top_n=args.optimization_top_n,
+        )
+
     state_database_path = (
         args.state_database
         if args.state_database is not None
-        else settings.reports_dir
-        / (
-            f"backtest_{args.code}_"
-            f"{uuid4().hex[:12]}.db"
-        )
+        else report_directory / "state.db"
     )
 
     runner = build_runner(
@@ -398,11 +748,70 @@ def main(argv: list[str] | None = None) -> int:
         slippage_rate=args.slippage_rate,
     )
     result = runner.run()
+
+    (
+        trade_report,
+        metrics,
+        report_paths,
+    ) = create_reports(
+        state_database_path=state_database_path,
+        output_directory=report_directory,
+        equity_curve_report=result.equity_curve_report,
+    )
+
     print_result(
         result,
         state_database_path=state_database_path,
+        trade_report=trade_report,
+        metrics=metrics,
+        report_paths=report_paths,
     )
     return 0
+
+
+def _parse_rate_candidates(
+    value: str,
+) -> tuple[float | None, ...]:
+    """カンマ区切り率候補を解析する。"""
+
+    candidates: list[float | None] = []
+
+    for raw in value.split(","):
+        normalized = raw.strip().lower()
+
+        if not normalized:
+            continue
+
+        if normalized in {"none", "null"}:
+            candidates.append(None)
+        else:
+            candidates.append(float(normalized))
+
+    if not candidates:
+        raise ValueError(
+            "率候補を1件以上指定してください。"
+        )
+
+    return tuple(candidates)
+
+
+def _parse_time_candidates(
+    value: str,
+) -> tuple[time, ...]:
+    """カンマ区切り時刻候補を解析する。"""
+
+    candidates = tuple(
+        _parse_time(raw.strip())
+        for raw in value.split(",")
+        if raw.strip()
+    )
+
+    if not candidates:
+        raise ValueError(
+            "時刻候補を1件以上指定してください。"
+        )
+
+    return candidates
 
 
 def _parse_date(value: str) -> date:
