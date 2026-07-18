@@ -26,6 +26,23 @@ def paper_trading_day_result_to_dict(
         "cycle_count": result.cycle_count,
         "net_profit_loss": result.net_profit_loss,
         "return_rate": result.return_rate,
+        "dashboard": {
+            "published": result.dashboard_published,
+            "error_message": (
+                result.dashboard_error_message
+            ),
+        },
+        "post_run_hooks": {
+            "completed_count": (
+                result.completed_post_run_hook_count
+            ),
+            "failure_count": (
+                result.post_run_hook_failure_count
+            ),
+            "error_messages": list(
+                result.post_run_hook_error_messages
+            ),
+        },
         "summary": paper_trading_daily_summary_to_dict(
             result.summary
         ),

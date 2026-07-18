@@ -34,6 +34,7 @@ class PaperTradingDaySettings:
     stop_on_cycle_failure: bool = False
     stop_on_resource_critical: bool = True
     continue_on_dashboard_error: bool = True
+    continue_on_post_run_hook_error: bool = True
 
     def __post_init__(self) -> None:
         """設定値を検証する。"""
@@ -65,9 +66,11 @@ class PaperTradingDayResult:
     error_message: str | None = None
     dashboard_published: bool = False
     dashboard_error_message: str | None = None
+    completed_post_run_hook_count: int = 0
+    post_run_hook_error_messages: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        """日時・営業日・異常終了情報を検証する。"""
+        """日時・営業日・後処理結果を検証する。"""
 
         for name, value in {
             "開始日時": self.started_at,
@@ -93,6 +96,11 @@ class PaperTradingDayResult:
                 "保存レコードの営業日が運用結果と一致しません。"
             )
 
+        if self.completed_post_run_hook_count < 0:
+            raise ValueError(
+                "完了Post-run Hook数は0以上である必要があります。"
+            )
+
         error_message = (
             None
             if self.error_message is None
@@ -102,6 +110,11 @@ class PaperTradingDayResult:
             None
             if self.dashboard_error_message is None
             else self.dashboard_error_message.strip() or None
+        )
+        hook_errors = tuple(
+            message.strip()
+            for message in self.post_run_hook_error_messages
+            if message.strip()
         )
 
         if (
@@ -130,6 +143,11 @@ class PaperTradingDayResult:
             "dashboard_error_message",
             dashboard_error_message,
         )
+        object.__setattr__(
+            self,
+            "post_run_hook_error_messages",
+            hook_errors,
+        )
 
     @property
     def cycle_count(self) -> int:
@@ -148,3 +166,9 @@ class PaperTradingDayResult:
         """日次リターン率を返す。"""
 
         return self.summary.return_rate
+
+    @property
+    def post_run_hook_failure_count(self) -> int:
+        """失敗したPost-run Hook数を返す。"""
+
+        return len(self.post_run_hook_error_messages)

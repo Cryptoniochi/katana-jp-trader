@@ -1,8 +1,9 @@
-"""Market-aware運転・永続化・Dashboard更新を統合する。"""
+"""Market-aware運転・永続化・Dashboard更新・後処理を統合する。"""
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timezone
 from time import sleep
 from typing import Protocol
@@ -66,6 +67,16 @@ class PaperTradingDayDashboardPublisher(Protocol):
         """現在のDashboard Snapshotを生成して保存する。"""
 
 
+class PaperTradingDayPostRunHook(Protocol):
+    """終日運用結果を受け取る任意後処理。"""
+
+    def handle(
+        self,
+        result: PaperTradingDayResult,
+    ) -> None:
+        """運用結果を使って後処理する。"""
+
+
 NowProvider = Callable[[], datetime]
 Sleeper = Callable[[float], None]
 StopPredicate = Callable[[], bool]
@@ -83,6 +94,10 @@ class PaperTradingDayService:
         dashboard_publisher: (
             PaperTradingDayDashboardPublisher | None
         ) = None,
+        post_run_hooks: tuple[
+            PaperTradingDayPostRunHook,
+            ...,
+        ] = (),
         settings: PaperTradingDaySettings | None = None,
         now_provider: NowProvider | None = None,
         sleeper: Sleeper = sleep,
@@ -94,6 +109,7 @@ class PaperTradingDayService:
         self.persistence_service = persistence_service
         self.market_clock = market_clock
         self.dashboard_publisher = dashboard_publisher
+        self.post_run_hooks = tuple(post_run_hooks)
         self.settings = (
             settings
             if settings is not None
@@ -223,7 +239,7 @@ class PaperTradingDayService:
         ) = self._publish_dashboard()
         completed_at = self._current_time()
 
-        return PaperTradingDayResult(
+        result = PaperTradingDayResult(
             trading_date=summary.trading_date,
             started_at=started_at,
             completed_at=completed_at,
@@ -233,6 +249,38 @@ class PaperTradingDayService:
             error_message=error_message,
             dashboard_published=dashboard_published,
             dashboard_error_message=dashboard_error_message,
+        )
+
+        return self._run_post_run_hooks(result)
+
+    def _run_post_run_hooks(
+        self,
+        result: PaperTradingDayResult,
+    ) -> PaperTradingDayResult:
+        """後処理Hookを順番に実行して結果へ反映する。"""
+
+        completed_count = 0
+        error_messages: list[str] = []
+
+        for hook in self.post_run_hooks:
+            try:
+                hook.handle(result)
+                completed_count += 1
+            except Exception as error:
+                if not self.settings.continue_on_post_run_hook_error:
+                    raise
+
+                error_messages.append(
+                    str(error).strip()
+                    or type(error).__name__
+                )
+
+        return replace(
+            result,
+            completed_post_run_hook_count=completed_count,
+            post_run_hook_error_messages=tuple(
+                error_messages
+            ),
         )
 
     def _publish_dashboard(
