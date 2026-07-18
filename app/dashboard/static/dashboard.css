@@ -1,8 +1,8 @@
 :root {
   color-scheme: dark;
   font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-    "Segoe UI", sans-serif;
+    Inter, ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", sans-serif;
   background: #071018;
   color: #edf4f7;
 }
@@ -14,7 +14,11 @@
 body {
   margin: 0;
   background:
-    radial-gradient(circle at top right, #123044 0, transparent 35%),
+    radial-gradient(
+      circle at top right,
+      #123044 0,
+      transparent 35%
+    ),
     #071018;
 }
 
@@ -84,7 +88,7 @@ h2 {
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
   margin-bottom: 20px;
 }
@@ -109,12 +113,22 @@ h2 {
 }
 
 .metric strong {
-  font-size: 25px;
+  font-size: 23px;
+}
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
 }
 
 .panel {
   margin-top: 20px;
   padding: 22px;
+}
+
+.chart-grid .panel {
+  margin-top: 0;
 }
 
 .panel-heading {
@@ -132,10 +146,10 @@ h2 {
 
 .chart svg {
   width: 100%;
-  height: 240px;
+  height: 230px;
 }
 
-.chart polyline {
+.line-series {
   fill: none;
   stroke: #78d5c7;
   stroke-width: 4;
@@ -148,6 +162,46 @@ h2 {
   justify-content: space-between;
   color: #8da2ad;
   font-size: 12px;
+}
+
+.chart-empty {
+  display: grid;
+  min-height: 220px;
+  place-items: center;
+  color: #8da2ad;
+}
+
+.bar-chart {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 220px;
+  padding: 12px 0;
+}
+
+.bar-column {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  height: 190px;
+  border-bottom: 1px solid #254552;
+}
+
+.bar {
+  width: min(18px, 70%);
+  min-height: 2px;
+  border-radius: 4px 4px 0 0;
+}
+
+.bar.positive {
+  align-self: flex-start;
+  background: #78d5c7;
+}
+
+.bar.negative {
+  align-self: flex-end;
+  background: #ff8f8f;
 }
 
 .table-wrap {
@@ -187,14 +241,20 @@ pre {
   font-size: 12px;
 }
 
+@media (max-width: 900px) {
+  .metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .chart-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 760px) {
   .hero {
     align-items: flex-start;
     flex-direction: column;
-  }
-
-  .metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

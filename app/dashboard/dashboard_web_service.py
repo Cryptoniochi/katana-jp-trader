@@ -73,17 +73,9 @@ class DashboardWebService:
             limit=self.history_limit
         )
         chronological = tuple(reversed(recent_records))
-
-        daily_history = tuple(
-            DashboardDailyPoint(
-                trading_date=record.trading_date,
-                net_profit_loss=record.net_profit_loss,
-                final_equity=record.final_equity,
-                return_rate=record.return_rate,
-            )
-            for record in chronological
+        daily_history = self._create_daily_history(
+            chronological
         )
-
         cumulative_profit_loss = sum(
             record.net_profit_loss or 0.0
             for record in chronological
@@ -95,6 +87,78 @@ class DashboardWebService:
             daily_history=daily_history,
             cumulative_profit_loss=cumulative_profit_loss,
         )
+
+    @staticmethod
+    def _create_daily_history(
+        records: tuple[PaperTradingDailyRecord, ...],
+    ) -> tuple[DashboardDailyPoint, ...]:
+        """日次履歴へ累積損益・Return・Drawdownを追加する。"""
+
+        if not records:
+            return ()
+
+        first_equity = next(
+            (
+                record.initial_equity
+                for record in records
+                if record.initial_equity not in {
+                    None,
+                    0,
+                }
+            ),
+            None,
+        )
+        cumulative_profit_loss = 0.0
+        peak_equity: float | None = None
+        points: list[DashboardDailyPoint] = []
+
+        for record in records:
+            cumulative_profit_loss += (
+                record.net_profit_loss or 0.0
+            )
+            equity = record.final_equity
+
+            if equity is not None:
+                peak_equity = (
+                    equity
+                    if peak_equity is None
+                    else max(peak_equity, equity)
+                )
+
+            drawdown = (
+                None
+                if (
+                    equity is None
+                    or peak_equity in {None, 0}
+                )
+                else (
+                    peak_equity - equity
+                ) / peak_equity
+            )
+            cumulative_return = (
+                None
+                if first_equity in {None, 0}
+                else (
+                    first_equity
+                    + cumulative_profit_loss
+                ) / first_equity - 1.0
+            )
+
+            points.append(
+                DashboardDailyPoint(
+                    trading_date=record.trading_date,
+                    net_profit_loss=record.net_profit_loss,
+                    final_equity=equity,
+                    return_rate=record.return_rate,
+                    cumulative_profit_loss=(
+                        cumulative_profit_loss
+                    ),
+                    cumulative_return=cumulative_return,
+                    drawdown=drawdown,
+                )
+            )
+
+        return tuple(points)
 
     @staticmethod
     def _snapshot_to_dict(

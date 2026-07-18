@@ -33,6 +33,14 @@
         <strong id="cumulative-pl">—</strong>
       </article>
       <article class="metric">
+        <span>Daily Win Rate</span>
+        <strong id="daily-win-rate">—</strong>
+      </article>
+      <article class="metric">
+        <span>Maximum Drawdown</span>
+        <strong id="maximum-drawdown">—</strong>
+      </article>
+      <article class="metric">
         <span>Signals</span>
         <strong id="signal-count">—</strong>
       </article>
@@ -50,12 +58,38 @@
       </article>
     </section>
 
-    <section class="panel">
-      <div class="panel-heading">
-        <h2>Daily Equity</h2>
-        <span class="muted">Recent trading days</span>
-      </div>
-      <div id="equity-chart" class="chart" aria-label="純資産推移"></div>
+    <section class="chart-grid">
+      <article class="panel">
+        <div class="panel-heading">
+          <h2>Equity Curve</h2>
+          <span class="muted">Final equity by day</span>
+        </div>
+        <div id="equity-chart" class="chart"></div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-heading">
+          <h2>Daily P/L</h2>
+          <span class="muted">Profit and loss by day</span>
+        </div>
+        <div id="daily-pl-chart" class="chart"></div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-heading">
+          <h2>Cumulative P/L</h2>
+          <span class="muted">Accumulated result</span>
+        </div>
+        <div id="cumulative-pl-chart" class="chart"></div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-heading">
+          <h2>Drawdown</h2>
+          <span class="muted">Decline from equity peak</span>
+        </div>
+        <div id="drawdown-chart" class="chart"></div>
+      </article>
     </section>
 
     <section class="panel">
@@ -90,49 +124,119 @@
   <script>
     const yen = new Intl.NumberFormat(
       "ja-JP",
-      { style: "currency", currency: "JPY", maximumFractionDigits: 0 }
+      {
+        style: "currency",
+        currency: "JPY",
+        maximumFractionDigits: 0
+      }
+    );
+    const percent = new Intl.NumberFormat(
+      "ja-JP",
+      {
+        style: "percent",
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      }
     );
 
     function valueOrDash(value, formatter = String) {
-      return value === null || value === undefined ? "—" : formatter(value);
+      return value === null || value === undefined
+        ? "—"
+        : formatter(value);
     }
 
-    function drawEquity(points) {
-      const chart = document.getElementById("equity-chart");
-      chart.innerHTML = "";
-      const values = points
-        .map(point => point.final_equity)
-        .filter(value => value !== null);
+    function emptyChart(element, message) {
+      element.innerHTML = `<p class="chart-empty">${message}</p>`;
+    }
 
-      if (values.length === 0) {
-        chart.textContent = "No equity data yet.";
+    function lineChart(elementId, points, valueKey, formatter) {
+      const element = document.getElementById(elementId);
+      const data = points
+        .map(point => ({
+          label: point.trading_date,
+          value: point[valueKey]
+        }))
+        .filter(point => point.value !== null);
+
+      if (data.length === 0) {
+        emptyChart(element, "No data yet.");
         return;
       }
 
-      const min = Math.min(...values);
-      const max = Math.max(...values);
-      const range = Math.max(max - min, 1);
-      const width = 900;
-      const height = 240;
-      const padding = 20;
-      const coordinates = values.map((value, index) => {
+      const values = data.map(point => point.value);
+      const minimum = Math.min(...values);
+      const maximum = Math.max(...values);
+      const range = Math.max(maximum - minimum, 1);
+      const width = 820;
+      const height = 230;
+      const padding = 24;
+      const coordinates = data.map((point, index) => {
         const x = padding + (
           index * (width - padding * 2) /
-          Math.max(values.length - 1, 1)
+          Math.max(data.length - 1, 1)
         );
         const y = height - padding - (
-          (value - min) / range * (height - padding * 2)
+          (point.value - minimum) /
+          range *
+          (height - padding * 2)
         );
         return `${x},${y}`;
       }).join(" ");
 
-      chart.innerHTML = `
+      element.innerHTML = `
         <svg viewBox="0 0 ${width} ${height}" role="img">
-          <polyline points="${coordinates}" />
+          <polyline class="line-series" points="${coordinates}" />
         </svg>
         <div class="chart-range">
-          <span>${yen.format(min)}</span>
-          <span>${yen.format(max)}</span>
+          <span>${formatter(minimum)}</span>
+          <span>${formatter(maximum)}</span>
+        </div>
+      `;
+    }
+
+    function barChart(elementId, points, valueKey, formatter) {
+      const element = document.getElementById(elementId);
+      const data = points
+        .map(point => ({
+          label: point.trading_date,
+          value: point[valueKey]
+        }))
+        .filter(point => point.value !== null);
+
+      if (data.length === 0) {
+        emptyChart(element, "No data yet.");
+        return;
+      }
+
+      const maximumAbsolute = Math.max(
+        ...data.map(point => Math.abs(point.value)),
+        1
+      );
+
+      element.innerHTML = `
+        <div class="bar-chart">
+          ${data.map(point => {
+            const height = (
+              Math.abs(point.value) /
+              maximumAbsolute *
+              100
+            );
+            const className = point.value >= 0
+              ? "bar positive"
+              : "bar negative";
+            return `
+              <div
+                class="bar-column"
+                title="${point.label}: ${formatter(point.value)}"
+              >
+                <div class="${className}" style="height:${height}%"></div>
+              </div>
+            `;
+          }).join("")}
+        </div>
+        <div class="chart-range">
+          <span>${formatter(-maximumAbsolute)}</span>
+          <span>${formatter(maximumAbsolute)}</span>
         </div>
       `;
     }
@@ -143,7 +247,11 @@
 
       if (positions.length === 0) {
         body.innerHTML = `
-          <tr><td colspan="6" class="muted">No open positions.</td></tr>
+          <tr>
+            <td colspan="6" class="muted">
+              No open positions.
+            </td>
+          </tr>
         `;
         return;
       }
@@ -164,14 +272,20 @@
 
     async function refreshDashboard() {
       const response = await fetch("/api/dashboard/summary");
+
       if (!response.ok) {
-        throw new Error(`Dashboard API error: ${response.status}`);
+        throw new Error(
+          `Dashboard API error: ${response.status}`
+        );
       }
 
       const data = await response.json();
       const snapshot = data.snapshot;
       const daily = data.daily_history;
-      const today = daily.length > 0 ? daily[daily.length - 1] : null;
+      const analytics = data.analytics ?? {};
+      const today = daily.length > 0
+        ? daily[daily.length - 1]
+        : null;
       const portfolio = snapshot.portfolio;
       const live = snapshot.live_summary;
       const health = snapshot.system_health;
@@ -182,6 +296,10 @@
         valueOrDash(today?.net_profit_loss, yen.format);
       document.getElementById("cumulative-pl").textContent =
         yen.format(data.cumulative_profit_loss);
+      document.getElementById("daily-win-rate").textContent =
+        valueOrDash(analytics.daily_win_rate, percent.format);
+      document.getElementById("maximum-drawdown").textContent =
+        valueOrDash(analytics.maximum_drawdown, percent.format);
       document.getElementById("signal-count").textContent =
         valueOrDash(live?.signal_count);
       document.getElementById("execution-count").textContent =
@@ -194,24 +312,58 @@
       const status = health?.status ?? (
         snapshot.partial ? "partial" : "available"
       );
-      const statusElement = document.getElementById("system-status");
+      const statusElement = document.getElementById(
+        "system-status"
+      );
       statusElement.textContent = status.toUpperCase();
       statusElement.dataset.status = status;
 
       renderPositions(portfolio?.positions ?? []);
-      drawEquity(daily);
+      lineChart(
+        "equity-chart",
+        daily,
+        "final_equity",
+        yen.format
+      );
+      barChart(
+        "daily-pl-chart",
+        daily,
+        "net_profit_loss",
+        yen.format
+      );
+      lineChart(
+        "cumulative-pl-chart",
+        daily,
+        "cumulative_profit_loss",
+        yen.format
+      );
+      lineChart(
+        "drawdown-chart",
+        daily,
+        "drawdown",
+        percent.format
+      );
+
       document.getElementById("system-details").textContent =
-        JSON.stringify({
-          broker: snapshot.broker,
-          runtime_resource: snapshot.runtime_resource,
-          errors: snapshot.errors,
-        }, null, 2);
+        JSON.stringify(
+          {
+            broker: snapshot.broker,
+            runtime_resource: snapshot.runtime_resource,
+            analytics,
+            errors: snapshot.errors
+          },
+          null,
+          2
+        );
     }
 
     refreshDashboard().catch(error => {
       document.getElementById("system-details").textContent =
-        error instanceof Error ? error.message : String(error);
+        error instanceof Error
+          ? error.message
+          : String(error);
     });
+
     window.setInterval(refreshDashboard, 30000);
   </script>
 </body>
