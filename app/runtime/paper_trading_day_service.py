@@ -1,4 +1,4 @@
-"""Market-aware運転と日次Runtime・永続化を統合する。"""
+"""Market-aware運転・永続化・Dashboard更新を統合する。"""
 
 from __future__ import annotations
 
@@ -59,6 +59,13 @@ class PaperTradingDayPersister(Protocol):
         """日次Summaryを保存する。"""
 
 
+class PaperTradingDayDashboardPublisher(Protocol):
+    """終日運用後にDashboard Snapshotを公開する。"""
+
+    def publish(self):
+        """現在のDashboard Snapshotを生成して保存する。"""
+
+
 NowProvider = Callable[[], datetime]
 Sleeper = Callable[[float], None]
 StopPredicate = Callable[[], bool]
@@ -73,6 +80,9 @@ class PaperTradingDayService:
         runtime: PaperTradingDayRuntime,
         persistence_service: PaperTradingDayPersister,
         market_clock: TokyoMarketClock,
+        dashboard_publisher: (
+            PaperTradingDayDashboardPublisher | None
+        ) = None,
         settings: PaperTradingDaySettings | None = None,
         now_provider: NowProvider | None = None,
         sleeper: Sleeper = sleep,
@@ -83,6 +93,7 @@ class PaperTradingDayService:
         self.runtime = runtime
         self.persistence_service = persistence_service
         self.market_clock = market_clock
+        self.dashboard_publisher = dashboard_publisher
         self.settings = (
             settings
             if settings is not None
@@ -206,6 +217,10 @@ class PaperTradingDayService:
         persistence = self.persistence_service.persist(
             summary
         )
+        (
+            dashboard_published,
+            dashboard_error_message,
+        ) = self._publish_dashboard()
         completed_at = self._current_time()
 
         return PaperTradingDayResult(
@@ -216,7 +231,31 @@ class PaperTradingDayService:
             summary=summary,
             record=persistence.record,
             error_message=error_message,
+            dashboard_published=dashboard_published,
+            dashboard_error_message=dashboard_error_message,
         )
+
+    def _publish_dashboard(
+        self,
+    ) -> tuple[bool, str | None]:
+        """日次保存後にDashboard Snapshotを公開する。"""
+
+        if self.dashboard_publisher is None:
+            return False, None
+
+        try:
+            self.dashboard_publisher.publish()
+        except Exception as error:
+            if not self.settings.continue_on_dashboard_error:
+                raise
+
+            return (
+                False,
+                str(error).strip()
+                or type(error).__name__,
+            )
+
+        return True, None
 
     def _sleep_closed_market(
         self,

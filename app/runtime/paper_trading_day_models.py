@@ -33,6 +33,7 @@ class PaperTradingDaySettings:
     maximum_cycles: int | None = None
     stop_on_cycle_failure: bool = False
     stop_on_resource_critical: bool = True
+    continue_on_dashboard_error: bool = True
 
     def __post_init__(self) -> None:
         """設定値を検証する。"""
@@ -62,6 +63,8 @@ class PaperTradingDayResult:
     summary: PaperTradingDailySummary
     record: PaperTradingDailyRecord
     error_message: str | None = None
+    dashboard_published: bool = False
+    dashboard_error_message: str | None = None
 
     def __post_init__(self) -> None:
         """日時・営業日・異常終了情報を検証する。"""
@@ -95,6 +98,11 @@ class PaperTradingDayResult:
             if self.error_message is None
             else self.error_message.strip() or None
         )
+        dashboard_error_message = (
+            None
+            if self.dashboard_error_message is None
+            else self.dashboard_error_message.strip() or None
+        )
 
         if (
             self.stop_reason is PaperTradingDayStopReason.ERROR
@@ -104,10 +112,23 @@ class PaperTradingDayResult:
                 "ERROR終了にはエラーメッセージが必要です。"
             )
 
+        if (
+            self.dashboard_published
+            and dashboard_error_message is not None
+        ):
+            raise ValueError(
+                "Dashboard公開成功時にエラーは設定できません。"
+            )
+
         object.__setattr__(
             self,
             "error_message",
             error_message,
+        )
+        object.__setattr__(
+            self,
+            "dashboard_error_message",
+            dashboard_error_message,
         )
 
     @property
