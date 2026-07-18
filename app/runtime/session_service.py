@@ -43,6 +43,8 @@ class RuntimeSessionService:
         self._ended_at: datetime | None = None
         self._stop_reason: RuntimeSessionStopReason | None = None
         self._message: str | None = None
+        self._last_heartbeat_at: datetime | None = None
+        self._last_cycle_at: datetime | None = None
         self._daily_summaries: list[RuntimeDailySummary] = []
         self._reset_active_counters()
 
@@ -70,6 +72,8 @@ class RuntimeSessionService:
         self._ended_at = None
         self._stop_reason = None
         self._message = None
+        self._last_heartbeat_at = None
+        self._last_cycle_at = None
         self._daily_summaries.clear()
         self._reset_active_counters()
 
@@ -85,6 +89,7 @@ class RuntimeSessionService:
         self._require_running()
         self.rotate_if_needed()
         self._cycle_count += 1
+        self._last_cycle_at = self._current_time()
 
         if successful:
             self._successful_cycle_count += 1
@@ -100,6 +105,7 @@ class RuntimeSessionService:
         self._require_running()
         self.rotate_if_needed()
         self._heartbeat_count += 1
+        self._last_heartbeat_at = self._current_time()
 
         return self.snapshot()
 
@@ -225,6 +231,8 @@ class RuntimeSessionService:
             completed_day_count=len(
                 self._daily_summaries
             ),
+            last_heartbeat_at=self._last_heartbeat_at,
+            last_cycle_at=self._last_cycle_at,
             ended_at=self._ended_at,
             stop_reason=self._stop_reason,
             message=self._message,
@@ -291,6 +299,8 @@ class RuntimeSessionService:
         self._heartbeat_count = 0
         self._restart_count = 0
         self._error_count = 0
+        self._last_heartbeat_at = None
+        self._last_cycle_at = None
 
     def _require_running(self) -> None:
         """稼働中でなければ例外を送出する。"""

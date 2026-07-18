@@ -18,6 +18,9 @@ from app.monitoring.system_health_models import (
 from app.runtime.resource_models import (
     RuntimeResourceEvaluation,
 )
+from app.runtime.runtime_health_monitor_models import (
+    RuntimeHealthMonitorReport,
+)
 from app.trading.order_models import (
     OrderStatus,
     TradeOrderRecord,
@@ -214,6 +217,7 @@ class DashboardSnapshot:
     broker: DashboardBrokerStatus | None
     errors: tuple[DashboardComponentError, ...]
     runtime_resource: RuntimeResourceEvaluation | None = None
+    runtime_health: RuntimeHealthMonitorReport | None = None
 
     def __post_init__(self) -> None:
         """Snapshotの基本整合性を検証する。"""

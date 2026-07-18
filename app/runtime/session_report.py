@@ -26,6 +26,16 @@ def runtime_session_snapshot_to_dict(
         "restart_count": snapshot.restart_count,
         "error_count": snapshot.error_count,
         "completed_day_count": snapshot.completed_day_count,
+        "last_heartbeat_at": (
+            snapshot.last_heartbeat_at.isoformat()
+            if snapshot.last_heartbeat_at is not None
+            else None
+        ),
+        "last_cycle_at": (
+            snapshot.last_cycle_at.isoformat()
+            if snapshot.last_cycle_at is not None
+            else None
+        ),
         "uptime_seconds": snapshot.uptime_seconds,
         "ended_at": (
             snapshot.ended_at.isoformat()
@@ -45,9 +55,7 @@ def runtime_session_report_to_dict(
     report: RuntimeSessionReport,
 ) -> dict[str, Any]:
     return {
-        "session": runtime_session_snapshot_to_dict(
-            report.snapshot
-        ),
+        "session": runtime_session_snapshot_to_dict(report.snapshot),
         "total_cycle_count": report.total_cycle_count,
         "total_error_count": report.total_error_count,
         "daily_summaries": [

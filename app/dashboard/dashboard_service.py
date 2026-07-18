@@ -24,6 +24,9 @@ from app.monitoring.system_health_models import (
 from app.runtime.resource_models import (
     RuntimeResourceEvaluation,
 )
+from app.runtime.runtime_health_monitor_models import (
+    RuntimeHealthMonitorReport,
+)
 from app.trading.order_models import TradeOrderRecord
 from app.trading.portfolio_models import PortfolioSnapshot
 
@@ -74,6 +77,11 @@ class DashboardBrokerReader(Protocol):
         """Dashboard表示用Broker状態を返す。"""
 
 
+class DashboardRuntimeHealthReader(Protocol):
+    def check(self) -> RuntimeHealthMonitorReport:
+        """現在のRuntime Health判定を返す。"""
+
+
 class DashboardRuntimeResourceReader(Protocol):
     def latest(
         self,
@@ -96,6 +104,9 @@ class DashboardService:
         runtime_resource_reader: (
             DashboardRuntimeResourceReader | None
         ) = None,
+        runtime_health_reader: (
+            DashboardRuntimeHealthReader | None
+        ) = None,
         now_provider: Callable[[], datetime] | None = None,
         order_limit: int = 10_000,
     ) -> None:
@@ -111,6 +122,7 @@ class DashboardService:
         self.live_summary_reader = live_summary_reader
         self.broker_reader = broker_reader
         self.runtime_resource_reader = runtime_resource_reader
+        self.runtime_health_reader = runtime_health_reader
         self.now_provider = (
             now_provider
             if now_provider is not None
@@ -163,6 +175,14 @@ class DashboardService:
             errors,
         )
 
+        runtime_health = None
+        if self.runtime_health_reader is not None:
+            runtime_health = self._read_component(
+                "runtime_health",
+                self.runtime_health_reader.check,
+                errors,
+            )
+
         runtime_resource = None
         if self.runtime_resource_reader is not None:
             runtime_resource = self._read_component(
@@ -189,6 +209,7 @@ class DashboardService:
             broker=broker,
             errors=tuple(errors),
             runtime_resource=runtime_resource,
+            runtime_health=runtime_health,
         )
 
     @staticmethod

@@ -79,6 +79,8 @@ class RuntimeSessionSnapshot:
     restart_count: int
     error_count: int
     completed_day_count: int
+    last_heartbeat_at: datetime | None = None
+    last_cycle_at: datetime | None = None
     ended_at: datetime | None = None
     stop_reason: RuntimeSessionStopReason | None = None
     message: str | None = None
@@ -91,6 +93,24 @@ class RuntimeSessionSnapshot:
             raise ValueError("開始・確認日時にはタイムゾーンが必要です。")
         if self.checked_at < self.started_at:
             raise ValueError("確認日時は開始日時以後である必要があります。")
+
+        for name, value in {
+            "最終Heartbeat日時": self.last_heartbeat_at,
+            "最終Cycle日時": self.last_cycle_at,
+        }.items():
+            if value is not None:
+                if value.tzinfo is None:
+                    raise ValueError(f"{name}にはタイムゾーンが必要です。")
+                if value < self.started_at or value > self.checked_at:
+                    raise ValueError(
+                        f"{name}は開始日時以後かつ確認日時以前である必要があります。"
+                    )
+
+        if self.heartbeat_count == 0 and self.last_heartbeat_at is not None:
+            raise ValueError("Heartbeat未記録時に最終日時は設定できません。")
+        if self.cycle_count == 0 and self.last_cycle_at is not None:
+            raise ValueError("Cycle未記録時に最終日時は設定できません。")
+
         if self.status is RuntimeSessionStatus.RUNNING:
             if self.ended_at is not None or self.stop_reason is not None:
                 raise ValueError("稼働中セッションに終了情報は設定できません。")
@@ -99,6 +119,7 @@ class RuntimeSessionSnapshot:
                 raise ValueError("終了済みセッションには終了情報が必要です。")
             if self.ended_at.tzinfo is None:
                 raise ValueError("終了日時にはタイムゾーンが必要です。")
+
         values = (
             self.cycle_count,
             self.successful_cycle_count,
