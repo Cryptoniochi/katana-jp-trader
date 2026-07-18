@@ -16,10 +16,14 @@ from app.dashboard.dashboard_snapshot_file import (
     DashboardJsonSnapshotReader,
 )
 from app.dashboard.dashboard_web_app import (
+    RecoverySummaryProvider,
     create_dashboard_app,
 )
 from app.dashboard.dashboard_web_service import (
     DashboardWebService,
+)
+from app.dashboard.recovery_event_summary_service import (
+    RecoveryEventSummaryService,
 )
 from app.runtime.paper_trading_daily_repository import (
     PaperTradingDailySummaryRepository,
@@ -29,6 +33,9 @@ from app.runtime.recovery_history_repository import (
 )
 from app.runtime.recovery_history_service import (
     RecoveryHistoryService,
+)
+from app.runtime.sqlite_recovery_event_repository import (
+    SQLiteRecoveryEventRepository,
 )
 
 
@@ -65,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_DATABASE_PATH,
         help=(
-            "Paper Trading日次履歴を読むSQLite Path。"
+            "Dashboard履歴を読むSQLite Path。"
             f"既定値: {DEFAULT_DATABASE_PATH}"
         ),
     )
@@ -107,11 +114,29 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def create_recovery_history_service() -> RecoveryHistoryService:
-    """Dashboard用Recovery履歴Serviceを構築する。"""
+    """旧Recovery履歴Serviceを互換性維持のため構築する。
+
+    既存テストおよび外部呼び出しとの互換性を維持するために残す。
+    Dashboardの既定構成ではRecoveryEvent版Serviceを使用する。
+    """
 
     repository = RecoveryHistoryRepository()
 
     return RecoveryHistoryService(
+        repository=repository,
+    )
+
+
+def create_recovery_summary_service(
+    database_path: Path,
+) -> RecoveryEventSummaryService:
+    """Dashboard用Recovery Event集計Serviceを構築する。"""
+
+    repository = SQLiteRecoveryEventRepository(
+        database_path
+    )
+
+    return RecoveryEventSummaryService(
         repository=repository,
     )
 
@@ -121,7 +146,7 @@ def create_launcher_app(
     database_path: Path,
     snapshot_path: Path,
     history_limit: int,
-    recovery_service: RecoveryHistoryService | None = None,
+    recovery_service: RecoverySummaryProvider | None = None,
 ) -> FastAPI:
     """Launcher設定からFastAPI Appを構築する。"""
 
@@ -140,7 +165,9 @@ def create_launcher_app(
     resolved_recovery_service = (
         recovery_service
         if recovery_service is not None
-        else create_recovery_history_service()
+        else create_recovery_summary_service(
+            database_path
+        )
     )
 
     return create_dashboard_app(
@@ -196,7 +223,7 @@ def main(
     print(f"URL      : {url}")
     print(f"Database : {args.database}")
     print(f"Snapshot : {args.snapshot}")
-    print("Recovery : in-memory history")
+    print("Recovery : SQLite RecoveryEvent history")
     print("Stop     : Ctrl+C")
     print("=" * 52)
 

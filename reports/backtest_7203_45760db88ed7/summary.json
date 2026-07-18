@@ -1,0 +1,35 @@
+{
+  "equity_curve": {
+    "absolute_profit_loss": 1005.0,
+    "final_equity": 1001005.0,
+    "initial_equity": 1000000.0,
+    "maximum_drawdown": 0.0,
+    "maximum_drawdown_amount": 0.0,
+    "point_count": 2,
+    "total_return": 0.001005
+  },
+  "metrics": {
+    "average_loss": null,
+    "average_profit": 1004.9999999999955,
+    "expectancy": 1004.9999999999955,
+    "flat_trade_count": 0,
+    "gross_loss": 0,
+    "gross_profit": 1004.9999999999955,
+    "losing_trade_count": 0,
+    "maximum_consecutive_losses": 0,
+    "maximum_consecutive_wins": 1,
+    "net_profit_loss": 1004.9999999999955,
+    "profit_factor": null,
+    "trade_count": 1,
+    "unmatched_buy_quantity": 0,
+    "unmatched_sell_quantity": 0,
+    "win_rate": 1.0,
+    "winning_trade_count": 1
+  },
+  "trade_report": {
+    "total_net_profit_loss": 1004.9999999999955,
+    "trade_count": 1,
+    "unmatched_buy_quantity": 0,
+    "unmatched_sell_quantity": 0
+  }
+}
