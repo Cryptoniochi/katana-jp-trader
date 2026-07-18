@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+  >
+  <title>{{ page_title }}</title>
+  <link
+    rel="stylesheet"
+    href="{{ url_for('static', path='/dashboard.css') }}"
+  >
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">PROJECT KATANA</p>
+        <h1>Operations Dashboard</h1>
+        <p id="updated-at" class="muted">Loading...</p>
+      </div>
+      <div id="system-status" class="status-card">UNKNOWN</div>
+    </header>
+
+    <section class="metrics" aria-label="主要指標">
+      <article class="metric">
+        <span>Today's P/L</span>
+        <strong id="today-pl">—</strong>
+      </article>
+      <article class="metric">
+        <span>Cumulative P/L</span>
+        <strong id="cumulative-pl">—</strong>
+      </article>
+      <article class="metric">
+        <span>Signals</span>
+        <strong id="signal-count">—</strong>
+      </article>
+      <article class="metric">
+        <span>Executions</span>
+        <strong id="execution-count">—</strong>
+      </article>
+      <article class="metric">
+        <span>Broker Equity</span>
+        <strong id="broker-equity">—</strong>
+      </article>
+      <article class="metric">
+        <span>Positions</span>
+        <strong id="position-count">—</strong>
+      </article>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <h2>Daily Equity</h2>
+        <span class="muted">Recent trading days</span>
+      </div>
+      <div id="equity-chart" class="chart" aria-label="純資産推移"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <h2>Current Positions</h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th>Side</th>
+              <th>Quantity</th>
+              <th>Average Cost</th>
+              <th>Market Price</th>
+              <th>Unrealized P/L</th>
+            </tr>
+          </thead>
+          <tbody id="positions-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <h2>System Details</h2>
+      </div>
+      <pre id="system-details">Loading...</pre>
+    </section>
+  </main>
+
+  <script>
+    const yen = new Intl.NumberFormat(
+      "ja-JP",
+      { style: "currency", currency: "JPY", maximumFractionDigits: 0 }
+    );
+
+    function valueOrDash(value, formatter = String) {
+      return value === null || value === undefined ? "—" : formatter(value);
+    }
+
+    function drawEquity(points) {
+      const chart = document.getElementById("equity-chart");
+      chart.innerHTML = "";
+      const values = points
+        .map(point => point.final_equity)
+        .filter(value => value !== null);
+
+      if (values.length === 0) {
+        chart.textContent = "No equity data yet.";
+        return;
+      }
+
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const range = Math.max(max - min, 1);
+      const width = 900;
+      const height = 240;
+      const padding = 20;
+      const coordinates = values.map((value, index) => {
+        const x = padding + (
+          index * (width - padding * 2) /
+          Math.max(values.length - 1, 1)
+        );
+        const y = height - padding - (
+          (value - min) / range * (height - padding * 2)
+        );
+        return `${x},${y}`;
+      }).join(" ");
+
+      chart.innerHTML = `
+        <svg viewBox="0 0 ${width} ${height}" role="img">
+          <polyline points="${coordinates}" />
+        </svg>
+        <div class="chart-range">
+          <span>${yen.format(min)}</span>
+          <span>${yen.format(max)}</span>
+        </div>
+      `;
+    }
+
+    function renderPositions(positions) {
+      const body = document.getElementById("positions-body");
+      body.innerHTML = "";
+
+      if (positions.length === 0) {
+        body.innerHTML = `
+          <tr><td colspan="6" class="muted">No open positions.</td></tr>
+        `;
+        return;
+      }
+
+      for (const position of positions) {
+        const row = document.createElement("tr");
+        row.innerHTML = `
+          <td>${position.code}</td>
+          <td>${position.side}</td>
+          <td>${position.quantity}</td>
+          <td>${yen.format(position.average_cost)}</td>
+          <td>${yen.format(position.market_price)}</td>
+          <td>${yen.format(position.unrealized_profit_loss)}</td>
+        `;
+        body.appendChild(row);
+      }
+    }
+
+    async function refreshDashboard() {
+      const response = await fetch("/api/dashboard/summary");
+      if (!response.ok) {
+        throw new Error(`Dashboard API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const snapshot = data.snapshot;
+      const daily = data.daily_history;
+      const today = daily.length > 0 ? daily[daily.length - 1] : null;
+      const portfolio = snapshot.portfolio;
+      const live = snapshot.live_summary;
+      const health = snapshot.system_health;
+
+      document.getElementById("updated-at").textContent =
+        `Updated: ${data.generated_at}`;
+      document.getElementById("today-pl").textContent =
+        valueOrDash(today?.net_profit_loss, yen.format);
+      document.getElementById("cumulative-pl").textContent =
+        yen.format(data.cumulative_profit_loss);
+      document.getElementById("signal-count").textContent =
+        valueOrDash(live?.signal_count);
+      document.getElementById("execution-count").textContent =
+        valueOrDash(live?.execution_count);
+      document.getElementById("broker-equity").textContent =
+        valueOrDash(portfolio?.broker_equity, yen.format);
+      document.getElementById("position-count").textContent =
+        valueOrDash(portfolio?.position_count);
+
+      const status = health?.status ?? (
+        snapshot.partial ? "partial" : "available"
+      );
+      const statusElement = document.getElementById("system-status");
+      statusElement.textContent = status.toUpperCase();
+      statusElement.dataset.status = status;
+
+      renderPositions(portfolio?.positions ?? []);
+      drawEquity(daily);
+      document.getElementById("system-details").textContent =
+        JSON.stringify({
+          broker: snapshot.broker,
+          runtime_resource: snapshot.runtime_resource,
+          errors: snapshot.errors,
+        }, null, 2);
+    }
+
+    refreshDashboard().catch(error => {
+      document.getElementById("system-details").textContent =
+        error instanceof Error ? error.message : String(error);
+    });
+    window.setInterval(refreshDashboard, 30000);
+  </script>
+</body>
+</html>

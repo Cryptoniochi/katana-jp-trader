@@ -8,16 +8,27 @@ version = "0.35.0"
 description = "Japanese equity research and trading platform"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "fastapi",
+    "jinja2",
+    "uvicorn",
+]
 
 [project.optional-dependencies]
 dev = [
+    "httpx",
     "pytest",
     "ruff",
 ]
 
 [tool.setuptools.packages.find]
 include = ["app*"]
+
+[tool.setuptools.package-data]
+"app.dashboard" = [
+    "templates/*.html",
+    "static/*.css",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
