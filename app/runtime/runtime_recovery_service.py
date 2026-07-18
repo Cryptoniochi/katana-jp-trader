@@ -5,6 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Protocol
 
+from app.runtime.recovery_event_models import (
+    RecoveryEventCategory,
+)
 from app.runtime.recovery_models import RecoveryResult
 from app.runtime.recovery_service import RecoveryService
 from app.runtime.runtime_health_monitor_models import (
@@ -23,6 +26,18 @@ class RuntimeRecoveryHealthReader(Protocol):
         """現在のRuntime Healthを返す。"""
 
 
+class RuntimeRecoveryEventRecorder(Protocol):
+    """Runtime復旧結果をEventとして記録する。"""
+
+    def record_runtime_result(
+        self,
+        result: RecoveryResult,
+        *,
+        category: RecoveryEventCategory,
+    ) -> object:
+        """Runtime復旧結果を記録する。"""
+
+
 RestartAction = Callable[[], bool | None]
 AbortPredicate = Callable[[], bool]
 
@@ -35,12 +50,16 @@ class RuntimeRecoveryService:
         *,
         health_reader: RuntimeRecoveryHealthReader,
         recovery_service: RecoveryService,
+        event_recorder: (
+            RuntimeRecoveryEventRecorder | None
+        ) = None,
         recover_warning: bool = False,
     ) -> None:
-        """Health Reader・Recovery Service・警告時方針を設定する。"""
+        """Health Reader・Recovery Service・記録先を設定する。"""
 
         self.health_reader = health_reader
         self.recovery_service = recovery_service
+        self.event_recorder = event_recorder
         self.recover_warning = recover_warning
 
     def recover_if_needed(
@@ -79,6 +98,8 @@ class RuntimeRecoveryService:
             )
         )
 
+        self._record_recovery_event(recovery_result)
+
         final_health = self.health_reader.check()
 
         return RuntimeRecoveryResult(
@@ -86,6 +107,20 @@ class RuntimeRecoveryService:
             initial_health=initial_health,
             recovery_result=recovery_result,
             final_health=final_health,
+        )
+
+    def _record_recovery_event(
+        self,
+        recovery_result: RecoveryResult,
+    ) -> None:
+        """設定されている場合だけ復旧結果を記録する。"""
+
+        if self.event_recorder is None:
+            return
+
+        self.event_recorder.record_runtime_result(
+            recovery_result,
+            category=RecoveryEventCategory.RESTART,
         )
 
     def _requires_recovery(

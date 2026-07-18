@@ -2,8 +2,12 @@
 
 from datetime import datetime, timedelta, timezone
 
+from app.runtime.recovery_event_models import (
+    RecoveryEventCategory,
+)
 from app.runtime.recovery_models import (
     RecoveryPolicy,
+    RecoveryResult,
 )
 from app.runtime.recovery_service import (
     RecoveryService,
@@ -73,10 +77,39 @@ class FakeHealthReader:
         )
 
 
+class FakeRecoveryEventRecorder:
+    """記録されたRuntime復旧結果を保持する。"""
+
+    def __init__(self) -> None:
+        self.records: list[
+            tuple[
+                RecoveryResult,
+                RecoveryEventCategory,
+            ]
+        ] = []
+
+    def record_runtime_result(
+        self,
+        result: RecoveryResult,
+        *,
+        category: RecoveryEventCategory,
+    ) -> object:
+        self.records.append(
+            (
+                result,
+                category,
+            )
+        )
+        return object()
+
+
 def create_service(
     health_reader: FakeHealthReader,
     clock: Clock,
     *,
+    event_recorder: (
+        FakeRecoveryEventRecorder | None
+    ) = None,
     recover_warning: bool = False,
 ) -> RuntimeRecoveryService:
     return RuntimeRecoveryService(
@@ -91,6 +124,7 @@ def create_service(
             now_provider=clock.now,
             sleeper=lambda _seconds: None,
         ),
+        event_recorder=event_recorder,
         recover_warning=recover_warning,
     )
 
@@ -210,3 +244,85 @@ def test_failed_restart_remains_unhealthy() -> None:
     assert result.requires_attention is True
     assert result.recovery_result is not None
     assert result.recovery_result.attempt_count == 3
+
+
+def test_recovery_result_is_recorded_as_restart_event() -> None:
+    """実行したRuntime復旧結果をRESTART Eventとして記録する。"""
+
+    clock = Clock()
+    health_reader = FakeHealthReader(
+        [
+            RuntimeHealthStatus.CRITICAL,
+            RuntimeHealthStatus.HEALTHY,
+        ]
+    )
+    event_recorder = FakeRecoveryEventRecorder()
+
+    result = create_service(
+        health_reader,
+        clock,
+        event_recorder=event_recorder,
+    ).recover_if_needed(
+        runtime_name="paper-runtime",
+        restart_action=lambda: True,
+    )
+
+    assert result.recovery_result is not None
+    assert event_recorder.records == [
+        (
+            result.recovery_result,
+            RecoveryEventCategory.RESTART,
+        )
+    ]
+
+
+def test_failed_recovery_result_is_also_recorded() -> None:
+    """失敗したRuntime復旧結果もEventとして記録する。"""
+
+    clock = Clock()
+    health_reader = FakeHealthReader(
+        [
+            RuntimeHealthStatus.STOPPED,
+            RuntimeHealthStatus.STOPPED,
+        ]
+    )
+    event_recorder = FakeRecoveryEventRecorder()
+
+    result = create_service(
+        health_reader,
+        clock,
+        event_recorder=event_recorder,
+    ).recover_if_needed(
+        runtime_name="paper-runtime",
+        restart_action=lambda: False,
+    )
+
+    assert result.recovery_result is not None
+    assert event_recorder.records == [
+        (
+            result.recovery_result,
+            RecoveryEventCategory.RESTART,
+        )
+    ]
+
+
+def test_skipped_recovery_does_not_record_event() -> None:
+    """復旧不要の場合はRecoveryEventを記録しない。"""
+
+    clock = Clock()
+    health_reader = FakeHealthReader(
+        [RuntimeHealthStatus.HEALTHY]
+    )
+    event_recorder = FakeRecoveryEventRecorder()
+
+    result = create_service(
+        health_reader,
+        clock,
+        event_recorder=event_recorder,
+    ).recover_if_needed(
+        runtime_name="paper-runtime",
+        restart_action=lambda: True,
+    )
+
+    assert result.recovery_attempted is False
+    assert event_recorder.records == []
