@@ -3,7 +3,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 def initialize_database(
@@ -62,6 +62,9 @@ def initialize_database(
 
         _create_recovery_history_tables(connection)
         _create_recovery_history_indexes(connection)
+
+        _create_recovery_event_table(connection)
+        _create_recovery_event_indexes(connection)
 
         _update_schema_version(connection)
 
@@ -1296,6 +1299,80 @@ def _create_recovery_history_indexes(
         ON recovery_attempts (
             recovery_history_id,
             attempt_number
+        )
+        """
+    )
+
+
+def _create_recovery_event_table(
+    connection: sqlite3.Connection,
+) -> None:
+    """共通RecoveryEventを保存するテーブルを作成する。"""
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS recovery_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL UNIQUE,
+            source TEXT NOT NULL,
+            category TEXT NOT NULL,
+            status TEXT NOT NULL,
+            name TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            message TEXT,
+            metadata_json TEXT NOT NULL
+                DEFAULT '{}',
+            created_at TEXT NOT NULL
+                DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+
+def _create_recovery_event_indexes(
+    connection: sqlite3.Connection,
+) -> None:
+    """RecoveryEvent検索用のインデックスを作成する。"""
+
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_recovery_events_event_id
+        ON recovery_events (
+            event_id
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_recovery_events_started_at
+        ON recovery_events (
+            started_at DESC
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_recovery_events_source_started_at
+        ON recovery_events (
+            source,
+            started_at DESC
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_recovery_events_status_started_at
+        ON recovery_events (
+            status,
+            started_at DESC
         )
         """
     )

@@ -89,7 +89,7 @@ def make_result(
 def test_initialize_database_creates_recovery_tables(
     tmp_path,
 ) -> None:
-    """共通DB初期化がRecoveryテーブルとVersion 11を作成する。"""
+    """共通DB初期化がRecoveryテーブルとVersion 12を作成する。"""
 
     database_path = tmp_path / "katana.db"
 
@@ -119,7 +119,7 @@ def test_initialize_database_creates_recovery_tables(
     assert "recovery_history" in tables
     assert "recovery_attempts" in tables
     assert version_row == (SCHEMA_VERSION,)
-    assert SCHEMA_VERSION == 11
+    assert SCHEMA_VERSION == 12
 
 
 def test_repository_is_empty_initially(
