@@ -46,6 +46,7 @@ body {
 
 h1,
 h2,
+h3,
 p {
   margin-top: 0;
 }
@@ -59,6 +60,11 @@ h1 {
 h2 {
   margin-bottom: 0;
   font-size: 18px;
+}
+
+h3 {
+  margin: 4px 0 0;
+  font-size: 21px;
 }
 
 .muted {
@@ -139,6 +145,12 @@ h2 {
   margin-bottom: 20px;
 }
 
+.panel-heading > div > .muted {
+  display: block;
+  margin-top: 5px;
+  font-size: 13px;
+}
+
 .chart {
   min-height: 250px;
   color: #8da2ad;
@@ -204,6 +216,177 @@ h2 {
   background: #ff8f8f;
 }
 
+.recovery-panel {
+  position: relative;
+  overflow: hidden;
+}
+
+.recovery-panel::before {
+  position: absolute;
+  top: -110px;
+  right: -90px;
+  width: 240px;
+  height: 240px;
+  border-radius: 50%;
+  background: rgba(120, 213, 199, 0.07);
+  content: "";
+  pointer-events: none;
+}
+
+.recovery-status {
+  min-width: 126px;
+  padding: 9px 14px;
+  border: 1px solid #31515e;
+  border-radius: 999px;
+  background: rgba(7, 16, 24, 0.72);
+  color: #8da2ad;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.recovery-status[data-status="normal"] {
+  border-color: rgba(120, 213, 199, 0.45);
+  color: #78d5c7;
+}
+
+.recovery-status[data-status="recovering"] {
+  border-color: rgba(255, 204, 112, 0.55);
+  color: #ffcc70;
+}
+
+.recovery-status[data-status="failed"] {
+  border-color: rgba(255, 143, 143, 0.55);
+  color: #ff8f8f;
+}
+
+.recovery-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.recovery-component {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid #203e4a;
+  border-radius: 14px;
+  background:
+    linear-gradient(
+      145deg,
+      rgba(16, 42, 53, 0.82),
+      rgba(8, 24, 33, 0.92)
+    );
+}
+
+.recovery-overall {
+  border-color: #2d554f;
+  background:
+    linear-gradient(
+      145deg,
+      rgba(20, 55, 56, 0.88),
+      rgba(8, 26, 34, 0.94)
+    );
+}
+
+.recovery-component-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 22px;
+}
+
+.recovery-label {
+  color: #708a95;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+}
+
+.component-health {
+  padding: 6px 9px;
+  border: 1px solid #31515e;
+  border-radius: 999px;
+  color: #8da2ad;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+}
+
+.component-health[data-status="success"] {
+  border-color: rgba(120, 213, 199, 0.4);
+  color: #78d5c7;
+}
+
+.component-health[data-status="failure"] {
+  border-color: rgba(255, 143, 143, 0.45);
+  color: #ff8f8f;
+}
+
+.component-health[data-status="idle"] {
+  color: #8da2ad;
+}
+
+.recovery-statistics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0 0 20px;
+}
+
+.recovery-statistics > div {
+  min-width: 0;
+  padding: 12px 10px;
+  border: 1px solid #1b3540;
+  border-radius: 10px;
+  background: rgba(4, 17, 24, 0.45);
+}
+
+.recovery-statistics dt {
+  margin-bottom: 7px;
+  color: #8da2ad;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.recovery-statistics dd {
+  overflow: hidden;
+  margin: 0;
+  font-size: 21px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+}
+
+.recovery-success {
+  color: #78d5c7;
+}
+
+.recovery-failure {
+  color: #ff9d9d;
+}
+
+.recovery-last {
+  padding-top: 16px;
+  border-top: 1px solid #1c3944;
+}
+
+.recovery-last span {
+  display: block;
+  margin-bottom: 7px;
+  color: #8da2ad;
+  font-size: 11px;
+}
+
+.recovery-last strong {
+  display: block;
+  overflow-wrap: anywhere;
+  color: #c7d8df;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .table-wrap {
   overflow-x: auto;
 }
@@ -241,6 +424,16 @@ pre {
   font-size: 12px;
 }
 
+@media (max-width: 1000px) {
+  .recovery-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .recovery-statistics {
+    grid-template-columns: repeat(3, minmax(100px, 1fr));
+  }
+}
+
 @media (max-width: 900px) {
   .metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -255,6 +448,24 @@ pre {
   .hero {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .panel-heading {
+    align-items: flex-start;
+  }
+}
+
+@media (max-width: 560px) {
+  .recovery-panel .panel-heading {
+    flex-direction: column;
+  }
+
+  .recovery-status {
+    min-width: 0;
+  }
+
+  .recovery-statistics {
+    grid-template-columns: 1fr;
   }
 }
 

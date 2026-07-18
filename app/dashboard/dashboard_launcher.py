@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import uvicorn
+from fastapi import FastAPI
 
 from app.dashboard.dashboard_snapshot_file import (
     DashboardJsonSnapshotReader,
@@ -22,6 +23,12 @@ from app.dashboard.dashboard_web_service import (
 )
 from app.runtime.paper_trading_daily_repository import (
     PaperTradingDailySummaryRepository,
+)
+from app.runtime.recovery_history_repository import (
+    RecoveryHistoryRepository,
+)
+from app.runtime.recovery_history_service import (
+    RecoveryHistoryService,
 )
 
 
@@ -99,12 +106,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def create_recovery_history_service() -> RecoveryHistoryService:
+    """Dashboard用Recovery履歴Serviceを構築する。"""
+
+    repository = RecoveryHistoryRepository()
+
+    return RecoveryHistoryService(
+        repository=repository,
+    )
+
+
 def create_launcher_app(
     *,
     database_path: Path,
     snapshot_path: Path,
     history_limit: int,
-):
+    recovery_service: RecoveryHistoryService | None = None,
+) -> FastAPI:
     """Launcher設定からFastAPI Appを構築する。"""
 
     snapshot_reader = DashboardJsonSnapshotReader(
@@ -114,13 +132,21 @@ def create_launcher_app(
         database_path,
         now_provider=lambda: datetime.now(timezone.utc),
     )
-    service = DashboardWebService(
+    dashboard_service = DashboardWebService(
         snapshot_reader=snapshot_reader,
         daily_history_reader=daily_repository,
         history_limit=history_limit,
     )
+    resolved_recovery_service = (
+        recovery_service
+        if recovery_service is not None
+        else create_recovery_history_service()
+    )
 
-    return create_dashboard_app(service=service)
+    return create_dashboard_app(
+        service=dashboard_service,
+        recovery_service=resolved_recovery_service,
+    )
 
 
 def dashboard_url(
@@ -170,6 +196,7 @@ def main(
     print(f"URL      : {url}")
     print(f"Database : {args.database}")
     print(f"Snapshot : {args.snapshot}")
+    print("Recovery : in-memory history")
     print("Stop     : Ctrl+C")
     print("=" * 52)
 

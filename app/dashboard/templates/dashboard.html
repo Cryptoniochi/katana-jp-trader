@@ -92,6 +92,161 @@
       </article>
     </section>
 
+    <section class="panel recovery-panel">
+      <div class="panel-heading">
+        <div>
+          <h2>Recovery</h2>
+          <span class="muted">
+            Broker and runtime self-healing activity
+          </span>
+        </div>
+        <div
+          id="recovery-status"
+          class="recovery-status"
+          data-status="unknown"
+        >
+          UNKNOWN
+        </div>
+      </div>
+
+      <div class="recovery-grid">
+        <article class="recovery-component">
+          <div class="recovery-component-heading">
+            <div>
+              <span class="recovery-label">COMPONENT</span>
+              <h3>Broker</h3>
+            </div>
+            <span
+              id="broker-recovery-health"
+              class="component-health"
+            >
+              —
+            </span>
+          </div>
+
+          <dl class="recovery-statistics">
+            <div>
+              <dt>Attempts</dt>
+              <dd id="broker-recovery-attempts">—</dd>
+            </div>
+            <div>
+              <dt>Successes</dt>
+              <dd
+                id="broker-recovery-successes"
+                class="recovery-success"
+              >
+                —
+              </dd>
+            </div>
+            <div>
+              <dt>Failures</dt>
+              <dd
+                id="broker-recovery-failures"
+                class="recovery-failure"
+              >
+                —
+              </dd>
+            </div>
+          </dl>
+
+          <div class="recovery-last">
+            <span>Last Recovery</span>
+            <strong id="last-broker-recovery">—</strong>
+          </div>
+        </article>
+
+        <article class="recovery-component">
+          <div class="recovery-component-heading">
+            <div>
+              <span class="recovery-label">COMPONENT</span>
+              <h3>Runtime</h3>
+            </div>
+            <span
+              id="runtime-recovery-health"
+              class="component-health"
+            >
+              —
+            </span>
+          </div>
+
+          <dl class="recovery-statistics">
+            <div>
+              <dt>Attempts</dt>
+              <dd id="runtime-recovery-attempts">—</dd>
+            </div>
+            <div>
+              <dt>Successes</dt>
+              <dd
+                id="runtime-recovery-successes"
+                class="recovery-success"
+              >
+                —
+              </dd>
+            </div>
+            <div>
+              <dt>Failures</dt>
+              <dd
+                id="runtime-recovery-failures"
+                class="recovery-failure"
+              >
+                —
+              </dd>
+            </div>
+          </dl>
+
+          <div class="recovery-last">
+            <span>Last Recovery</span>
+            <strong id="last-runtime-recovery">—</strong>
+          </div>
+        </article>
+
+        <article class="recovery-component recovery-overall">
+          <div class="recovery-component-heading">
+            <div>
+              <span class="recovery-label">AGGREGATE</span>
+              <h3>Overall</h3>
+            </div>
+            <span
+              id="recovery-health"
+              class="component-health"
+            >
+              —
+            </span>
+          </div>
+
+          <dl class="recovery-statistics">
+            <div>
+              <dt>Total Attempts</dt>
+              <dd id="recovery-total-attempts">—</dd>
+            </div>
+            <div>
+              <dt>Total Failures</dt>
+              <dd
+                id="recovery-total-failures"
+                class="recovery-failure"
+              >
+                —
+              </dd>
+            </div>
+            <div>
+              <dt>Success Rate</dt>
+              <dd
+                id="recovery-success-rate"
+                class="recovery-success"
+              >
+                —
+              </dd>
+            </div>
+          </dl>
+
+          <div class="recovery-last">
+            <span>Summary Generated</span>
+            <strong id="recovery-generated-at">—</strong>
+          </div>
+        </article>
+      </div>
+    </section>
+
     <section class="panel">
       <div class="panel-heading">
         <h2>Current Positions</h2>
@@ -138,11 +293,52 @@
         maximumFractionDigits: 2
       }
     );
+    const recoveryPercent = new Intl.NumberFormat(
+      "ja-JP",
+      {
+        style: "percent",
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      }
+    );
+    const dateTime = new Intl.DateTimeFormat(
+      "ja-JP",
+      {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit"
+      }
+    );
 
     function valueOrDash(value, formatter = String) {
       return value === null || value === undefined
         ? "—"
         : formatter(value);
+    }
+
+    function formatDateTime(value) {
+      if (value === null || value === undefined) {
+        return "—";
+      }
+
+      const parsed = new Date(value);
+
+      if (Number.isNaN(parsed.getTime())) {
+        return String(value);
+      }
+
+      return dateTime.format(parsed);
+    }
+
+    function formatRecoveryRate(value) {
+      if (value === null || value === undefined) {
+        return "—";
+      }
+
+      return recoveryPercent.format(value / 100);
     }
 
     function emptyChart(element, message) {
@@ -229,7 +425,10 @@
                 class="bar-column"
                 title="${point.label}: ${formatter(point.value)}"
               >
-                <div class="${className}" style="height:${height}%"></div>
+                <div
+                  class="${className}"
+                  style="height:${height}%"
+                ></div>
               </div>
             `;
           }).join("")}
@@ -270,16 +469,134 @@
       }
     }
 
-    async function refreshDashboard() {
-      const response = await fetch("/api/dashboard/summary");
+    function componentHealth(component) {
+      if (component.failures > 0) {
+        return "FAILURE";
+      }
+
+      if (component.attempts > 0) {
+        return "SUCCESS";
+      }
+
+      return "IDLE";
+    }
+
+    function renderComponentHealth(elementId, component) {
+      const element = document.getElementById(elementId);
+      const health = componentHealth(component);
+
+      element.textContent = health;
+      element.dataset.status = health.toLowerCase();
+    }
+
+    function renderRecovery(data) {
+      document.getElementById(
+        "broker-recovery-attempts"
+      ).textContent = data.broker.attempts;
+      document.getElementById(
+        "broker-recovery-successes"
+      ).textContent = data.broker.successes;
+      document.getElementById(
+        "broker-recovery-failures"
+      ).textContent = data.broker.failures;
+      document.getElementById(
+        "last-broker-recovery"
+      ).textContent = formatDateTime(
+        data.broker.last_recovery
+      );
+
+      document.getElementById(
+        "runtime-recovery-attempts"
+      ).textContent = data.runtime.attempts;
+      document.getElementById(
+        "runtime-recovery-successes"
+      ).textContent = data.runtime.successes;
+      document.getElementById(
+        "runtime-recovery-failures"
+      ).textContent = data.runtime.failures;
+      document.getElementById(
+        "last-runtime-recovery"
+      ).textContent = formatDateTime(
+        data.runtime.last_recovery
+      );
+
+      document.getElementById(
+        "recovery-total-attempts"
+      ).textContent = data.aggregate.total_attempts;
+      document.getElementById(
+        "recovery-total-failures"
+      ).textContent = data.aggregate.total_failures;
+      document.getElementById(
+        "recovery-success-rate"
+      ).textContent = formatRecoveryRate(
+        data.aggregate.success_rate
+      );
+      document.getElementById(
+        "recovery-generated-at"
+      ).textContent = formatDateTime(
+        data.generated_at
+      );
+
+      renderComponentHealth(
+        "broker-recovery-health",
+        data.broker
+      );
+      renderComponentHealth(
+        "runtime-recovery-health",
+        data.runtime
+      );
+
+      const statusElement = document.getElementById(
+        "recovery-status"
+      );
+      statusElement.textContent =
+        data.recovery_status.toUpperCase();
+      statusElement.dataset.status = data.recovery_status;
+
+      const healthElement = document.getElementById(
+        "recovery-health"
+      );
+      healthElement.textContent = data.is_healthy
+        ? "HEALTHY"
+        : "ATTENTION";
+      healthElement.dataset.status = data.is_healthy
+        ? "success"
+        : "failure";
+    }
+
+    function renderRecoveryError(error) {
+      const statusElement = document.getElementById(
+        "recovery-status"
+      );
+      statusElement.textContent = "UNAVAILABLE";
+      statusElement.dataset.status = "failed";
+
+      const healthElement = document.getElementById(
+        "recovery-health"
+      );
+      healthElement.textContent = "ERROR";
+      healthElement.dataset.status = "failure";
+
+      console.error("Recovery dashboard refresh failed", error);
+    }
+
+    async function fetchJson(url, errorPrefix) {
+      const response = await fetch(url);
 
       if (!response.ok) {
         throw new Error(
-          `Dashboard API error: ${response.status}`
+          `${errorPrefix}: ${response.status}`
         );
       }
 
-      const data = await response.json();
+      return response.json();
+    }
+
+    async function refreshDashboardSummary() {
+      const data = await fetchJson(
+        "/api/dashboard/summary",
+        "Dashboard API error"
+      );
       const snapshot = data.snapshot;
       const daily = data.daily_history;
       const analytics = data.analytics ?? {};
@@ -291,7 +608,7 @@
       const health = snapshot.system_health;
 
       document.getElementById("updated-at").textContent =
-        `Updated: ${data.generated_at}`;
+        `Updated: ${formatDateTime(data.generated_at)}`;
       document.getElementById("today-pl").textContent =
         valueOrDash(today?.net_profit_loss, yen.format);
       document.getElementById("cumulative-pl").textContent =
@@ -357,12 +674,37 @@
         );
     }
 
-    refreshDashboard().catch(error => {
-      document.getElementById("system-details").textContent =
-        error instanceof Error
-          ? error.message
-          : String(error);
-    });
+    async function refreshRecovery() {
+      const data = await fetchJson(
+        "/api/dashboard/recovery",
+        "Recovery API error"
+      );
+
+      renderRecovery(data);
+    }
+
+    async function refreshDashboard() {
+      const results = await Promise.allSettled([
+        refreshDashboardSummary(),
+        refreshRecovery()
+      ]);
+
+      const dashboardResult = results[0];
+      const recoveryResult = results[1];
+
+      if (dashboardResult.status === "rejected") {
+        document.getElementById("system-details").textContent =
+          dashboardResult.reason instanceof Error
+            ? dashboardResult.reason.message
+            : String(dashboardResult.reason);
+      }
+
+      if (recoveryResult.status === "rejected") {
+        renderRecoveryError(recoveryResult.reason);
+      }
+    }
+
+    refreshDashboard();
 
     window.setInterval(refreshDashboard, 30000);
   </script>

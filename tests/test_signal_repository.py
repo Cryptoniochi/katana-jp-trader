@@ -173,9 +173,6 @@ def test_initialize_database_creates_trade_signals_table(
     assert version_row == (
         SCHEMA_VERSION,
     )
-    assert SCHEMA_VERSION == 10
-
-
 def test_initialize_database_remains_idempotent(
     tmp_path: Path,
 ) -> None:

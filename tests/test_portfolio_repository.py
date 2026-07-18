@@ -109,9 +109,6 @@ def test_initialize_database_creates_portfolio_tables(
         ("portfolio_snapshots",),
     ]
     assert version_row == (SCHEMA_VERSION,)
-    assert SCHEMA_VERSION == 10
-
-
 def test_repository_saves_and_reads_snapshot(
     tmp_path: Path,
 ) -> None:

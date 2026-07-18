@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Protocol
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
@@ -12,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 from app.dashboard.dashboard_web_service import (
     DashboardWebService,
 )
+from app.dashboard.recovery_summary import RecoverySummary
 
 
 PACKAGE_DIRECTORY = Path(__file__).resolve().parent
@@ -19,9 +21,17 @@ TEMPLATE_DIRECTORY = PACKAGE_DIRECTORY / "templates"
 STATIC_DIRECTORY = PACKAGE_DIRECTORY / "static"
 
 
+class RecoverySummaryProvider(Protocol):
+    """Dashboard用RecoverySummaryを提供するインターフェース。"""
+
+    def build_summary(self) -> RecoverySummary:
+        """現在のRecovery履歴サマリーを返す。"""
+
+
 def create_dashboard_app(
     *,
     service: DashboardWebService,
+    recovery_service: RecoverySummaryProvider | None = None,
 ) -> FastAPI:
     """Read-only Dashboard用FastAPI Appを作成する。"""
 
@@ -90,5 +100,17 @@ def create_dashboard_app(
                 else []
             ),
         }
+
+    @app.get("/api/dashboard/recovery")
+    def dashboard_recovery() -> dict[str, object]:
+        """Broker・RuntimeのRecovery集計をJSONで返す。"""
+
+        summary = (
+            recovery_service.build_summary()
+            if recovery_service is not None
+            else RecoverySummary()
+        )
+
+        return summary.to_dict()
 
     return app

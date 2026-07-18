@@ -3,7 +3,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 def initialize_database(
@@ -59,6 +59,9 @@ def initialize_database(
 
         _create_portfolio_snapshot_tables(connection)
         _create_portfolio_snapshot_indexes(connection)
+
+        _create_recovery_history_tables(connection)
+        _create_recovery_history_indexes(connection)
 
         _update_schema_version(connection)
 
@@ -1202,6 +1205,101 @@ def _create_portfolio_snapshot_indexes(
         )
         """
     )
+
+def _create_recovery_history_tables(
+    connection: sqlite3.Connection,
+) -> None:
+    """Recovery履歴と復旧試行を保存するテーブルを作成する。"""
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS recovery_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            component TEXT NOT NULL,
+            recovery_name TEXT NOT NULL,
+            status TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            message TEXT,
+            created_at TEXT NOT NULL
+                DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS recovery_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recovery_history_id INTEGER NOT NULL,
+            attempt_number INTEGER NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            successful INTEGER NOT NULL,
+            error_message TEXT,
+            delay_seconds_before_attempt REAL NOT NULL,
+            created_at TEXT NOT NULL
+                DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(recovery_history_id)
+                REFERENCES recovery_history(id)
+                ON DELETE CASCADE,
+            UNIQUE(
+                recovery_history_id,
+                attempt_number
+            )
+        )
+        """
+    )
+
+
+def _create_recovery_history_indexes(
+    connection: sqlite3.Connection,
+) -> None:
+    """Recovery履歴検索用のインデックスを作成する。"""
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_recovery_history_completed_at
+        ON recovery_history (
+            completed_at DESC
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_recovery_history_component_completed_at
+        ON recovery_history (
+            component,
+            completed_at DESC
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_recovery_history_status_completed_at
+        ON recovery_history (
+            status,
+            completed_at DESC
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_recovery_attempts_history_attempt
+        ON recovery_attempts (
+            recovery_history_id,
+            attempt_number
+        )
+        """
+    )
+
 
 def _update_schema_version(
     connection: sqlite3.Connection,
