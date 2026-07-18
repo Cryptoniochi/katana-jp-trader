@@ -1,4 +1,4 @@
-"""Broker RecoveryEvent Mapperのテスト。"""
+"""Tests for Broker RecoveryEvent mapper."""
 
 from datetime import datetime, timedelta, timezone
 
@@ -50,8 +50,6 @@ def make_attempt(
     error_message: str | None = None,
     delay_seconds_before_attempt: float = 0.0,
 ) -> RecoveryAttempt:
-    """テスト用RecoveryAttemptを生成する。"""
-
     return RecoveryAttempt(
         attempt_number=attempt_number,
         started_at=started_at,
@@ -71,8 +69,6 @@ def make_result(
     attempts: tuple[RecoveryAttempt, ...] | None = None,
     message: str | None = None,
 ) -> RecoveryResult:
-    """テスト用RecoveryResultを生成する。"""
-
     if attempts is None:
         attempts = (
             make_attempt(),
@@ -89,8 +85,6 @@ def make_result(
 
 
 def test_maps_success_result_to_broker_event() -> None:
-    """SUCCESSをBroker SUCCEEDED Eventへ変換する。"""
-
     event = map_broker_recovery_result(
         make_result()
     )
@@ -112,8 +106,6 @@ def test_maps_success_result_to_broker_event() -> None:
 
 
 def test_accepts_explicit_event_category() -> None:
-    """明示されたEvent分類を使用する。"""
-
     event = map_broker_recovery_result(
         make_result(),
         category=RecoveryEventCategory.RECOVERY,
@@ -126,8 +118,6 @@ def test_accepts_explicit_event_category() -> None:
 
 
 def test_maps_retrying_result_without_completed_at() -> None:
-    """RETRYINGを進行中のBroker Eventへ変換する。"""
-
     failed_attempt = make_attempt(
         successful=False,
         error_message="temporary broker error",
@@ -154,8 +144,6 @@ def test_maps_retrying_result_without_completed_at() -> None:
 
 
 def test_maps_failed_result_to_failed_event() -> None:
-    """FAILEDをBroker FAILED Eventへ変換する。"""
-
     failed_attempt = make_attempt(
         successful=False,
         error_message="reconnect failed",
@@ -178,8 +166,6 @@ def test_maps_failed_result_to_failed_event() -> None:
 
 
 def test_failed_result_uses_last_attempt_error() -> None:
-    """Resultメッセージがない場合は最終試行エラーを使用する。"""
-
     first_attempt = make_attempt(
         attempt_number=1,
         successful=False,
@@ -207,8 +193,6 @@ def test_failed_result_uses_last_attempt_error() -> None:
 
 
 def test_maps_aborted_result_to_aborted_event() -> None:
-    """ABORTEDをBroker ABORTED Eventへ変換する。"""
-
     result = make_result(
         status=RecoveryStatus.ABORTED,
         attempts=(),
@@ -227,8 +211,6 @@ def test_maps_aborted_result_to_aborted_event() -> None:
 
 
 def test_maps_attempt_counts_to_metadata() -> None:
-    """Broker復旧試行件数をMetadataへ格納する。"""
-
     first_attempt = make_attempt(
         attempt_number=1,
         successful=False,
@@ -260,8 +242,6 @@ def test_maps_attempt_counts_to_metadata() -> None:
 
 
 def test_maps_attempt_details_to_metadata() -> None:
-    """Broker復旧試行詳細をMetadataへ格納する。"""
-
     attempt = make_attempt(
         successful=False,
         error_message="connection error",
@@ -294,8 +274,6 @@ def test_maps_attempt_details_to_metadata() -> None:
 
 
 def test_metadata_keeps_original_broker_status() -> None:
-    """元のBroker復旧状態をMetadataへ保持する。"""
-
     event = map_broker_recovery_result(
         make_result()
     )
@@ -307,8 +285,6 @@ def test_metadata_keeps_original_broker_status() -> None:
 
 
 def test_mapper_rejects_invalid_result_type() -> None:
-    """RecoveryResult以外を拒否する。"""
-
     with pytest.raises(
         TypeError,
         match="result must be a RecoveryResult",
@@ -317,8 +293,6 @@ def test_mapper_rejects_invalid_result_type() -> None:
 
 
 def test_mapper_rejects_invalid_category_type() -> None:
-    """RecoveryEventCategory以外を拒否する。"""
-
     with pytest.raises(
         TypeError,
         match=(
