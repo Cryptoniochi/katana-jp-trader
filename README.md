@@ -1,14 +1,14 @@
 # Project KATANA
 
-AI-assisted Japanese equity research, backtesting, and automated trading platform.
+AI-assisted Japanese equity research, backtesting, paper-trading, and automated-trading platform.
 
 Project KATANA is a Python-based system for collecting Japanese market data,
-testing trading strategies, running recoverable paper trading sessions, and
-progressively adding production-grade risk controls before live brokerage
-integration.
+testing trading strategies, running recoverable paper-trading sessions, and
+progressively adding production-grade risk controls and operational safeguards
+before live brokerage integration.
 
-> **Current status:** Paper-trading infrastructure is operational.  
-> Live brokerage execution is not yet implemented.
+> **Current status:** Paper-trading runtime and external notifications are operational.  
+> **Live brokerage execution is not yet implemented.**
 
 ---
 
@@ -24,6 +24,7 @@ Project KATANA is being developed as a self-contained platform for:
 - Paper trading
 - Runtime monitoring and recovery
 - Risk management
+- Discord and LINE operational notifications
 - Future automated order execution
 
 Safety, reproducibility, recoverability, and test coverage are prioritized
@@ -53,26 +54,65 @@ before connecting the system to a live brokerage account.
 - Runtime health monitoring
 - Runtime heartbeat monitoring
 - Position-sizing risk controls
+- Daily-loss protection
+- Consecutive-loss protection
+- Kill-switch controls
+- Paper-trading risk-engine integration
+- Discord Webhook notifications
+- LINE Messaging API notifications
+- Notification templates and routing rules
+- Notification Gateway
+- External notification connection-test CLI
+- Paper-trading start notifications
+- Paper-trading completion notifications
+- Paper-trading interruption and failure notifications
+- Notification-failure isolation from the trading runtime
+- Full regression test suite: **1,879 passing tests**
 
-### In progress
+### Current milestone
 
-Sprint 77: Risk Management Engine
+**Sprint 83 completed: Runtime notification integration**
 
-- [x] Position sizing
-- [ ] Daily loss limit
-- [ ] Consecutive-loss protection
-- [ ] Kill switch
-- [ ] Risk report
+The following notification path has been verified with real external services:
+
+```text
+Paper Trading Runtime
+        |
+        v
+Notification Gateway
+        |
+   +----+----+
+   |         |
+   v         v
+Discord     LINE
+```
+
+Verified results:
+
+```text
+Discord: HTTP 204
+LINE:    HTTP 200
+```
+
+### Next
+
+Sprint 84 will focus on operational preparation for the v0.9 paper-trading trial:
+
+- Automatic weekday startup and safe shutdown
+- Daily trading-summary notifications
+- Trade and execution notifications
+- Operational log and report review
+- One-week paper-trading trial
+- v0.9 release decision
 
 ### Planned
 
-- Paper-trading risk-engine integration
+- Extended paper-trading validation
 - Operational quality and warning cleanup
-- Beta milestone
 - Live broker adapter
 - Order reconciliation
 - Production safeguards
-- Automated execution
+- Unattended automated execution
 
 ---
 
@@ -99,11 +139,11 @@ Risk Management
 Paper Broker
     |
     v
-Runtime, Monitoring, Persistence, and Recovery
+Runtime, Monitoring, Persistence, Recovery, and Notifications
 ```
 
-The risk-management layer is intentionally independent of individual
-strategies so that the same controls can be reused by ORB and future
+The risk-management and notification layers are intentionally independent of
+individual strategies so that the same controls can be reused by ORB and future
 strategies.
 
 ---
@@ -151,6 +191,24 @@ Supported strategy controls include:
 - Forced exit
 - Trade diagnostics
 
+### Risk management
+
+Risk controls include:
+
+- Position sizing
+- Maximum number of open positions
+- Maximum value per position
+- Maximum value per order
+- Maximum portfolio exposure
+- Available buying power
+- Daily-loss limits
+- Consecutive-loss protection
+- Kill-switch decisions
+- Configurable trading lot size
+
+Risk decisions can approve, reduce, reject, block, or stop trading activity
+according to the active policy.
+
 ### Paper trading
 
 The paper-trading subsystem provides:
@@ -161,6 +219,14 @@ The paper-trading subsystem provides:
 - Persistent broker state
 - Runtime restart recovery
 - Runtime lifecycle management
+- Safe-stop handling
+- Daily runtime results
+
+The production paper-trading launcher is:
+
+```text
+app/run_paper_trading.py
+```
 
 ### Runtime monitoring
 
@@ -175,37 +241,51 @@ Runtime monitoring includes:
 - Heartbeat creation
 - Heartbeat freshness evaluation
 - Heartbeat restoration
+- Resource-critical stop decisions
 
-### Risk management
+### Notifications
 
-The first completed risk-control component is position sizing.
+Project KATANA supports external operational notifications through:
 
-Current position-sizing constraints include:
+- Discord Webhooks
+- LINE Messaging API
+- Notification templates
+- Severity-based routing
+- Quiet-hour rules
+- Duplicate suppression
+- Rate limiting
+- Retry and exponential backoff
+- Failure isolation from the trading runtime
 
-- Maximum number of open positions
-- Maximum value per position
-- Maximum value per order
-- Maximum portfolio exposure
-- Available buying power
-- Configurable trading lot size
-
-Each sizing request returns one of:
-
-```text
-APPROVED
-REDUCED
-REJECTED
-```
-
-Relevant modules:
+Representative modules include:
 
 ```text
-app/risk/position_sizing_models.py
-app/risk/position_sizing_service.py
-tests/test_position_sizing_service.py
+app/notification_test.py
+app/notifications/notification_composition.py
+app/notifications/notification_gateway.py
+app/notifications/notification_rule_engine.py
+app/notifications/notification_rule_service.py
+app/notifications/discord_notification_channel.py
+app/notifications/line/line_notification_channel.py
+app/notifications/webhook_client.py
+app/notifications/webhook_transport.py
 ```
 
-The position-sizing test suite currently contains 27 passing tests.
+Test external notification delivery:
+
+```powershell
+python -m app.notification_test
+```
+
+Expected output:
+
+```text
+Project KATANA Notification Test
+channels=discord,line
+discord: OK
+line: OK
+すべての通知チャネルへの送信に成功しました。
+```
 
 ---
 
@@ -215,8 +295,10 @@ The position-sizing test suite currently contains 27 passing tests.
 - SQLite
 - pytest
 - J-Quants API
+- Discord Webhooks
+- LINE Messaging API
 - Visual Studio Code
-- Git
+- Git and GitHub
 
 Development is currently performed on Windows.
 
@@ -229,26 +311,33 @@ A simplified view of the repository:
 ```text
 app/
 ├── backtest/
+├── live/
 ├── market/
+├── notifications/
+│   ├── line/
+│   ├── discord_notification_channel.py
+│   ├── notification_composition.py
+│   ├── notification_gateway.py
+│   └── webhook_transport.py
 ├── risk/
-│   ├── position_sizing_models.py
-│   └── position_sizing_service.py
 ├── runtime/
 ├── strategy/
 ├── trading/
 ├── database.py
-└── import_jquants_history.py
+├── notification_test.py
+└── run_paper_trading.py
 
 tests/
-├── test_position_sizing_service.py
-├── test_runtime_health_service.py
-├── test_runtime_heartbeat_service.py
+├── test_notification_composition.py
+├── test_notification_test.py
+├── test_run_paper_trading.py
+├── test_webhook_transport.py
 └── ...
 
 README.md
 ```
 
-The exact structure may evolve as later risk-management and broker-integration
+The exact structure may evolve as later operational and broker-integration
 sprints are completed.
 
 ---
@@ -266,36 +355,79 @@ python -m venv .venv
 python -m pip install --upgrade pip
 ```
 
-Configure the required J-Quants credentials and local database settings before
-running data-import commands.
+Create a local `.env` file in the repository root for credentials and
+environment-specific settings.
 
-Do not commit secrets, API credentials, access tokens, or private account
-information to Git.
+Example key names:
+
+```env
+KATANA_ENVIRONMENT=paper
+KATANA_DISCORD_WEBHOOK_URL=...
+KATANA_LINE_CHANNEL_ACCESS_TOKEN=...
+KATANA_LINE_DESTINATION_ID=U...
+```
+
+Never commit the `.env` file or any real secret values.
 
 ---
 
 ## Running tests
 
-Run the complete test suite:
+Run the complete regression suite:
 
 ```powershell
-python -m pytest
+python -m pytest -v
 ```
 
-Run the position-sizing tests:
+Current verified result:
+
+```text
+1879 passed, 1 warning
+```
+
+Run notification-related tests:
 
 ```powershell
-python -m pytest tests/test_position_sizing_service.py -v
+python -m pytest `
+    tests/test_notification_composition.py `
+    tests/test_notification_test.py `
+    tests/test_webhook_transport.py `
+    tests/test_run_paper_trading.py `
+    -v
 ```
 
-Run runtime monitoring tests:
+A sprint is considered complete only after its relevant tests and the wider
+regression suite pass.
+
+---
+
+## Paper-trading commands
+
+Run the production-readiness check without starting trading:
 
 ```powershell
-python -m pytest tests/test_runtime_health_service.py `
-    tests/test_runtime_heartbeat_service.py -v
+python -m app.run_paper_trading --check
 ```
 
-A sprint is considered complete only after its tests pass.
+Run the external notification test:
+
+```powershell
+python -m app.notification_test
+```
+
+Run paper trading using the configured watch list:
+
+```powershell
+python -m app.run_paper_trading
+```
+
+Run a bounded smoke test:
+
+```powershell
+python -m app.run_paper_trading --maximum-cycles 1
+```
+
+Use `Ctrl+C` to request a safe stop.
 
 ---
 
@@ -307,10 +439,41 @@ Project KATANA uses a safety-first workflow:
 2. Replace each changed Python file with its complete reviewed version.
 3. Run the relevant tests.
 4. Run the wider regression suite when appropriate.
-5. Commit only after the tests pass.
+5. Review `git status`.
+6. Ensure secrets and generated artifacts are excluded.
+7. Commit only after tests pass.
+8. Push the reviewed commit to GitHub.
 
 This approach reduces accidental partial edits and makes each development step
 easier to review and recover.
+
+---
+
+## Git safety
+
+The repository must not contain credentials or local runtime artifacts.
+
+At minimum, `.gitignore` should exclude:
+
+```gitignore
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+reports/
+data/
+logs/
+test_external_notifications.py
+katana_sprint*.zip
+```
+
+Review staged files before every commit:
+
+```powershell
+git status
+git diff --cached --name-only
+```
 
 ---
 
@@ -330,23 +493,19 @@ backtests or paper trading does not guarantee future results.
 
 ## Roadmap
 
-The near-term roadmap is:
-
 ```text
-Sprint 77
-Risk Management Engine
+Sprint 83
+Runtime notification integration — completed
 
-Sprint 78+
-Risk integration and operational controls
+Sprint 84
+v0.9 paper-trading trial preparation
 
-Sprint 79.5
-Quality, warnings, and regression hardening
-
-Sprint 80
-Beta milestone
+v0.9
+One-week operational paper-trading validation
 
 Later sprints
-Live brokerage integration and production safeguards
+Trade notifications, live brokerage integration,
+order reconciliation, and production safeguards
 ```
 
 The roadmap may be adjusted as testing reveals new safety or architectural

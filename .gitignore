@@ -7,3 +7,20 @@ data/
 .pytest_cache/
 .mypy_cache/reports/backtest_*/
 reports/optimization_*/
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Secrets
+.env
+
+# Runtime
+logs/
+reports/
+data/
+
+# Temporary
+test_external_notifications.py
+katana_sprint*.zip
