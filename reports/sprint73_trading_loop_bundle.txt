@@ -1,0 +1,5595 @@
+================================================================================
+FILE: app\application\market_aware_trading_loop_runner.py
+================================================================================
+"""Market Clockに従ってTrading Loop Runnerを制御する。"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from datetime import datetime, timezone
+from time import sleep
+from typing import Protocol
+
+from app.application.trading_loop_runner_models import (
+    TradingLoopRunnerResult,
+    TradingLoopRunnerStopReason,
+)
+from app.market.market_clock import (
+    TokyoMarketClock,
+    TokyoMarketClockSnapshot,
+)
+
+
+class ScheduledTradingLoopComponent(Protocol):
+    """Market-aware Runnerが利用するTrading Loop。"""
+
+    def run_cycle(self):
+        """Trading Cycleを1回実行する。"""
+
+
+NowProvider = Callable[[], datetime]
+Sleeper = Callable[[float], None]
+StopPredicate = Callable[[], bool]
+
+
+class MarketAwareTradingLoopRunner:
+    """東京市場の営業状態に従ってTrading Cycleを実行する。"""
+
+    def __init__(
+        self,
+        *,
+        component: ScheduledTradingLoopComponent,
+        market_clock: TokyoMarketClock,
+        cycle_interval_seconds: float = 30.0,
+        maximum_cycles: int | None = None,
+        stop_after_market_close: bool = False,
+        now_provider: NowProvider | None = None,
+        sleeper: Sleeper = sleep,
+        stop_requested: StopPredicate | None = None,
+    ) -> None:
+        """Component・市場時計・実行制御を設定する。"""
+
+        if cycle_interval_seconds < 0:
+            raise ValueError(
+                "サイクル間隔は0秒以上である必要があります。"
+            )
+
+        if maximum_cycles is not None and maximum_cycles <= 0:
+            raise ValueError(
+                "最大サイクル数は0より大きい必要があります。"
+            )
+
+        self.component = component
+        self.market_clock = market_clock
+        self.cycle_interval_seconds = cycle_interval_seconds
+        self.maximum_cycles = maximum_cycles
+        self.stop_after_market_close = stop_after_market_close
+        self.now_provider = (
+            now_provider
+            if now_provider is not None
+            else lambda: datetime.now(timezone.utc)
+        )
+        self.sleeper = sleeper
+        self.stop_requested = (
+            stop_requested
+            if stop_requested is not None
+            else lambda: False
+        )
+
+    def run(self) -> TradingLoopRunnerResult:
+        """停止条件成立までMarket Clockに従って実行する。"""
+
+        started_at = self._current_time()
+        cycles = []
+        error_message: str | None = None
+        stop_reason = TradingLoopRunnerStopReason.STOP_REQUESTED
+
+        while True:
+            if self.stop_requested():
+                stop_reason = (
+                    TradingLoopRunnerStopReason.STOP_REQUESTED
+                )
+                break
+
+            if (
+                self.maximum_cycles is not None
+                and len(cycles) >= self.maximum_cycles
+            ):
+                stop_reason = (
+                    TradingLoopRunnerStopReason.MAX_CYCLES_REACHED
+                )
+                break
+
+            clock_snapshot = self.market_clock.snapshot(
+                self._current_time()
+            )
+
+            if not clock_snapshot.is_open:
+                if (
+                    self.stop_after_market_close
+                    and clock_snapshot.session.value
+                    == "after_close"
+                ):
+                    stop_reason = (
+                        TradingLoopRunnerStopReason.STOP_REQUESTED
+                    )
+                    break
+
+                self._sleep_until_next_check(
+                    clock_snapshot
+                )
+                continue
+
+            try:
+                cycle = self.component.run_cycle()
+            except Exception as error:
+                stop_reason = TradingLoopRunnerStopReason.ERROR
+                error_message = (
+                    str(error).strip()
+                    or type(error).__name__
+                )
+                break
+
+            cycles.append(cycle)
+
+            if (
+                self.maximum_cycles is not None
+                and len(cycles) >= self.maximum_cycles
+            ):
+                stop_reason = (
+                    TradingLoopRunnerStopReason.MAX_CYCLES_REACHED
+                )
+                break
+
+            if self.stop_requested():
+                stop_reason = (
+                    TradingLoopRunnerStopReason.STOP_REQUESTED
+                )
+                break
+
+            self.sleeper(self.cycle_interval_seconds)
+
+        return TradingLoopRunnerResult(
+            started_at=started_at,
+            completed_at=self._current_time(),
+            stop_reason=stop_reason,
+            cycles=tuple(cycles),
+            error_message=error_message,
+        )
+
+    def _sleep_until_next_check(
+        self,
+        snapshot: TokyoMarketClockSnapshot,
+    ) -> None:
+        """市場再開までの待機時間を適切な長さへ制限する。"""
+
+        wait_seconds = max(
+            1.0,
+            min(
+                snapshot.wait_seconds,
+                300.0,
+            ),
+        )
+        self.sleeper(wait_seconds)
+
+    def _current_time(self) -> datetime:
+        """UTCへ正規化した現在日時を返す。"""
+
+        current = self.now_provider()
+
+        if current.tzinfo is None:
+            raise ValueError(
+                "現在日時にはタイムゾーンが必要です。"
+            )
+
+        return current.astimezone(timezone.utc)
+
+
+================================================================================
+FILE: app\application\trading_loop_component.py
+================================================================================
+"""Trading LoopをApplication Componentとして提供する。"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import Protocol
+
+from app.application.trading_loop_models import (
+    TradingLoopCycleResult,
+)
+from app.application.trading_loop_service import (
+    TradingLoopService,
+)
+from app.runtime.session_models import (
+    RuntimeSessionReport,
+    RuntimeSessionStopReason,
+)
+
+
+class TradingLoopRuntimeLifecycle(Protocol):
+    """Trading Loop Componentが利用するSession Lifecycle。"""
+
+    def start(self):
+        """Runtime Sessionを開始する。"""
+
+    def stop(
+        self,
+        *,
+        reason: RuntimeSessionStopReason,
+        message: str | None = None,
+    ) -> RuntimeSessionReport:
+        """Runtime Sessionを終了する。"""
+
+
+class TradingLoopComponent:
+    """Application Orchestratorへ登録できるTrading Loop。"""
+
+    def __init__(
+        self,
+        *,
+        service: TradingLoopService,
+        runtime_session: TradingLoopRuntimeLifecycle,
+        codes: Iterable[str],
+        continue_on_error: bool = True,
+        continue_on_notification_error: bool = True,
+    ) -> None:
+        """Service・Session・監視対象銘柄を設定する。"""
+
+        normalized_codes = tuple(
+            dict.fromkeys(
+                code.strip()
+                for code in codes
+                if code.strip()
+            )
+        )
+
+        if not normalized_codes:
+            raise ValueError(
+                "監視対象銘柄を1件以上指定してください。"
+            )
+
+        self.service = service
+        self.runtime_session = runtime_session
+        self.codes = normalized_codes
+        self.continue_on_error = continue_on_error
+        self.continue_on_notification_error = (
+            continue_on_notification_error
+        )
+        self._running = False
+        self._next_cycle_number = 1
+        self._last_session_report: (
+            RuntimeSessionReport | None
+        ) = None
+
+    @property
+    def component_name(self) -> str:
+        """Application Component名を返す。"""
+
+        return "trading-loop"
+
+    @property
+    def is_running(self) -> bool:
+        """Componentが稼働中か返す。"""
+
+        return self._running
+
+    @property
+    def last_session_report(
+        self,
+    ) -> RuntimeSessionReport | None:
+        """直近のSession終了レポートを返す。"""
+
+        return self._last_session_report
+
+    def start(self) -> None:
+        """Runtime Sessionを開始する。"""
+
+        if self._running:
+            raise RuntimeError(
+                "Trading Loopはすでに稼働中です。"
+            )
+
+        self.runtime_session.start()
+        self._running = True
+        self._next_cycle_number = 1
+        self._last_session_report = None
+
+    def run_cycle(self) -> TradingLoopCycleResult:
+        """次のTrading Cycleを1回実行する。"""
+
+        if not self._running:
+            raise RuntimeError(
+                "Trading Loopが開始されていません。"
+            )
+
+        result = self.service.run_cycle(
+            cycle_number=self._next_cycle_number,
+            codes=self.codes,
+            continue_on_error=self.continue_on_error,
+            continue_on_notification_error=(
+                self.continue_on_notification_error
+            ),
+        )
+        self._next_cycle_number += 1
+
+        return result
+
+    def stop(self) -> None:
+        """Runtime Sessionを正常終了する。"""
+
+        if not self._running:
+            raise RuntimeError(
+                "Trading Loopが開始されていません。"
+            )
+
+        self._last_session_report = (
+            self.runtime_session.stop(
+                reason=RuntimeSessionStopReason.NORMAL,
+                message="Trading Loop stopped.",
+            )
+        )
+        self._running = False
+
+
+================================================================================
+FILE: app\application\trading_loop_models.py
+================================================================================
+"""Application Trading Loopの共通モデル。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+
+from app.live.live_orchestrator_models import LiveCycleResult
+from app.runtime.resource_integration import (
+    RuntimeResourceIntegrationResult,
+)
+from app.runtime.session_models import RuntimeSessionSnapshot
+
+
+class TradingLoopCycleStatus(StrEnum):
+    """Application Trading Loopの1サイクル状態。"""
+
+    COMPLETED = "completed"
+    RESOURCE_CRITICAL = "resource_critical"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class TradingLoopCycleResult:
+    """市場監視からRuntime記録までをまとめた1サイクル結果。"""
+
+    cycle_number: int
+    started_at: datetime
+    completed_at: datetime
+    status: TradingLoopCycleStatus
+    live_cycle_result: LiveCycleResult | None
+    runtime_session_snapshot: RuntimeSessionSnapshot
+    resource_result: RuntimeResourceIntegrationResult | None
+    error_message: str | None = None
+
+    def __post_init__(self) -> None:
+        """日時・状態・結果の整合性を検証する。"""
+
+        if self.cycle_number <= 0:
+            raise ValueError(
+                "サイクル番号は0より大きい必要があります。"
+            )
+
+        for name, value in {
+            "開始日時": self.started_at,
+            "完了日時": self.completed_at,
+        }.items():
+            if value.tzinfo is None:
+                raise ValueError(
+                    f"{name}にはタイムゾーンが必要です。"
+                )
+
+        if self.completed_at < self.started_at:
+            raise ValueError(
+                "完了日時は開始日時以後である必要があります。"
+            )
+
+        error_message = (
+            None
+            if self.error_message is None
+            else self.error_message.strip() or None
+        )
+
+        if self.status is TradingLoopCycleStatus.COMPLETED:
+            if self.live_cycle_result is None:
+                raise ValueError(
+                    "正常完了にはLive Cycle結果が必要です。"
+                )
+            if not self.live_cycle_result.is_completed:
+                raise ValueError(
+                    "正常完了には成功したLive Cycle結果が必要です。"
+                )
+            if error_message is not None:
+                raise ValueError(
+                    "正常完了にはエラーメッセージを設定できません。"
+                )
+
+        if self.status is TradingLoopCycleStatus.RESOURCE_CRITICAL:
+            if self.resource_result is None:
+                raise ValueError(
+                    "Resource重大状態にはResource結果が必要です。"
+                )
+            if error_message is not None:
+                raise ValueError(
+                    "Resource重大状態にはエラーメッセージを"
+                    "設定できません。"
+                )
+
+        if self.status is TradingLoopCycleStatus.FAILED:
+            if error_message is None:
+                raise ValueError(
+                    "失敗結果にはエラーメッセージが必要です。"
+                )
+
+        object.__setattr__(
+            self,
+            "error_message",
+            error_message,
+        )
+
+    @property
+    def is_successful(self) -> bool:
+        """サイクルが正常完了したか返す。"""
+
+        return self.status is TradingLoopCycleStatus.COMPLETED
+
+    @property
+    def signal_count(self) -> int:
+        """生成シグナル件数を返す。"""
+
+        if self.live_cycle_result is None:
+            return 0
+
+        return self.live_cycle_result.signal_count
+
+    @property
+    def execution_count(self) -> int:
+        """約定件数を返す。"""
+
+        if self.live_cycle_result is None:
+            return 0
+
+        return self.live_cycle_result.execution_count
+
+
+@dataclass(frozen=True, slots=True)
+class TradingLoopRunResult:
+    """複数Trading Cycleの集約結果。"""
+
+    cycles: tuple[TradingLoopCycleResult, ...]
+
+    def __post_init__(self) -> None:
+        """サイクル番号が1からの連番か検証する。"""
+
+        actual = [
+            item.cycle_number
+            for item in self.cycles
+        ]
+        expected = list(
+            range(1, len(self.cycles) + 1)
+        )
+
+        if actual != expected:
+            raise ValueError(
+                "サイクル番号は1からの連番である必要があります。"
+            )
+
+    @property
+    def cycle_count(self) -> int:
+        """総サイクル数を返す。"""
+
+        return len(self.cycles)
+
+    @property
+    def successful_cycle_count(self) -> int:
+        """正常完了サイクル数を返す。"""
+
+        return sum(
+            item.is_successful
+            for item in self.cycles
+        )
+
+    @property
+    def failed_cycle_count(self) -> int:
+        """正常完了以外のサイクル数を返す。"""
+
+        return self.cycle_count - self.successful_cycle_count
+
+    @property
+    def signal_count(self) -> int:
+        """生成シグナル件数合計を返す。"""
+
+        return sum(
+            item.signal_count
+            for item in self.cycles
+        )
+
+    @property
+    def execution_count(self) -> int:
+        """約定件数合計を返す。"""
+
+        return sum(
+            item.execution_count
+            for item in self.cycles
+        )
+
+
+================================================================================
+FILE: app\application\trading_loop_runner.py
+================================================================================
+"""TradingLoopComponentを一定間隔で繰り返し実行する。"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from datetime import datetime, timezone
+from time import sleep
+from typing import Protocol
+
+from app.application.trading_loop_models import (
+    TradingLoopCycleStatus,
+)
+from app.application.trading_loop_runner_models import (
+    TradingLoopRunnerResult,
+    TradingLoopRunnerSettings,
+    TradingLoopRunnerStopReason,
+)
+
+
+class TradingLoopCycleRunner(Protocol):
+    """Runnerが利用するTrading Loop Component。"""
+
+    def run_cycle(self):
+        """次のTrading Cycleを実行する。"""
+
+
+NowProvider = Callable[[], datetime]
+Sleeper = Callable[[float], None]
+StopPredicate = Callable[[], bool]
+
+
+class TradingLoopRunner:
+    """停止条件成立までTrading Cycleを繰り返す。"""
+
+    def __init__(
+        self,
+        *,
+        component: TradingLoopCycleRunner,
+        settings: TradingLoopRunnerSettings | None = None,
+        now_provider: NowProvider | None = None,
+        sleeper: Sleeper = sleep,
+        stop_requested: StopPredicate | None = None,
+    ) -> None:
+        """Component・設定・時計・停止判定を設定する。"""
+
+        self.component = component
+        self.settings = (
+            settings
+            if settings is not None
+            else TradingLoopRunnerSettings()
+        )
+        self.now_provider = (
+            now_provider
+            if now_provider is not None
+            else lambda: datetime.now(timezone.utc)
+        )
+        self.sleeper = sleeper
+        self.stop_requested = (
+            stop_requested
+            if stop_requested is not None
+            else lambda: False
+        )
+
+    def run(self) -> TradingLoopRunnerResult:
+        """停止条件成立までTrading Cycleを繰り返す。"""
+
+        started_at = self._current_time()
+        cycles = []
+        stop_reason = (
+            TradingLoopRunnerStopReason.STOP_REQUESTED
+        )
+        error_message: str | None = None
+
+        while True:
+            if self.stop_requested():
+                stop_reason = (
+                    TradingLoopRunnerStopReason.STOP_REQUESTED
+                )
+                break
+
+            if (
+                self.settings.maximum_cycles is not None
+                and len(cycles)
+                >= self.settings.maximum_cycles
+            ):
+                stop_reason = (
+                    TradingLoopRunnerStopReason
+                    .MAX_CYCLES_REACHED
+                )
+                break
+
+            try:
+                cycle = self.component.run_cycle()
+            except Exception as error:
+                stop_reason = TradingLoopRunnerStopReason.ERROR
+                error_message = (
+                    str(error).strip()
+                    or type(error).__name__
+                )
+                break
+
+            cycles.append(cycle)
+
+            if (
+                cycle.status
+                is TradingLoopCycleStatus.RESOURCE_CRITICAL
+                and self.settings.stop_on_resource_critical
+            ):
+                stop_reason = (
+                    TradingLoopRunnerStopReason
+                    .RESOURCE_CRITICAL
+                )
+                break
+
+            if (
+                cycle.status is TradingLoopCycleStatus.FAILED
+                and self.settings.stop_on_cycle_failure
+            ):
+                stop_reason = (
+                    TradingLoopRunnerStopReason
+                    .CYCLE_FAILED
+                )
+                break
+
+            if (
+                self.settings.maximum_cycles is not None
+                and len(cycles)
+                >= self.settings.maximum_cycles
+            ):
+                stop_reason = (
+                    TradingLoopRunnerStopReason
+                    .MAX_CYCLES_REACHED
+                )
+                break
+
+            if self.stop_requested():
+                stop_reason = (
+                    TradingLoopRunnerStopReason.STOP_REQUESTED
+                )
+                break
+
+            self.sleeper(
+                self.settings.cycle_interval_seconds
+            )
+
+        return TradingLoopRunnerResult(
+            started_at=started_at,
+            completed_at=self._current_time(),
+            stop_reason=stop_reason,
+            cycles=tuple(cycles),
+            error_message=error_message,
+        )
+
+    def _current_time(self) -> datetime:
+        """UTCへ正規化した現在日時を返す。"""
+
+        current = self.now_provider()
+
+        if current.tzinfo is None:
+            raise ValueError(
+                "現在日時にはタイムゾーンが必要です。"
+            )
+
+        return current.astimezone(timezone.utc)
+
+
+================================================================================
+FILE: app\application\trading_loop_runner_models.py
+================================================================================
+"""長時間Trading Loop Runnerの共通モデル。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+
+from app.application.trading_loop_models import (
+    TradingLoopCycleResult,
+)
+
+
+class TradingLoopRunnerStopReason(StrEnum):
+    """Trading Loop Runnerの終了理由。"""
+
+    STOP_REQUESTED = "stop_requested"
+    MAX_CYCLES_REACHED = "max_cycles_reached"
+    RESOURCE_CRITICAL = "resource_critical"
+    CYCLE_FAILED = "cycle_failed"
+    ERROR = "error"
+
+
+@dataclass(frozen=True, slots=True)
+class TradingLoopRunnerSettings:
+    """Trading Loop Runnerの実行設定。"""
+
+    cycle_interval_seconds: float = 30.0
+    maximum_cycles: int | None = None
+    stop_on_cycle_failure: bool = False
+    stop_on_resource_critical: bool = True
+
+    def __post_init__(self) -> None:
+        """実行設定を検証する。"""
+
+        if self.cycle_interval_seconds < 0:
+            raise ValueError(
+                "サイクル間隔は0秒以上である必要があります。"
+            )
+
+        if (
+            self.maximum_cycles is not None
+            and self.maximum_cycles <= 0
+        ):
+            raise ValueError(
+                "最大サイクル数は0より大きい必要があります。"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class TradingLoopRunnerResult:
+    """Trading Loop Runnerの全体実行結果。"""
+
+    started_at: datetime
+    completed_at: datetime
+    stop_reason: TradingLoopRunnerStopReason
+    cycles: tuple[TradingLoopCycleResult, ...]
+    error_message: str | None = None
+
+    def __post_init__(self) -> None:
+        """日時・終了理由・サイクル番号を検証する。"""
+
+        for name, value in {
+            "開始日時": self.started_at,
+            "完了日時": self.completed_at,
+        }.items():
+            if value.tzinfo is None:
+                raise ValueError(
+                    f"{name}にはタイムゾーンが必要です。"
+                )
+
+        if self.completed_at < self.started_at:
+            raise ValueError(
+                "完了日時は開始日時以後である必要があります。"
+            )
+
+        expected = list(
+            range(1, len(self.cycles) + 1)
+        )
+        actual = [
+            cycle.cycle_number
+            for cycle in self.cycles
+        ]
+
+        if actual != expected:
+            raise ValueError(
+                "サイクル番号は1からの連番である必要があります。"
+            )
+
+        error_message = (
+            None
+            if self.error_message is None
+            else self.error_message.strip() or None
+        )
+
+        if (
+            self.stop_reason is TradingLoopRunnerStopReason.ERROR
+            and error_message is None
+        ):
+            raise ValueError(
+                "ERROR終了にはエラーメッセージが必要です。"
+            )
+
+        object.__setattr__(
+            self,
+            "error_message",
+            error_message,
+        )
+
+    @property
+    def cycle_count(self) -> int:
+        """総サイクル数を返す。"""
+
+        return len(self.cycles)
+
+    @property
+    def successful_cycle_count(self) -> int:
+        """正常完了サイクル数を返す。"""
+
+        return sum(
+            cycle.is_successful
+            for cycle in self.cycles
+        )
+
+    @property
+    def failed_cycle_count(self) -> int:
+        """正常完了以外のサイクル数を返す。"""
+
+        return (
+            self.cycle_count
+            - self.successful_cycle_count
+        )
+
+
+================================================================================
+FILE: app\application\trading_loop_runner_report.py
+================================================================================
+"""Trading Loop Runner結果をJSON互換辞書へ変換する。"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from app.application.trading_loop_runner_models import (
+    TradingLoopRunnerResult,
+)
+
+
+def trading_loop_runner_result_to_dict(
+    result: TradingLoopRunnerResult,
+) -> dict[str, Any]:
+    """Trading Loop Runner結果を辞書へ変換する。"""
+
+    return {
+        "started_at": result.started_at.isoformat(),
+        "completed_at": result.completed_at.isoformat(),
+        "stop_reason": result.stop_reason.value,
+        "error_message": result.error_message,
+        "cycle_count": result.cycle_count,
+        "successful_cycle_count": (
+            result.successful_cycle_count
+        ),
+        "failed_cycle_count": (
+            result.failed_cycle_count
+        ),
+        "cycles": [
+            {
+                "cycle_number": cycle.cycle_number,
+                "started_at": cycle.started_at.isoformat(),
+                "completed_at": cycle.completed_at.isoformat(),
+                "status": cycle.status.value,
+                "signal_count": cycle.signal_count,
+                "execution_count": cycle.execution_count,
+                "error_message": cycle.error_message,
+            }
+            for cycle in result.cycles
+        ],
+    }
+
+
+================================================================================
+FILE: app\application\trading_loop_service.py
+================================================================================
+"""既存Live TradingをRuntime Session・Resource監視へ接続する。"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable
+from datetime import datetime, timezone
+from typing import Protocol
+
+from app.application.trading_loop_models import (
+    TradingLoopCycleResult,
+    TradingLoopCycleStatus,
+)
+from app.live.live_orchestrator_models import LiveCycleResult
+from app.runtime.resource_integration import (
+    RuntimeResourceIntegrationResult,
+)
+from app.runtime.resource_models import RuntimeResourceStatus
+from app.runtime.session_models import RuntimeSessionSnapshot
+
+
+class TradingLoopLiveOrchestrator(Protocol):
+    """Trading Loopが利用する既存Live Orchestrator。"""
+
+    def run_cycle(
+        self,
+        *,
+        cycle_number: int,
+        codes: Iterable[str],
+        continue_on_error: bool = True,
+    ) -> LiveCycleResult:
+        """市場監視とPaper Tradingを1回実行する。"""
+
+
+class TradingLoopRuntimeSession(Protocol):
+    """Trading Loopが利用するRuntime Session。"""
+
+    def record_cycle(
+        self,
+        *,
+        successful: bool,
+    ) -> RuntimeSessionSnapshot:
+        """サイクル成否を記録する。"""
+
+    def record_heartbeat(self) -> RuntimeSessionSnapshot:
+        """Heartbeatを記録する。"""
+
+
+class TradingLoopResourceIntegration(Protocol):
+    """Trading Loopが利用するResource統合処理。"""
+
+    def sample_once(
+        self,
+        *,
+        continue_on_notification_error: bool = True,
+    ) -> RuntimeResourceIntegrationResult:
+        """Resource監視を1回実行する。"""
+
+
+class TradingLoopService:
+    """既存Live Cycleを運用基盤へ統合する。"""
+
+    def __init__(
+        self,
+        *,
+        live_orchestrator: TradingLoopLiveOrchestrator,
+        runtime_session: TradingLoopRuntimeSession,
+        resource_integration: (
+            TradingLoopResourceIntegration | None
+        ) = None,
+        now_provider: Callable[[], datetime] | None = None,
+    ) -> None:
+        """依存関係と時計を設定する。"""
+
+        self.live_orchestrator = live_orchestrator
+        self.runtime_session = runtime_session
+        self.resource_integration = resource_integration
+        self.now_provider = (
+            now_provider
+            if now_provider is not None
+            else lambda: datetime.now(timezone.utc)
+        )
+
+    def run_cycle(
+        self,
+        *,
+        cycle_number: int,
+        codes: Iterable[str],
+        continue_on_error: bool = True,
+        continue_on_notification_error: bool = True,
+    ) -> TradingLoopCycleResult:
+        """1回のLive Cycleと運用記録を実行する。"""
+
+        if cycle_number <= 0:
+            raise ValueError(
+                "サイクル番号は0より大きい必要があります。"
+            )
+
+        normalized_codes = tuple(
+            dict.fromkeys(
+                code.strip()
+                for code in codes
+                if code.strip()
+            )
+        )
+
+        if not normalized_codes:
+            raise ValueError(
+                "監視対象銘柄を1件以上指定してください。"
+            )
+
+        started_at = self._current_time()
+        live_result: LiveCycleResult | None = None
+        resource_result: (
+            RuntimeResourceIntegrationResult | None
+        ) = None
+
+        try:
+            live_result = self.live_orchestrator.run_cycle(
+                cycle_number=cycle_number,
+                codes=normalized_codes,
+                continue_on_error=continue_on_error,
+            )
+
+            if self.resource_integration is not None:
+                resource_result = (
+                    self.resource_integration.sample_once(
+                        continue_on_notification_error=(
+                            continue_on_notification_error
+                        ),
+                    )
+                )
+
+            resource_is_critical = (
+                resource_result is not None
+                and resource_result.evaluation.status
+                is RuntimeResourceStatus.CRITICAL
+            )
+            successful = (
+                live_result.is_completed
+                and not resource_is_critical
+            )
+
+            self.runtime_session.record_cycle(
+                successful=successful
+            )
+            runtime_snapshot = (
+                self.runtime_session.record_heartbeat()
+            )
+
+            if live_result.is_failed:
+                status = TradingLoopCycleStatus.FAILED
+                error_message = (
+                    live_result.error_message
+                    or "Live Cycleに失敗しました。"
+                )
+            elif resource_is_critical:
+                status = (
+                    TradingLoopCycleStatus
+                    .RESOURCE_CRITICAL
+                )
+                error_message = None
+            else:
+                status = TradingLoopCycleStatus.COMPLETED
+                error_message = None
+
+            return TradingLoopCycleResult(
+                cycle_number=cycle_number,
+                started_at=started_at,
+                completed_at=self._current_time(),
+                status=status,
+                live_cycle_result=live_result,
+                runtime_session_snapshot=runtime_snapshot,
+                resource_result=resource_result,
+                error_message=error_message,
+            )
+
+        except Exception as error:
+            if not continue_on_error:
+                raise
+
+            self.runtime_session.record_cycle(
+                successful=False
+            )
+            runtime_snapshot = (
+                self.runtime_session.record_heartbeat()
+            )
+
+            return TradingLoopCycleResult(
+                cycle_number=cycle_number,
+                started_at=started_at,
+                completed_at=self._current_time(),
+                status=TradingLoopCycleStatus.FAILED,
+                live_cycle_result=live_result,
+                runtime_session_snapshot=runtime_snapshot,
+                resource_result=resource_result,
+                error_message=(
+                    str(error).strip()
+                    or type(error).__name__
+                ),
+            )
+
+    def _current_time(self) -> datetime:
+        """UTCへ正規化した現在日時を返す。"""
+
+        current = self.now_provider()
+
+        if current.tzinfo is None:
+            raise ValueError(
+                "現在日時にはタイムゾーンが必要です。"
+            )
+
+        return current.astimezone(timezone.utc)
+
+
+================================================================================
+FILE: app\backtest\backtest_portfolio_update_service.py
+================================================================================
+"""バックテスト約定をポジション・資産推移へ反映する。"""
+
+from dataclasses import dataclass
+
+from app.trading.equity_curve_models import EquityCurveReport
+from app.trading.equity_curve_service import EquityCurveService
+from app.trading.portfolio_models import PortfolioSnapshot
+from app.trading.portfolio_repository import PortfolioRepository
+from app.trading.portfolio_service import PortfolioService
+from app.trading.position_service import (
+    PositionApplicationResult,
+    PositionService,
+)
+from app.trading.trade_execution_models import (
+    TradeExecutionRecord,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class BacktestPortfolioUpdateResult:
+    """1件の約定を資産状態へ反映した結果。"""
+
+    execution_record: TradeExecutionRecord
+    position_result: PositionApplicationResult
+    portfolio_snapshot: PortfolioSnapshot
+    equity_curve_report: EquityCurveReport
+
+    @property
+    def execution_id(self) -> str:
+        """約定IDを返す。"""
+
+        return self.execution_record.execution_id
+
+    @property
+    def position_was_applied(self) -> bool:
+        """約定が新しくポジションへ反映されたか返す。"""
+
+        return self.position_result.applied
+
+    @property
+    def position_closed(self) -> bool:
+        """ポジションが全決済されたか返す。"""
+
+        return self.position_result.position_closed
+
+
+@dataclass(frozen=True, slots=True)
+class BacktestPortfolioBatchUpdateResult:
+    """複数約定の資産更新結果。"""
+
+    items: tuple[
+        BacktestPortfolioUpdateResult,
+        ...
+    ]
+
+    @property
+    def processed_count(self) -> int:
+        """処理した約定件数を返す。"""
+
+        return len(self.items)
+
+    @property
+    def applied_count(self) -> int:
+        """新しくポジションへ反映した件数を返す。"""
+
+        return sum(
+            item.position_was_applied
+            for item in self.items
+        )
+
+    @property
+    def latest_snapshot(self) -> PortfolioSnapshot | None:
+        """最後に保存したポートフォリオを返す。"""
+
+        if not self.items:
+            return None
+
+        return self.items[-1].portfolio_snapshot
+
+    @property
+    def latest_equity_curve(
+        self,
+    ) -> EquityCurveReport | None:
+        """最後に作成したエクイティカーブを返す。"""
+
+        if not self.items:
+            return None
+
+        return self.items[-1].equity_curve_report
+
+
+class BacktestPortfolioUpdateService:
+    """約定から資産曲線までを順番に更新する。"""
+
+    def __init__(
+        self,
+        *,
+        position_service: PositionService,
+        portfolio_service: PortfolioService,
+        portfolio_repository: PortfolioRepository,
+        equity_curve_service: EquityCurveService,
+    ) -> None:
+        """必要なServiceとRepositoryを設定する。"""
+
+        self.position_service = position_service
+        self.portfolio_service = portfolio_service
+        self.portfolio_repository = portfolio_repository
+        self.equity_curve_service = equity_curve_service
+
+    def apply_execution(
+        self,
+        execution_record: TradeExecutionRecord,
+        *,
+        equity_curve_limit: int = 10_000,
+    ) -> BacktestPortfolioUpdateResult:
+        """1件の約定をポジション・資産推移へ反映する。"""
+
+        if equity_curve_limit <= 0:
+            raise ValueError(
+                "取得件数は0より大きい必要があります。"
+            )
+
+        position_result = (
+            self.position_service.apply_execution(
+                execution_record
+            )
+        )
+
+        snapshot = self.portfolio_service.create_snapshot(
+            generated_at=(
+                execution_record.execution.executed_at
+            )
+        )
+
+        saved_snapshot = self.portfolio_repository.save(
+            snapshot
+        )
+
+        report = self.equity_curve_service.create_report(
+            limit=equity_curve_limit
+        )
+
+        return BacktestPortfolioUpdateResult(
+            execution_record=execution_record,
+            position_result=position_result,
+            portfolio_snapshot=saved_snapshot,
+            equity_curve_report=report,
+        )
+
+    def apply_executions(
+        self,
+        execution_records: tuple[
+            TradeExecutionRecord,
+            ...
+        ],
+        *,
+        equity_curve_limit: int = 10_000,
+    ) -> BacktestPortfolioBatchUpdateResult:
+        """複数約定を渡された順番で反映する。"""
+
+        if equity_curve_limit <= 0:
+            raise ValueError(
+                "取得件数は0より大きい必要があります。"
+            )
+
+        ordered_records = tuple(
+            sorted(
+                execution_records,
+                key=lambda record: (
+                    record.execution.executed_at,
+                    record.execution_id,
+                ),
+            )
+        )
+
+        results = tuple(
+            self.apply_execution(
+                record,
+                equity_curve_limit=equity_curve_limit,
+            )
+            for record in ordered_records
+        )
+
+        return BacktestPortfolioBatchUpdateResult(
+            items=results
+        )
+
+
+================================================================================
+FILE: app\runtime\paper_trading_runtime.py
+================================================================================
+"""Trading LoopとPortfolioを終日Paper Tradingとして集約する。"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from datetime import datetime, timezone
+from typing import Protocol
+
+from app.runtime.paper_trading_runtime_models import (
+    PaperTradingCycleRecord,
+    PaperTradingDailySummary,
+    PaperTradingRuntimeStatus,
+)
+from app.trading.portfolio_models import PortfolioSnapshot
+
+
+class PaperTradingCycleRunner(Protocol):
+    """終日Runtimeが利用するTrading Loop。"""
+
+    def run_cycle(self):
+        """次のTrading Cycleを実行する。"""
+
+
+class PaperTradingPortfolioReader(Protocol):
+    """終日Runtimeが利用するPortfolio取得処理。"""
+
+    def create_snapshot(
+        self,
+        *,
+        generated_at: datetime | None = None,
+    ) -> PortfolioSnapshot:
+        """現在のPortfolio Snapshotを返す。"""
+
+
+class PaperTradingRuntime:
+    """1営業日のTrading Cycleと資産推移を集約する。"""
+
+    def __init__(
+        self,
+        *,
+        cycle_runner: PaperTradingCycleRunner,
+        portfolio_reader: PaperTradingPortfolioReader,
+        now_provider: Callable[[], datetime] | None = None,
+    ) -> None:
+        """Trading Loop・Portfolio・時計を設定する。"""
+
+        self.cycle_runner = cycle_runner
+        self.portfolio_reader = portfolio_reader
+        self.now_provider = (
+            now_provider
+            if now_provider is not None
+            else lambda: datetime.now(timezone.utc)
+        )
+
+        self._started_at: datetime | None = None
+        self._records: list[PaperTradingCycleRecord] = []
+        self._initial_equity: float | None = None
+        self._status: PaperTradingRuntimeStatus | None = None
+
+    def start(self) -> None:
+        """終日Runtimeを開始する。"""
+
+        if self._status is PaperTradingRuntimeStatus.RUNNING:
+            raise RuntimeError(
+                "Paper Trading Runtimeはすでに稼働中です。"
+            )
+
+        started_at = self._current_time()
+        initial_snapshot = (
+            self.portfolio_reader.create_snapshot(
+                generated_at=started_at
+            )
+        )
+
+        self._started_at = started_at
+        self._records.clear()
+        self._initial_equity = (
+            initial_snapshot.broker_equity
+        )
+        self._status = PaperTradingRuntimeStatus.RUNNING
+
+    def run_cycle(self) -> PaperTradingCycleRecord:
+        """Trading Cycleを実行してPortfolioを記録する。"""
+
+        self._require_running()
+        cycle_result = self.cycle_runner.run_cycle()
+        snapshot = self.portfolio_reader.create_snapshot(
+            generated_at=self._current_time()
+        )
+        record = PaperTradingCycleRecord(
+            cycle_result=cycle_result,
+            portfolio_snapshot=snapshot,
+        )
+        self._records.append(record)
+
+        return record
+
+    def complete(self) -> PaperTradingDailySummary:
+        """正常終了の日次サマリーを返す。"""
+
+        return self._finalize(
+            status=PaperTradingRuntimeStatus.COMPLETED,
+            error_message=None,
+        )
+
+    def fail(
+        self,
+        *,
+        error_message: str,
+    ) -> PaperTradingDailySummary:
+        """異常終了の日次サマリーを返す。"""
+
+        normalized = error_message.strip()
+
+        if not normalized:
+            raise ValueError(
+                "異常終了メッセージを指定してください。"
+            )
+
+        return self._finalize(
+            status=PaperTradingRuntimeStatus.FAILED,
+            error_message=normalized,
+        )
+
+    def records(
+        self,
+    ) -> tuple[PaperTradingCycleRecord, ...]:
+        """現在までのCycle Recordを返す。"""
+
+        return tuple(self._records)
+
+    def _finalize(
+        self,
+        *,
+        status: PaperTradingRuntimeStatus,
+        error_message: str | None,
+    ) -> PaperTradingDailySummary:
+        """Runtimeを終了して日次集計を返す。"""
+
+        self._require_running()
+        completed_at = self._current_time()
+        final_snapshot = (
+            self.portfolio_reader.create_snapshot(
+                generated_at=completed_at
+            )
+        )
+
+        if self._started_at is None:
+            raise RuntimeError(
+                "Paper Trading Runtimeが開始されていません。"
+            )
+
+        summary = PaperTradingDailySummary(
+            trading_date=self._started_at.date(),
+            started_at=self._started_at,
+            completed_at=completed_at,
+            status=status,
+            records=tuple(self._records),
+            initial_equity=self._initial_equity,
+            final_equity=final_snapshot.broker_equity,
+            error_message=error_message,
+        )
+
+        self._status = status
+
+        return summary
+
+    def _require_running(self) -> None:
+        """稼働中でなければ例外を送出する。"""
+
+        if self._status is not PaperTradingRuntimeStatus.RUNNING:
+            raise RuntimeError(
+                "Paper Trading Runtimeが稼働していません。"
+            )
+
+    def _current_time(self) -> datetime:
+        """UTCへ正規化した現在日時を返す。"""
+
+        current = self.now_provider()
+
+        if current.tzinfo is None:
+            raise ValueError(
+                "現在日時にはタイムゾーンが必要です。"
+            )
+
+        return current.astimezone(timezone.utc)
+
+
+================================================================================
+FILE: app\runtime\paper_trading_runtime_models.py
+================================================================================
+"""終日Paper Trading Runtimeの共通モデル。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, datetime
+from enum import StrEnum
+
+from app.application.trading_loop_models import (
+    TradingLoopCycleResult,
+)
+from app.trading.portfolio_models import PortfolioSnapshot
+
+
+class PaperTradingRuntimeStatus(StrEnum):
+    """終日Paper Trading Runtimeの状態。"""
+
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class PaperTradingCycleRecord:
+    """1回分のTrading Cycleと資産状態。"""
+
+    cycle_result: TradingLoopCycleResult
+    portfolio_snapshot: PortfolioSnapshot | None
+
+    @property
+    def cycle_number(self) -> int:
+        """サイクル番号を返す。"""
+
+        return self.cycle_result.cycle_number
+
+    @property
+    def is_successful(self) -> bool:
+        """サイクルが正常完了したか返す。"""
+
+        return self.cycle_result.is_successful
+
+
+@dataclass(frozen=True, slots=True)
+class PaperTradingDailySummary:
+    """1営業日のPaper Trading集計。"""
+
+    trading_date: date
+    started_at: datetime
+    completed_at: datetime
+    status: PaperTradingRuntimeStatus
+    records: tuple[PaperTradingCycleRecord, ...]
+    initial_equity: float | None
+    final_equity: float | None
+    error_message: str | None = None
+
+    def __post_init__(self) -> None:
+        """日時・状態・サイクル番号を検証する。"""
+
+        for name, value in {
+            "開始日時": self.started_at,
+            "完了日時": self.completed_at,
+        }.items():
+            if value.tzinfo is None:
+                raise ValueError(
+                    f"{name}にはタイムゾーンが必要です。"
+                )
+
+        if self.completed_at < self.started_at:
+            raise ValueError(
+                "完了日時は開始日時以後である必要があります。"
+            )
+
+        expected = list(
+            range(1, len(self.records) + 1)
+        )
+        actual = [
+            record.cycle_number
+            for record in self.records
+        ]
+
+        if actual != expected:
+            raise ValueError(
+                "サイクル番号は1からの連番である必要があります。"
+            )
+
+        error_message = (
+            None
+            if self.error_message is None
+            else self.error_message.strip() or None
+        )
+
+        if (
+            self.status is PaperTradingRuntimeStatus.FAILED
+            and error_message is None
+        ):
+            raise ValueError(
+                "FAILED状態にはエラーメッセージが必要です。"
+            )
+
+        for name, value in {
+            "初期純資産": self.initial_equity,
+            "最終純資産": self.final_equity,
+        }.items():
+            if value is not None and value < 0:
+                raise ValueError(
+                    f"{name}は0以上である必要があります。"
+                )
+
+        object.__setattr__(
+            self,
+            "error_message",
+            error_message,
+        )
+
+    @property
+    def cycle_count(self) -> int:
+        """総サイクル数を返す。"""
+
+        return len(self.records)
+
+    @property
+    def successful_cycle_count(self) -> int:
+        """正常完了サイクル数を返す。"""
+
+        return sum(
+            record.is_successful
+            for record in self.records
+        )
+
+    @property
+    def failed_cycle_count(self) -> int:
+        """失敗サイクル数を返す。"""
+
+        return (
+            self.cycle_count
+            - self.successful_cycle_count
+        )
+
+    @property
+    def signal_count(self) -> int:
+        """シグナル数合計を返す。"""
+
+        return sum(
+            record.cycle_result.signal_count
+            for record in self.records
+        )
+
+    @property
+    def execution_count(self) -> int:
+        """約定数合計を返す。"""
+
+        return sum(
+            record.cycle_result.execution_count
+            for record in self.records
+        )
+
+    @property
+    def net_profit_loss(self) -> float | None:
+        """初期純資産から最終純資産までの増減額を返す。"""
+
+        if (
+            self.initial_equity is None
+            or self.final_equity is None
+        ):
+            return None
+
+        return (
+            self.final_equity - self.initial_equity
+        )
+
+    @property
+    def return_rate(self) -> float | None:
+        """日次リターン率を返す。"""
+
+        if (
+            self.initial_equity is None
+            or self.final_equity is None
+            or self.initial_equity == 0
+        ):
+            return None
+
+        return (
+            self.final_equity / self.initial_equity
+            - 1.0
+        )
+
+
+================================================================================
+FILE: app\runtime\paper_trading_runtime_persistence.py
+================================================================================
+"""PaperTradingRuntimeの終了と日次保存を一体化する。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+from app.runtime.paper_trading_persistence_service import (
+    PaperTradingPersistenceResult,
+)
+from app.runtime.paper_trading_runtime_models import (
+    PaperTradingDailySummary,
+)
+
+
+class PaperTradingRuntimeFinalizer(Protocol):
+    """終了可能なPaper Trading Runtime。"""
+
+    def complete(self) -> PaperTradingDailySummary:
+        """正常終了する。"""
+
+    def fail(
+        self,
+        *,
+        error_message: str,
+    ) -> PaperTradingDailySummary:
+        """異常終了する。"""
+
+
+class PaperTradingSummaryPersister(Protocol):
+    """日次サマリー永続化処理。"""
+
+    def persist(
+        self,
+        summary: PaperTradingDailySummary,
+    ) -> PaperTradingPersistenceResult:
+        """日次サマリーを保存する。"""
+
+
+@dataclass(frozen=True, slots=True)
+class PaperTradingRuntimePersistenceResult:
+    """Runtime終了と永続化をまとめた結果。"""
+
+    persistence: PaperTradingPersistenceResult
+
+    @property
+    def summary(self) -> PaperTradingDailySummary:
+        """日次サマリーを返す。"""
+
+        return self.persistence.summary
+
+
+class PaperTradingRuntimePersistenceService:
+    """Runtime終了後に日次結果を必ず保存する。"""
+
+    def __init__(
+        self,
+        *,
+        runtime: PaperTradingRuntimeFinalizer,
+        persistence_service: PaperTradingSummaryPersister,
+    ) -> None:
+        """RuntimeとPersistence Serviceを設定する。"""
+
+        self.runtime = runtime
+        self.persistence_service = persistence_service
+
+    def complete_and_persist(
+        self,
+    ) -> PaperTradingRuntimePersistenceResult:
+        """正常終了して日次サマリーを保存する。"""
+
+        summary = self.runtime.complete()
+        persistence = self.persistence_service.persist(
+            summary
+        )
+
+        return PaperTradingRuntimePersistenceResult(
+            persistence=persistence
+        )
+
+    def fail_and_persist(
+        self,
+        *,
+        error_message: str,
+    ) -> PaperTradingRuntimePersistenceResult:
+        """異常終了して日次サマリーを保存する。"""
+
+        summary = self.runtime.fail(
+            error_message=error_message
+        )
+        persistence = self.persistence_service.persist(
+            summary
+        )
+
+        return PaperTradingRuntimePersistenceResult(
+            persistence=persistence
+        )
+
+
+================================================================================
+FILE: app\trading\portfolio_audit_models.py
+================================================================================
+"""Brokerとローカルポートフォリオ差異の監査モデル。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+
+from app.trading.broker_adapter import BrokerPositionSide
+
+
+class PortfolioAuditSeverity(StrEnum):
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+
+
+class PortfolioAuditIssueType(StrEnum):
+    BROKER_POSITION_MISSING_LOCALLY = "broker_position_missing_locally"
+    LOCAL_POSITION_MISSING_AT_BROKER = "local_position_missing_at_broker"
+    QUANTITY_MISMATCH = "quantity_mismatch"
+    AVERAGE_PRICE_MISMATCH = "average_price_mismatch"
+    CASH_BALANCE_MISMATCH = "cash_balance_mismatch"
+    BUYING_POWER_MISMATCH = "buying_power_mismatch"
+    MARKET_VALUE_MISMATCH = "market_value_mismatch"
+    EQUITY_MISMATCH = "equity_mismatch"
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioAuditTolerance:
+    money_absolute: float = 1.0
+    price_absolute: float = 0.01
+
+    def __post_init__(self) -> None:
+        if self.money_absolute < 0:
+            raise ValueError("金額許容差は0以上である必要があります。")
+        if self.price_absolute < 0:
+            raise ValueError("価格許容差は0以上である必要があります。")
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioAuditIssue:
+    issue_type: PortfolioAuditIssueType
+    severity: PortfolioAuditSeverity
+    message: str
+    code: str | None = None
+    side: BrokerPositionSide | None = None
+    local_value: object | None = None
+    broker_value: object | None = None
+
+    def __post_init__(self) -> None:
+        message = self.message.strip()
+        if not message:
+            raise ValueError("監査メッセージを指定してください。")
+
+        code = None if self.code is None else self.code.strip()
+        if code is not None and (
+            not code.isdigit()
+            or len(code) not in {4, 5}
+        ):
+            raise ValueError(
+                "銘柄コードは4桁または5桁の数字で指定してください。"
+            )
+
+        object.__setattr__(self, "message", message)
+        object.__setattr__(self, "code", code)
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioAuditReport:
+    issues: tuple[PortfolioAuditIssue, ...]
+
+    @property
+    def issue_count(self) -> int:
+        return len(self.issues)
+
+    @property
+    def warning_count(self) -> int:
+        return sum(
+            issue.severity is PortfolioAuditSeverity.WARNING
+            for issue in self.issues
+        )
+
+    @property
+    def error_count(self) -> int:
+        return sum(
+            issue.severity is PortfolioAuditSeverity.ERROR
+            for issue in self.issues
+        )
+
+    @property
+    def is_consistent(self) -> bool:
+        return not self.issues
+
+    @property
+    def has_errors(self) -> bool:
+        return self.error_count > 0
+
+
+================================================================================
+FILE: app\trading\portfolio_audit_service.py
+================================================================================
+"""Brokerとローカルの口座・ポジション差異を監査する。"""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from app.trading.broker_adapter import (
+    BrokerAccountSnapshot,
+    BrokerPosition,
+    BrokerPositionSide,
+)
+from app.trading.portfolio_audit_models import (
+    PortfolioAuditIssue,
+    PortfolioAuditIssueType,
+    PortfolioAuditReport,
+    PortfolioAuditSeverity,
+    PortfolioAuditTolerance,
+)
+from app.trading.portfolio_models import PortfolioSnapshot
+from app.trading.position_models import TradingPositionRecord
+
+
+class PortfolioAuditPositionReader(Protocol):
+    def list_recent(
+        self,
+        *,
+        limit: int = 100,
+        code: str | None = None,
+        side: BrokerPositionSide | None = None,
+    ) -> list[TradingPositionRecord]:
+        """ローカル現在ポジションを返す。"""
+
+
+class PortfolioAuditBrokerReader(Protocol):
+    def get_account(self) -> BrokerAccountSnapshot:
+        """Broker口座情報を返す。"""
+
+    def list_positions(self) -> list[BrokerPosition]:
+        """Brokerポジション一覧を返す。"""
+
+
+class PortfolioAuditService:
+    """修復を行わず、Brokerとローカル状態の差異を報告する。"""
+
+    def __init__(
+        self,
+        *,
+        position_repository: PortfolioAuditPositionReader,
+        broker: PortfolioAuditBrokerReader,
+        tolerance: PortfolioAuditTolerance | None = None,
+    ) -> None:
+        self.position_repository = position_repository
+        self.broker = broker
+        self.tolerance = (
+            tolerance
+            if tolerance is not None
+            else PortfolioAuditTolerance()
+        )
+
+    def audit(
+        self,
+        *,
+        local_portfolio: PortfolioSnapshot | None = None,
+    ) -> PortfolioAuditReport:
+        account = self.broker.get_account()
+        broker_positions = self.broker.list_positions()
+        local_positions = self.position_repository.list_recent(
+            limit=10_000,
+        )
+
+        issues = self._audit_positions(
+            local_positions=local_positions,
+            broker_positions=broker_positions,
+        )
+
+        if local_portfolio is not None:
+            issues.extend(
+                self._audit_account(
+                    local_portfolio=local_portfolio,
+                    broker_account=account,
+                )
+            )
+
+        return PortfolioAuditReport(
+            issues=tuple(issues)
+        )
+
+    def _audit_positions(
+        self,
+        *,
+        local_positions: list[TradingPositionRecord],
+        broker_positions: list[BrokerPosition],
+    ) -> list[PortfolioAuditIssue]:
+        issues: list[PortfolioAuditIssue] = []
+
+        local_map = {
+            (record.code, record.side): record
+            for record in local_positions
+        }
+        broker_map = {
+            (position.code, position.side): position
+            for position in broker_positions
+        }
+
+        identities = sorted(
+            set(local_map) | set(broker_map),
+            key=lambda item: (item[0], item[1].value),
+        )
+
+        for code, side in identities:
+            local = local_map.get((code, side))
+            broker = broker_map.get((code, side))
+
+            if local is None:
+                assert broker is not None
+                issues.append(
+                    PortfolioAuditIssue(
+                        issue_type=(
+                            PortfolioAuditIssueType
+                            .BROKER_POSITION_MISSING_LOCALLY
+                        ),
+                        severity=PortfolioAuditSeverity.ERROR,
+                        message="Brokerにのみポジションが存在します。",
+                        code=code,
+                        side=side,
+                        local_value=None,
+                        broker_value=broker.quantity,
+                    )
+                )
+                continue
+
+            if broker is None:
+                issues.append(
+                    PortfolioAuditIssue(
+                        issue_type=(
+                            PortfolioAuditIssueType
+                            .LOCAL_POSITION_MISSING_AT_BROKER
+                        ),
+                        severity=PortfolioAuditSeverity.ERROR,
+                        message="ローカルにのみポジションが存在します。",
+                        code=code,
+                        side=side,
+                        local_value=local.quantity,
+                        broker_value=None,
+                    )
+                )
+                continue
+
+            if local.quantity != broker.quantity:
+                issues.append(
+                    PortfolioAuditIssue(
+                        issue_type=(
+                            PortfolioAuditIssueType.QUANTITY_MISMATCH
+                        ),
+                        severity=PortfolioAuditSeverity.ERROR,
+                        message=(
+                            "ローカルとBrokerの保有数量が"
+                            "一致しません。"
+                        ),
+                        code=code,
+                        side=side,
+                        local_value=local.quantity,
+                        broker_value=broker.quantity,
+                    )
+                )
+
+            if (
+                abs(
+                    local.position.average_cost
+                    - broker.average_price
+                )
+                > self.tolerance.price_absolute
+            ):
+                issues.append(
+                    PortfolioAuditIssue(
+                        issue_type=(
+                            PortfolioAuditIssueType
+                            .AVERAGE_PRICE_MISMATCH
+                        ),
+                        severity=PortfolioAuditSeverity.WARNING,
+                        message=(
+                            "ローカルとBrokerの平均取得価格が"
+                            "許容差を超えています。"
+                        ),
+                        code=code,
+                        side=side,
+                        local_value=local.position.average_cost,
+                        broker_value=broker.average_price,
+                    )
+                )
+
+        return issues
+
+    def _audit_account(
+        self,
+        *,
+        local_portfolio: PortfolioSnapshot,
+        broker_account: BrokerAccountSnapshot,
+    ) -> list[PortfolioAuditIssue]:
+        checks = (
+            (
+                PortfolioAuditIssueType.CASH_BALANCE_MISMATCH,
+                "現金残高",
+                local_portfolio.cash_balance,
+                broker_account.cash_balance,
+            ),
+            (
+                PortfolioAuditIssueType.BUYING_POWER_MISMATCH,
+                "買付余力",
+                local_portfolio.buying_power,
+                broker_account.buying_power,
+            ),
+            (
+                PortfolioAuditIssueType.MARKET_VALUE_MISMATCH,
+                "保有時価総額",
+                local_portfolio.broker_market_value,
+                broker_account.market_value,
+            ),
+            (
+                PortfolioAuditIssueType.EQUITY_MISMATCH,
+                "純資産額",
+                local_portfolio.broker_equity,
+                broker_account.equity,
+            ),
+        )
+
+        issues: list[PortfolioAuditIssue] = []
+
+        for issue_type, label, local_value, broker_value in checks:
+            if (
+                abs(local_value - broker_value)
+                <= self.tolerance.money_absolute
+            ):
+                continue
+
+            issues.append(
+                PortfolioAuditIssue(
+                    issue_type=issue_type,
+                    severity=PortfolioAuditSeverity.ERROR,
+                    message=(
+                        f"ローカルとBrokerの{label}が"
+                        "許容差を超えています。"
+                    ),
+                    local_value=local_value,
+                    broker_value=broker_value,
+                )
+            )
+
+        return issues
+
+
+================================================================================
+FILE: app\trading\portfolio_models.py
+================================================================================
+"""ポートフォリオ集計の共通データモデル。"""
+
+from dataclasses import dataclass
+from datetime import datetime
+
+from app.trading.broker_adapter import BrokerPositionSide
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioPositionSnapshot:
+    """1つの現在ポジションの評価結果。"""
+
+    position_id: str
+    code: str
+    side: BrokerPositionSide
+    quantity: int
+    average_cost: float
+    market_price: float
+    realized_profit_loss: float
+
+    def __post_init__(self) -> None:
+        """評価結果を検証して文字列を正規化する。"""
+
+        normalized_position_id = self.position_id.strip()
+        normalized_code = self.code.strip()
+
+        if not normalized_position_id:
+            raise ValueError(
+                "ポジションIDを指定してください。"
+            )
+
+        if not normalized_code:
+            raise ValueError(
+                "銘柄コードを指定してください。"
+            )
+
+        if not normalized_code.isdigit():
+            raise ValueError(
+                "銘柄コードは数字で指定してください。"
+            )
+
+        if len(normalized_code) not in {4, 5}:
+            raise ValueError(
+                "銘柄コードは4桁または5桁で指定してください。"
+            )
+
+        if self.quantity <= 0:
+            raise ValueError(
+                "保有数量は0より大きい必要があります。"
+            )
+
+        if self.average_cost <= 0:
+            raise ValueError(
+                "平均取得価格は0より大きい必要があります。"
+            )
+
+        if self.market_price <= 0:
+            raise ValueError(
+                "現在価格は0より大きい必要があります。"
+            )
+
+        object.__setattr__(
+            self,
+            "position_id",
+            normalized_position_id,
+        )
+        object.__setattr__(
+            self,
+            "code",
+            normalized_code,
+        )
+
+    @property
+    def acquisition_value(self) -> float:
+        """取得金額を返す。"""
+
+        return self.average_cost * self.quantity
+
+    @property
+    def market_value(self) -> float:
+        """現在評価額を返す。"""
+
+        return self.market_price * self.quantity
+
+    @property
+    def unrealized_profit_loss(self) -> float:
+        """含み損益を返す。"""
+
+        raw_profit_loss = (
+            self.market_price - self.average_cost
+        ) * self.quantity
+
+        if self.side is BrokerPositionSide.SHORT:
+            return -raw_profit_loss
+
+        return raw_profit_loss
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioSnapshot:
+    """口座・現在ポジションを集約したポートフォリオ。"""
+
+    currency: str
+    cash_balance: float
+    buying_power: float
+    broker_market_value: float
+    broker_equity: float
+    positions: tuple[
+        PortfolioPositionSnapshot,
+        ...
+    ]
+    generated_at: datetime
+
+    def __post_init__(self) -> None:
+        """ポートフォリオ集計結果を検証する。"""
+
+        normalized_currency = self.currency.strip().upper()
+
+        if (
+            len(normalized_currency) != 3
+            or not normalized_currency.isalpha()
+        ):
+            raise ValueError(
+                "通貨コードは英字3文字で指定してください。"
+            )
+
+        for name, value in {
+            "現金残高": self.cash_balance,
+            "買付余力": self.buying_power,
+            "Broker評価額": self.broker_market_value,
+            "Broker純資産": self.broker_equity,
+        }.items():
+            if value < 0:
+                raise ValueError(
+                    f"{name}は0以上である必要があります。"
+                )
+
+        if self.generated_at.tzinfo is None:
+            raise ValueError(
+                "集計日時にはタイムゾーンが必要です。"
+            )
+
+        object.__setattr__(
+            self,
+            "currency",
+            normalized_currency,
+        )
+
+    @property
+    def position_count(self) -> int:
+        """現在ポジション件数を返す。"""
+
+        return len(self.positions)
+
+    @property
+    def total_acquisition_value(self) -> float:
+        """取得金額合計を返す。"""
+
+        return sum(
+            position.acquisition_value
+            for position in self.positions
+        )
+
+    @property
+    def total_market_value(self) -> float:
+        """現在評価額合計を返す。"""
+
+        return sum(
+            position.market_value
+            for position in self.positions
+        )
+
+    @property
+    def total_unrealized_profit_loss(self) -> float:
+        """含み損益合計を返す。"""
+
+        return sum(
+            position.unrealized_profit_loss
+            for position in self.positions
+        )
+
+    @property
+    def total_realized_profit_loss(self) -> float:
+        """実現損益合計を返す。"""
+
+        return sum(
+            position.realized_profit_loss
+            for position in self.positions
+        )
+
+    @property
+    def calculated_equity(self) -> float:
+        """ローカル評価額を使った純資産額を返す。"""
+
+        return self.cash_balance + self.total_market_value
+
+
+================================================================================
+FILE: app\trading\portfolio_repository.py
+================================================================================
+"""ポートフォリオ履歴をSQLiteへ追加専用で保存する。"""
+
+import sqlite3
+from collections.abc import Callable
+from datetime import datetime, timezone
+from pathlib import Path
+
+from app.trading.broker_adapter import BrokerPositionSide
+from app.trading.portfolio_models import (
+    PortfolioPositionSnapshot,
+    PortfolioSnapshot,
+)
+
+
+class PortfolioRepositoryError(RuntimeError):
+    """ポートフォリオRepositoryの基底例外。"""
+
+
+class PortfolioSnapshotNotFoundError(PortfolioRepositoryError):
+    """指定されたポートフォリオ履歴が存在しない。"""
+
+
+class DuplicatePortfolioSnapshotError(PortfolioRepositoryError):
+    """同じ集計日時の履歴が既に存在する。"""
+
+
+class PortfolioRepository:
+    """ポートフォリオ履歴を追加専用で管理する。"""
+
+    def __init__(
+        self,
+        database_path: Path,
+        *,
+        now_provider: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.database_path = database_path
+        self.now_provider = (
+            now_provider
+            if now_provider is not None
+            else lambda: datetime.now(timezone.utc)
+        )
+
+    def save(
+        self,
+        snapshot: PortfolioSnapshot,
+    ) -> PortfolioSnapshot:
+        """ポートフォリオSnapshotを保存する。"""
+
+        generated_at = snapshot.generated_at.astimezone(
+            timezone.utc
+        )
+        created_at = self._current_time()
+
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO portfolio_snapshots (
+                        generated_at,
+                        currency,
+                        cash_balance,
+                        buying_power,
+                        broker_market_value,
+                        broker_equity,
+                        total_acquisition_value,
+                        total_market_value,
+                        total_unrealized_profit_loss,
+                        total_realized_profit_loss,
+                        calculated_equity,
+                        position_count,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        generated_at.isoformat(),
+                        snapshot.currency,
+                        snapshot.cash_balance,
+                        snapshot.buying_power,
+                        snapshot.broker_market_value,
+                        snapshot.broker_equity,
+                        snapshot.total_acquisition_value,
+                        snapshot.total_market_value,
+                        snapshot.total_unrealized_profit_loss,
+                        snapshot.total_realized_profit_loss,
+                        snapshot.calculated_equity,
+                        snapshot.position_count,
+                        created_at.isoformat(),
+                    ),
+                )
+                snapshot_id = int(cursor.lastrowid)
+
+                for position in snapshot.positions:
+                    connection.execute(
+                        """
+                        INSERT INTO portfolio_snapshot_positions (
+                            snapshot_id,
+                            position_id,
+                            code,
+                            side,
+                            quantity,
+                            average_cost,
+                            market_price,
+                            realized_profit_loss,
+                            acquisition_value,
+                            market_value,
+                            unrealized_profit_loss
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            snapshot_id,
+                            position.position_id,
+                            position.code,
+                            position.side.value,
+                            position.quantity,
+                            position.average_cost,
+                            position.market_price,
+                            position.realized_profit_loss,
+                            position.acquisition_value,
+                            position.market_value,
+                            position.unrealized_profit_loss,
+                        ),
+                    )
+
+                connection.commit()
+
+        except sqlite3.IntegrityError as error:
+            raise DuplicatePortfolioSnapshotError(
+                "同じ集計日時のポートフォリオ履歴が"
+                "既に存在します。 "
+                f"generated_at={generated_at.isoformat()}"
+            ) from error
+        except sqlite3.Error as error:
+            raise PortfolioRepositoryError(
+                "ポートフォリオ履歴を保存できませんでした。 "
+                f"generated_at={generated_at.isoformat()}"
+            ) from error
+
+        return self.get(generated_at)
+
+    def get(
+        self,
+        generated_at: datetime,
+    ) -> PortfolioSnapshot:
+        """集計日時に一致するSnapshotを返す。"""
+
+        normalized = self._normalize_datetime(
+            generated_at,
+            "集計日時",
+        )
+
+        try:
+            with self._connect() as connection:
+                header = connection.execute(
+                    self._select_header_sql()
+                    + """
+                    WHERE generated_at = ?
+                    """,
+                    (normalized.isoformat(),),
+                ).fetchone()
+
+                if header is None:
+                    raise PortfolioSnapshotNotFoundError(
+                        "指定されたポートフォリオ履歴が"
+                        "存在しません。 "
+                        f"generated_at={normalized.isoformat()}"
+                    )
+
+                positions = connection.execute(
+                    self._select_positions_sql()
+                    + """
+                    WHERE snapshot_id = ?
+                    ORDER BY code, side, position_id
+                    """,
+                    (int(header[0]),),
+                ).fetchall()
+
+        except PortfolioSnapshotNotFoundError:
+            raise
+        except sqlite3.Error as error:
+            raise PortfolioRepositoryError(
+                "ポートフォリオ履歴を読み込めませんでした。 "
+                f"generated_at={normalized.isoformat()}"
+            ) from error
+
+        return self._rows_to_snapshot(
+            header=header,
+            position_rows=positions,
+        )
+
+    def latest(self) -> PortfolioSnapshot | None:
+        """最新のポートフォリオ履歴を返す。"""
+
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT generated_at
+                    FROM portfolio_snapshots
+                    ORDER BY generated_at DESC, id DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise PortfolioRepositoryError(
+                "最新ポートフォリオ履歴を取得できませんでした。"
+            ) from error
+
+        if row is None:
+            return None
+
+        return self.get(self._parse_datetime(str(row[0])))
+
+    def list_recent(
+        self,
+        *,
+        limit: int = 100,
+    ) -> list[PortfolioSnapshot]:
+        """ポートフォリオ履歴を新しい順に返す。"""
+
+        if limit <= 0:
+            raise ValueError(
+                "取得件数は0より大きい必要があります。"
+            )
+
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT generated_at
+                    FROM portfolio_snapshots
+                    ORDER BY generated_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise PortfolioRepositoryError(
+                "ポートフォリオ履歴一覧を取得できませんでした。"
+            ) from error
+
+        return [
+            self.get(self._parse_datetime(str(row[0])))
+            for row in rows
+        ]
+
+    def count(self) -> int:
+        """保存済みポートフォリオ履歴件数を返す。"""
+
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT COUNT(*) FROM portfolio_snapshots"
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise PortfolioRepositoryError(
+                "ポートフォリオ履歴件数を取得できませんでした。"
+            ) from error
+
+        return int(row[0]) if row is not None else 0
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.database_path)
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
+
+    def _current_time(self) -> datetime:
+        current = self.now_provider()
+
+        if current.tzinfo is None:
+            raise ValueError(
+                "現在日時にはタイムゾーンが必要です。"
+            )
+
+        return current.astimezone(timezone.utc)
+
+    @staticmethod
+    def _normalize_datetime(
+        value: datetime,
+        name: str,
+    ) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError(
+                f"{name}にはタイムゾーンが必要です。"
+            )
+
+        return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _select_header_sql() -> str:
+        return """
+            SELECT
+                id,
+                generated_at,
+                currency,
+                cash_balance,
+                buying_power,
+                broker_market_value,
+                broker_equity
+            FROM portfolio_snapshots
+        """
+
+    @staticmethod
+    def _select_positions_sql() -> str:
+        return """
+            SELECT
+                position_id,
+                code,
+                side,
+                quantity,
+                average_cost,
+                market_price,
+                realized_profit_loss
+            FROM portfolio_snapshot_positions
+        """
+
+    @classmethod
+    def _rows_to_snapshot(
+        cls,
+        *,
+        header: tuple[object, ...],
+        position_rows: list[tuple[object, ...]],
+    ) -> PortfolioSnapshot:
+        positions = tuple(
+            PortfolioPositionSnapshot(
+                position_id=str(row[0]),
+                code=str(row[1]),
+                side=BrokerPositionSide(str(row[2])),
+                quantity=int(row[3]),
+                average_cost=float(row[4]),
+                market_price=float(row[5]),
+                realized_profit_loss=float(row[6]),
+            )
+            for row in position_rows
+        )
+
+        return PortfolioSnapshot(
+            currency=str(header[2]),
+            cash_balance=float(header[3]),
+            buying_power=float(header[4]),
+            broker_market_value=float(header[5]),
+            broker_equity=float(header[6]),
+            positions=positions,
+            generated_at=cls._parse_datetime(str(header[1])),
+        )
+
+    @staticmethod
+    def _parse_datetime(value: str) -> datetime:
+        parsed = datetime.fromisoformat(value)
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+
+        return parsed.astimezone(timezone.utc)
+
+
+================================================================================
+FILE: app\trading\portfolio_service.py
+================================================================================
+"""現在ポジションとBroker口座を集約する。"""
+
+from datetime import datetime, timezone
+from typing import Protocol
+
+from app.trading.broker_adapter import (
+    BrokerAccountSnapshot,
+    BrokerPosition,
+)
+from app.trading.portfolio_models import (
+    PortfolioPositionSnapshot,
+    PortfolioSnapshot,
+)
+from app.trading.position_models import TradingPositionRecord
+
+
+class PortfolioPositionReader(Protocol):
+    """現在ポジション取得処理のインターフェース。"""
+
+    def list_recent(
+        self,
+        *,
+        limit: int = 100,
+        code: str | None = None,
+        side=None,
+    ) -> list[TradingPositionRecord]:
+        """現在ポジション一覧を返す。"""
+
+
+class PortfolioBrokerReader(Protocol):
+    """Broker口座・ポジション取得処理のインターフェース。"""
+
+    def list_positions(self) -> list[BrokerPosition]:
+        """Broker上の現在ポジション一覧を返す。"""
+
+    def get_account(self) -> BrokerAccountSnapshot:
+        """Broker口座情報を返す。"""
+
+
+class PortfolioPriceUnavailableError(RuntimeError):
+    """現在価格を取得できないことを表す。"""
+
+
+class PortfolioConsistencyError(RuntimeError):
+    """ローカルとBrokerのポジション不整合を表す。"""
+
+
+class PortfolioService:
+    """現在ポジションとBroker口座を集約する。"""
+
+    def __init__(
+        self,
+        *,
+        position_repository: PortfolioPositionReader,
+        broker: PortfolioBrokerReader,
+    ) -> None:
+        """必要な依存関係を設定する。"""
+
+        self.position_repository = position_repository
+        self.broker = broker
+
+    def create_snapshot(
+        self,
+        *,
+        generated_at: datetime | None = None,
+    ) -> PortfolioSnapshot:
+        """現在のポートフォリオ評価を作成する。"""
+
+        resolved_generated_at = (
+            generated_at
+            if generated_at is not None
+            else datetime.now(timezone.utc)
+        )
+
+        if resolved_generated_at.tzinfo is None:
+            raise ValueError(
+                "集計日時にはタイムゾーンが必要です。"
+            )
+
+        account = self.broker.get_account()
+        broker_positions = self.broker.list_positions()
+
+        broker_position_map = {
+            (
+                position.code,
+                position.side,
+            ): position
+            for position in broker_positions
+        }
+
+        local_positions = (
+            self.position_repository.list_recent(
+                limit=10_000,
+            )
+        )
+
+        snapshots: list[
+            PortfolioPositionSnapshot
+        ] = []
+
+        for record in local_positions:
+            identity = (
+                record.code,
+                record.side,
+            )
+            broker_position = broker_position_map.get(
+                identity
+            )
+
+            if broker_position is None:
+                raise PortfolioConsistencyError(
+                    "Broker側に対応するポジションが"
+                    "存在しません。 "
+                    f"code={record.code} "
+                    f"side={record.side.value}"
+                )
+
+            if broker_position.quantity != record.quantity:
+                raise PortfolioConsistencyError(
+                    "ローカルとBrokerの保有数量が"
+                    "一致しません。 "
+                    f"code={record.code} "
+                    f"local={record.quantity} "
+                    f"broker={broker_position.quantity}"
+                )
+
+            if broker_position.market_price is None:
+                raise PortfolioPriceUnavailableError(
+                    "現在価格を取得できません。 "
+                    f"code={record.code}"
+                )
+
+            snapshots.append(
+                PortfolioPositionSnapshot(
+                    position_id=record.position_id,
+                    code=record.code,
+                    side=record.side,
+                    quantity=record.quantity,
+                    average_cost=(
+                        record.position.average_cost
+                    ),
+                    market_price=(
+                        broker_position.market_price
+                    ),
+                    realized_profit_loss=(
+                        record
+                        .position
+                        .realized_profit_loss
+                    ),
+                )
+            )
+
+        sorted_snapshots = tuple(
+            sorted(
+                snapshots,
+                key=lambda item: (
+                    item.code,
+                    item.side.value,
+                    item.position_id,
+                ),
+            )
+        )
+
+        return PortfolioSnapshot(
+            currency=account.currency,
+            cash_balance=account.cash_balance,
+            buying_power=account.buying_power,
+            broker_market_value=account.market_value,
+            broker_equity=account.equity,
+            positions=sorted_snapshots,
+            generated_at=(
+                resolved_generated_at.astimezone(
+                    timezone.utc
+                )
+            ),
+        )
+
+
+================================================================================
+FILE: tests\test_backtest_portfolio_update_service.py
+================================================================================
+"""BacktestPortfolioUpdateServiceの統合テスト。"""
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from app.backtest.backtest_portfolio_update_service import (
+    BacktestPortfolioUpdateService,
+)
+from app.database import initialize_database
+from app.trading.equity_curve_service import EquityCurveService
+from app.trading.order_models import OrderSide
+from app.trading.paper_broker import (
+    PaperBroker,
+    PaperBrokerSettings,
+)
+from app.trading.portfolio_repository import PortfolioRepository
+from app.trading.portfolio_service import PortfolioService
+from app.trading.position_repository import PositionRepository
+from app.trading.position_service import PositionService
+from app.trading.trade_execution_models import (
+    TradeExecution,
+    TradeExecutionRecord,
+)
+
+
+BASE_TIME = datetime(
+    2026,
+    7,
+    1,
+    0,
+    30,
+    tzinfo=timezone.utc,
+)
+
+
+class MutableClock:
+    """任意時点へ進められる時計。"""
+
+    def __init__(self, current: datetime) -> None:
+        self.current = current
+
+    def now(self) -> datetime:
+        return self.current
+
+
+def create_execution_record(
+    *,
+    record_id: int,
+    execution_id: str,
+    side: OrderSide,
+    quantity: int,
+    price: float,
+    executed_at: datetime,
+) -> TradeExecutionRecord:
+    """テスト用約定レコードを作成する。"""
+
+    return TradeExecutionRecord(
+        id=record_id,
+        execution=TradeExecution(
+            execution_id=execution_id,
+            signal_id=f"signal-{execution_id}",
+            order_id=f"order-{execution_id}",
+            broker_order_id=f"broker-{execution_id}",
+            code="7203",
+            side=side,
+            quantity=quantity,
+            execution_price=price,
+            executed_at=executed_at,
+            broker_name="paper",
+        ),
+        created_at=executed_at,
+        updated_at=executed_at,
+    )
+
+
+def create_environment(
+    tmp_path: Path,
+) -> tuple[
+    MutableClock,
+    PaperBroker,
+    PositionRepository,
+    PortfolioRepository,
+    BacktestPortfolioUpdateService,
+]:
+    """実SQLiteとPaperBrokerを使う統合環境を作成する。"""
+
+    database_path = tmp_path / "katana.db"
+    initialize_database(database_path)
+
+    clock = MutableClock(BASE_TIME)
+
+    broker = PaperBroker(
+        price_provider=lambda _code: 2500.0,
+        settings=PaperBrokerSettings(
+            initial_cash=1_000_000.0,
+        ),
+        now_provider=clock.now,
+    )
+
+    position_repository = PositionRepository(
+        database_path,
+        now_provider=clock.now,
+    )
+    position_service = PositionService(
+        database_path=database_path,
+        position_repository=position_repository,
+    )
+
+    portfolio_repository = PortfolioRepository(
+        database_path,
+        now_provider=clock.now,
+    )
+    portfolio_service = PortfolioService(
+        position_repository=position_repository,
+        broker=broker,
+    )
+    equity_curve_service = EquityCurveService(
+        portfolio_repository=portfolio_repository
+    )
+
+    service = BacktestPortfolioUpdateService(
+        position_service=position_service,
+        portfolio_service=portfolio_service,
+        portfolio_repository=portfolio_repository,
+        equity_curve_service=equity_curve_service,
+    )
+
+    return (
+        clock,
+        broker,
+        position_repository,
+        portfolio_repository,
+        service,
+    )
+
+
+def submit_broker_order(
+    *,
+    broker: PaperBroker,
+    execution_record: TradeExecutionRecord,
+) -> None:
+    """約定内容と同じ取引をPaperBrokerへ反映する。"""
+
+    from app.trading.order_models import (
+        OrderType,
+        TradeOrder,
+    )
+
+    execution = execution_record.execution
+
+    broker.submit_order(
+        TradeOrder(
+            order_id=execution.order_id,
+            signal_id=execution.signal_id,
+            code=execution.code,
+            side=execution.side,
+            order_type=OrderType.MARKET,
+            quantity=execution.quantity,
+        )
+    )
+
+
+def test_service_applies_buy_and_saves_portfolio(
+    tmp_path: Path,
+) -> None:
+    """買い約定をポジション・履歴・資産曲線へ反映する。"""
+
+    (
+        _clock,
+        broker,
+        position_repository,
+        portfolio_repository,
+        service,
+    ) = create_environment(tmp_path)
+
+    execution = create_execution_record(
+        record_id=1,
+        execution_id="execution-buy",
+        side=OrderSide.BUY,
+        quantity=100,
+        price=2500.0,
+        executed_at=BASE_TIME,
+    )
+
+    submit_broker_order(
+        broker=broker,
+        execution_record=execution,
+    )
+
+    result = service.apply_execution(execution)
+
+    assert result.position_was_applied
+    assert not result.position_closed
+    assert position_repository.count() == 1
+    assert portfolio_repository.count() == 1
+
+    snapshot = result.portfolio_snapshot
+
+    assert snapshot.position_count == 1
+    assert snapshot.cash_balance == pytest.approx(
+        750_000.0
+    )
+    assert snapshot.total_market_value == pytest.approx(
+        250_000.0
+    )
+    assert snapshot.broker_equity == pytest.approx(
+        1_000_000.0
+    )
+
+    report = result.equity_curve_report
+
+    assert report.point_count == 1
+    assert report.initial_equity == pytest.approx(
+        1_000_000.0
+    )
+    assert report.final_equity == pytest.approx(
+        1_000_000.0
+    )
+
+
+def test_service_updates_equity_curve_across_executions(
+    tmp_path: Path,
+) -> None:
+    """約定ごとにポートフォリオ履歴と資産曲線を更新する。"""
+
+    (
+        clock,
+        broker,
+        position_repository,
+        portfolio_repository,
+        service,
+    ) = create_environment(tmp_path)
+
+    buy = create_execution_record(
+        record_id=1,
+        execution_id="execution-buy",
+        side=OrderSide.BUY,
+        quantity=100,
+        price=2500.0,
+        executed_at=BASE_TIME,
+    )
+
+    submit_broker_order(
+        broker=broker,
+        execution_record=buy,
+    )
+    first = service.apply_execution(buy)
+
+    second_time = BASE_TIME + timedelta(minutes=5)
+    clock.current = second_time
+    broker.update_market_price(
+        "7203",
+        2600.0,
+    )
+
+    sell = create_execution_record(
+        record_id=2,
+        execution_id="execution-sell",
+        side=OrderSide.SELL,
+        quantity=100,
+        price=2500.0,
+        executed_at=second_time,
+    )
+
+    submit_broker_order(
+        broker=broker,
+        execution_record=sell,
+    )
+    second = service.apply_execution(sell)
+
+    assert first.position_was_applied
+    assert second.position_was_applied
+    assert second.position_closed
+    assert position_repository.count() == 0
+    assert portfolio_repository.count() == 2
+    assert second.equity_curve_report.point_count == 2
+    assert second.equity_curve_report.final_equity == pytest.approx(
+        1_000_000.0
+    )
+
+def test_service_is_idempotent_for_position_application(
+    tmp_path: Path,
+) -> None:
+    """同じ約定のポジション反映は二重実行しない。"""
+
+    (
+        _clock,
+        broker,
+        position_repository,
+        _portfolio_repository,
+        service,
+    ) = create_environment(tmp_path)
+
+    execution = create_execution_record(
+        record_id=1,
+        execution_id="execution-buy",
+        side=OrderSide.BUY,
+        quantity=100,
+        price=2500.0,
+        executed_at=BASE_TIME,
+    )
+
+    submit_broker_order(
+        broker=broker,
+        execution_record=execution,
+    )
+
+    first = service.apply_execution(execution)
+
+    assert first.position_was_applied
+    assert position_repository.list_recent()[0].quantity == 100
+
+
+def test_service_rejects_invalid_equity_curve_limit(
+    tmp_path: Path,
+) -> None:
+    """0以下の履歴取得件数を拒否する。"""
+
+    (
+        _clock,
+        _broker,
+        _position_repository,
+        _portfolio_repository,
+        service,
+    ) = create_environment(tmp_path)
+
+    execution = create_execution_record(
+        record_id=1,
+        execution_id="execution-buy",
+        side=OrderSide.BUY,
+        quantity=100,
+        price=2500.0,
+        executed_at=BASE_TIME,
+    )
+
+    with pytest.raises(ValueError, match="取得件数"):
+        service.apply_execution(
+            execution,
+            equity_curve_limit=0,
+        )
+
+    with pytest.raises(ValueError, match="取得件数"):
+        service.apply_executions(
+            (),
+            equity_curve_limit=0,
+        )
+
+
+def test_service_returns_empty_batch_result(
+    tmp_path: Path,
+) -> None:
+    """約定がなければ空の結果を返す。"""
+
+    (
+        _clock,
+        _broker,
+        _position_repository,
+        _portfolio_repository,
+        service,
+    ) = create_environment(tmp_path)
+
+    result = service.apply_executions(())
+
+    assert result.items == ()
+    assert result.processed_count == 0
+    assert result.applied_count == 0
+    assert result.latest_snapshot is None
+    assert result.latest_equity_curve is None
+
+
+================================================================================
+FILE: tests\test_market_aware_trading_loop_runner.py
+================================================================================
+"""MarketAwareTradingLoopRunnerのテスト。"""
+
+from datetime import datetime, timezone
+
+from app.application.market_aware_trading_loop_runner import (
+    MarketAwareTradingLoopRunner,
+)
+from app.application.trading_loop_models import (
+    TradingLoopCycleStatus,
+)
+from app.application.trading_loop_runner_models import (
+    TradingLoopRunnerStopReason,
+)
+from app.market.market_clock import (
+    TokyoMarketClockSnapshot,
+)
+from app.market.market_session import (
+    TokyoMarketSession,
+)
+
+
+NOW = datetime(
+    2026,
+    7,
+    21,
+    0,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+class FakeCycle:
+    def __init__(self, number: int) -> None:
+        self.cycle_number = number
+        self.started_at = NOW
+        self.completed_at = NOW
+        self.status = TradingLoopCycleStatus.COMPLETED
+        self.error_message = None
+
+    @property
+    def is_successful(self) -> bool:
+        return True
+
+    @property
+    def signal_count(self) -> int:
+        return 0
+
+    @property
+    def execution_count(self) -> int:
+        return 0
+
+
+class FakeComponent:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run_cycle(self):
+        self.calls += 1
+        return FakeCycle(self.calls)
+
+
+class SequenceClock:
+    def __init__(self, snapshots) -> None:
+        self.snapshots = list(snapshots)
+        self.calls = 0
+
+    def snapshot(self, _observed_at):
+        index = min(
+            self.calls,
+            len(self.snapshots) - 1,
+        )
+        self.calls += 1
+        return self.snapshots[index]
+
+
+def clock_snapshot(
+    *,
+    session: TokyoMarketSession,
+    wait_seconds: float,
+) -> TokyoMarketClockSnapshot:
+    return TokyoMarketClockSnapshot(
+        observed_at=NOW,
+        local_at=NOW,
+        business_day=(
+            session is not TokyoMarketSession.CLOSED
+        ),
+        session=session,
+        next_trading_at=NOW,
+        wait_seconds=wait_seconds,
+    )
+
+
+def test_runner_waits_while_market_closed_then_runs() -> None:
+    component = FakeComponent()
+    sleeps = []
+    market_clock = SequenceClock(
+        (
+            clock_snapshot(
+                session=TokyoMarketSession.LUNCH,
+                wait_seconds=1800.0,
+            ),
+            clock_snapshot(
+                session=TokyoMarketSession.MORNING,
+                wait_seconds=0.0,
+            ),
+        )
+    )
+    runner = MarketAwareTradingLoopRunner(
+        component=component,
+        market_clock=market_clock,
+        cycle_interval_seconds=10.0,
+        maximum_cycles=1,
+        now_provider=lambda: NOW,
+        sleeper=sleeps.append,
+    )
+
+    result = runner.run()
+
+    assert result.stop_reason is (
+        TradingLoopRunnerStopReason.MAX_CYCLES_REACHED
+    )
+    assert component.calls == 1
+    assert sleeps == [300.0]
+
+
+def test_runner_can_stop_immediately_after_close() -> None:
+    component = FakeComponent()
+    runner = MarketAwareTradingLoopRunner(
+        component=component,
+        market_clock=SequenceClock(
+            (
+                clock_snapshot(
+                    session=TokyoMarketSession.AFTER_CLOSE,
+                    wait_seconds=60000.0,
+                ),
+            )
+        ),
+        stop_after_market_close=True,
+        now_provider=lambda: NOW,
+        sleeper=lambda _seconds: None,
+    )
+
+    result = runner.run()
+
+    assert result.stop_reason is (
+        TradingLoopRunnerStopReason.STOP_REQUESTED
+    )
+    assert component.calls == 0
+
+
+def test_runner_honors_external_stop_request() -> None:
+    component = FakeComponent()
+    runner = MarketAwareTradingLoopRunner(
+        component=component,
+        market_clock=SequenceClock(
+            (
+                clock_snapshot(
+                    session=TokyoMarketSession.MORNING,
+                    wait_seconds=0.0,
+                ),
+            )
+        ),
+        now_provider=lambda: NOW,
+        stop_requested=lambda: True,
+    )
+
+    result = runner.run()
+
+    assert result.stop_reason is (
+        TradingLoopRunnerStopReason.STOP_REQUESTED
+    )
+    assert component.calls == 0
+
+
+================================================================================
+FILE: tests\test_paper_trading_runtime.py
+================================================================================
+"""PaperTradingRuntimeのテスト。"""
+
+from datetime import datetime, timezone
+
+import pytest
+
+from app.application.trading_loop_models import (
+    TradingLoopCycleStatus,
+)
+from app.runtime.paper_trading_runtime import (
+    PaperTradingRuntime,
+)
+from app.runtime.paper_trading_runtime_models import (
+    PaperTradingRuntimeStatus,
+)
+from app.trading.portfolio_models import PortfolioSnapshot
+
+
+NOW = datetime(
+    2026,
+    7,
+    18,
+    0,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+class FakeCycle:
+    def __init__(self, number: int) -> None:
+        self.cycle_number = number
+        self.status = TradingLoopCycleStatus.COMPLETED
+        self.error_message = None
+
+    @property
+    def is_successful(self) -> bool:
+        return True
+
+    @property
+    def signal_count(self) -> int:
+        return 1
+
+    @property
+    def execution_count(self) -> int:
+        return 1
+
+
+class FakeCycleRunner:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run_cycle(self):
+        self.calls += 1
+        return FakeCycle(self.calls)
+
+
+class FakePortfolioReader:
+    def __init__(self, equities) -> None:
+        self.equities = list(equities)
+        self.calls = 0
+
+    def create_snapshot(
+        self,
+        *,
+        generated_at=None,
+    ) -> PortfolioSnapshot:
+        equity = self.equities[self.calls]
+        self.calls += 1
+        return PortfolioSnapshot(
+            currency="JPY",
+            cash_balance=equity,
+            buying_power=equity,
+            broker_market_value=0.0,
+            broker_equity=equity,
+            positions=(),
+            generated_at=generated_at,
+        )
+
+
+def create_runtime():
+    return PaperTradingRuntime(
+        cycle_runner=FakeCycleRunner(),
+        portfolio_reader=FakePortfolioReader(
+            (
+                1_000_000.0,
+                1_005_000.0,
+                1_010_000.0,
+                1_010_000.0,
+            )
+        ),
+        now_provider=lambda: NOW,
+    )
+
+
+def test_runtime_records_cycles_and_completes() -> None:
+    runtime = create_runtime()
+
+    runtime.start()
+    runtime.run_cycle()
+    runtime.run_cycle()
+    summary = runtime.complete()
+
+    assert summary.status is (
+        PaperTradingRuntimeStatus.COMPLETED
+    )
+    assert summary.cycle_count == 2
+    assert summary.initial_equity == 1_000_000.0
+    assert summary.final_equity == 1_010_000.0
+    assert summary.net_profit_loss == 10_000.0
+    assert len(runtime.records()) == 2
+
+
+def test_runtime_can_fail_with_summary() -> None:
+    runtime = create_runtime()
+
+    runtime.start()
+    summary = runtime.fail(
+        error_message="runtime failed"
+    )
+
+    assert summary.status is (
+        PaperTradingRuntimeStatus.FAILED
+    )
+    assert summary.error_message == "runtime failed"
+
+
+def test_runtime_rejects_cycle_before_start() -> None:
+    runtime = create_runtime()
+
+    with pytest.raises(
+        RuntimeError,
+        match="稼働していません",
+    ):
+        runtime.run_cycle()
+
+
+def test_runtime_rejects_double_start() -> None:
+    runtime = create_runtime()
+    runtime.start()
+
+    with pytest.raises(
+        RuntimeError,
+        match="すでに稼働中",
+    ):
+        runtime.start()
+
+
+================================================================================
+FILE: tests\test_paper_trading_runtime_models.py
+================================================================================
+"""Paper Trading Runtimeモデルのテスト。"""
+
+from datetime import datetime, timezone
+
+import pytest
+
+from app.application.trading_loop_models import (
+    TradingLoopCycleStatus,
+)
+from app.runtime.paper_trading_runtime_models import (
+    PaperTradingCycleRecord,
+    PaperTradingDailySummary,
+    PaperTradingRuntimeStatus,
+)
+
+
+NOW = datetime(
+    2026,
+    7,
+    18,
+    0,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+class FakeCycle:
+    def __init__(
+        self,
+        number: int,
+        status: TradingLoopCycleStatus,
+    ) -> None:
+        self.cycle_number = number
+        self.status = status
+        self.error_message = (
+            None
+            if status is TradingLoopCycleStatus.COMPLETED
+            else "failed"
+        )
+
+    @property
+    def is_successful(self) -> bool:
+        return (
+            self.status
+            is TradingLoopCycleStatus.COMPLETED
+        )
+
+    @property
+    def signal_count(self) -> int:
+        return 2
+
+    @property
+    def execution_count(self) -> int:
+        return 1
+
+
+def record(
+    number: int,
+    status: TradingLoopCycleStatus,
+) -> PaperTradingCycleRecord:
+    return PaperTradingCycleRecord(
+        cycle_result=FakeCycle(number, status),
+        portfolio_snapshot=None,
+    )
+
+
+def test_daily_summary_calculates_counts_and_return() -> None:
+    summary = PaperTradingDailySummary(
+        trading_date=NOW.date(),
+        started_at=NOW,
+        completed_at=NOW,
+        status=PaperTradingRuntimeStatus.COMPLETED,
+        records=(
+            record(
+                1,
+                TradingLoopCycleStatus.COMPLETED,
+            ),
+            record(
+                2,
+                TradingLoopCycleStatus.FAILED,
+            ),
+        ),
+        initial_equity=1_000_000.0,
+        final_equity=1_010_000.0,
+    )
+
+    assert summary.cycle_count == 2
+    assert summary.successful_cycle_count == 1
+    assert summary.failed_cycle_count == 1
+    assert summary.signal_count == 4
+    assert summary.execution_count == 2
+    assert summary.net_profit_loss == 10_000.0
+    assert summary.return_rate == pytest.approx(0.01)
+
+
+def test_failed_summary_requires_error_message() -> None:
+    with pytest.raises(
+        ValueError,
+        match="エラーメッセージ",
+    ):
+        PaperTradingDailySummary(
+            trading_date=NOW.date(),
+            started_at=NOW,
+            completed_at=NOW,
+            status=PaperTradingRuntimeStatus.FAILED,
+            records=(),
+            initial_equity=1_000_000.0,
+            final_equity=1_000_000.0,
+        )
+
+
+def test_summary_requires_consecutive_cycles() -> None:
+    with pytest.raises(ValueError, match="連番"):
+        PaperTradingDailySummary(
+            trading_date=NOW.date(),
+            started_at=NOW,
+            completed_at=NOW,
+            status=PaperTradingRuntimeStatus.COMPLETED,
+            records=(
+                record(
+                    2,
+                    TradingLoopCycleStatus.COMPLETED,
+                ),
+            ),
+            initial_equity=1_000_000.0,
+            final_equity=1_000_000.0,
+        )
+
+
+================================================================================
+FILE: tests\test_paper_trading_runtime_persistence.py
+================================================================================
+"""PaperTradingRuntimePersistenceServiceのテスト。"""
+
+from datetime import datetime, timezone
+
+from app.runtime.paper_trading_daily_repository import (
+    PaperTradingDailySummaryRepository,
+)
+from app.runtime.paper_trading_persistence_service import (
+    PaperTradingPersistenceService,
+)
+from app.runtime.paper_trading_runtime_models import (
+    PaperTradingDailySummary,
+    PaperTradingRuntimeStatus,
+)
+from app.runtime.paper_trading_runtime_persistence import (
+    PaperTradingRuntimePersistenceService,
+)
+
+
+NOW = datetime(
+    2026,
+    7,
+    18,
+    0,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+class FakeRuntime:
+    def complete(self) -> PaperTradingDailySummary:
+        return PaperTradingDailySummary(
+            trading_date=NOW.date(),
+            started_at=NOW,
+            completed_at=NOW,
+            status=PaperTradingRuntimeStatus.COMPLETED,
+            records=(),
+            initial_equity=1_000_000.0,
+            final_equity=1_010_000.0,
+        )
+
+    def fail(
+        self,
+        *,
+        error_message: str,
+    ) -> PaperTradingDailySummary:
+        return PaperTradingDailySummary(
+            trading_date=NOW.date(),
+            started_at=NOW,
+            completed_at=NOW,
+            status=PaperTradingRuntimeStatus.FAILED,
+            records=(),
+            initial_equity=1_000_000.0,
+            final_equity=990_000.0,
+            error_message=error_message,
+        )
+
+
+def create_service(tmp_path):
+    repository = PaperTradingDailySummaryRepository(
+        tmp_path / "katana.db",
+        now_provider=lambda: NOW,
+    )
+    persistence = PaperTradingPersistenceService(
+        daily_repository=repository
+    )
+    service = PaperTradingRuntimePersistenceService(
+        runtime=FakeRuntime(),
+        persistence_service=persistence,
+    )
+    return service, repository
+
+
+def test_complete_and_persist(
+    tmp_path,
+) -> None:
+    service, repository = create_service(tmp_path)
+
+    result = service.complete_and_persist()
+
+    assert result.summary.status is (
+        PaperTradingRuntimeStatus.COMPLETED
+    )
+    assert repository.count() == 1
+
+
+def test_fail_and_persist(
+    tmp_path,
+) -> None:
+    service, repository = create_service(tmp_path)
+
+    result = service.fail_and_persist(
+        error_message="runtime failed"
+    )
+    loaded = repository.get(NOW.date())
+
+    assert result.summary.status is (
+        PaperTradingRuntimeStatus.FAILED
+    )
+    assert loaded is not None
+    assert loaded.error_message == "runtime failed"
+    assert loaded.net_profit_loss == -10_000.0
+
+
+================================================================================
+FILE: tests\test_portfolio_audit_service.py
+================================================================================
+"""PortfolioAuditServiceのテスト。"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from app.trading.broker_adapter import (
+    BrokerAccountSnapshot,
+    BrokerPosition,
+    BrokerPositionSide,
+)
+from app.trading.portfolio_audit_models import (
+    PortfolioAuditIssueType,
+    PortfolioAuditTolerance,
+)
+from app.trading.portfolio_audit_service import (
+    PortfolioAuditService,
+)
+from app.trading.portfolio_models import PortfolioSnapshot
+from app.trading.position_models import (
+    TradingPosition,
+    TradingPositionRecord,
+)
+
+
+NOW = datetime(
+    2026,
+    7,
+    17,
+    6,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+def local_position(
+    *,
+    code: str = "7203",
+    quantity: int = 100,
+    average_cost: float = 2500.0,
+) -> TradingPositionRecord:
+    return TradingPositionRecord(
+        id=1,
+        position=TradingPosition(
+            position_id=f"position-{code}-long",
+            code=code,
+            side=BrokerPositionSide.LONG,
+            quantity=quantity,
+            average_cost=average_cost,
+            realized_profit_loss=0.0,
+            opened_at=NOW,
+        ),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def broker_position(
+    *,
+    code: str = "7203",
+    quantity: int = 100,
+    average_price: float = 2500.0,
+) -> BrokerPosition:
+    return BrokerPosition(
+        code=code,
+        side=BrokerPositionSide.LONG,
+        quantity=quantity,
+        average_price=average_price,
+        market_price=2600.0,
+        updated_at=NOW,
+    )
+
+
+def account(
+    *,
+    cash: float = 750_000.0,
+    buying_power: float = 750_000.0,
+    market_value: float = 260_000.0,
+    equity: float = 1_010_000.0,
+) -> BrokerAccountSnapshot:
+    return BrokerAccountSnapshot(
+        currency="JPY",
+        cash_balance=cash,
+        buying_power=buying_power,
+        market_value=market_value,
+        equity=equity,
+        updated_at=NOW,
+    )
+
+
+def local_portfolio(
+    *,
+    cash: float = 750_000.0,
+    buying_power: float = 750_000.0,
+    market_value: float = 260_000.0,
+    equity: float = 1_010_000.0,
+) -> PortfolioSnapshot:
+    return PortfolioSnapshot(
+        currency="JPY",
+        cash_balance=cash,
+        buying_power=buying_power,
+        broker_market_value=market_value,
+        broker_equity=equity,
+        positions=(),
+        generated_at=NOW,
+    )
+
+
+class FakePositionRepository:
+    def __init__(
+        self,
+        positions: list[TradingPositionRecord],
+    ) -> None:
+        self.positions = positions
+
+    def list_recent(
+        self,
+        *,
+        limit: int = 100,
+        code=None,
+        side=None,
+    ) -> list[TradingPositionRecord]:
+        return list(self.positions)
+
+
+class FakeBroker:
+    def __init__(
+        self,
+        *,
+        positions: list[BrokerPosition],
+        broker_account: BrokerAccountSnapshot | None = None,
+    ) -> None:
+        self.positions = positions
+        self.broker_account = (
+            broker_account
+            if broker_account is not None
+            else account()
+        )
+
+    def get_account(self) -> BrokerAccountSnapshot:
+        return self.broker_account
+
+    def list_positions(self) -> list[BrokerPosition]:
+        return list(self.positions)
+
+
+def audit(
+    *,
+    local_positions: list[TradingPositionRecord],
+    broker_positions: list[BrokerPosition],
+    portfolio: PortfolioSnapshot | None = None,
+    tolerance: PortfolioAuditTolerance | None = None,
+):
+    return PortfolioAuditService(
+        position_repository=FakePositionRepository(
+            local_positions
+        ),
+        broker=FakeBroker(
+            positions=broker_positions
+        ),
+        tolerance=tolerance,
+    ).audit(
+        local_portfolio=portfolio
+    )
+
+
+def test_consistent_positions_return_empty_report() -> None:
+    report = audit(
+        local_positions=[local_position()],
+        broker_positions=[broker_position()],
+        portfolio=local_portfolio(),
+    )
+
+    assert report.is_consistent
+    assert report.issue_count == 0
+
+
+def test_detects_broker_only_position() -> None:
+    report = audit(
+        local_positions=[],
+        broker_positions=[broker_position()],
+    )
+
+    assert report.has_errors
+    assert report.issues[0].issue_type is (
+        PortfolioAuditIssueType
+        .BROKER_POSITION_MISSING_LOCALLY
+    )
+
+
+def test_detects_local_only_position() -> None:
+    report = audit(
+        local_positions=[local_position()],
+        broker_positions=[],
+    )
+
+    assert report.issues[0].issue_type is (
+        PortfolioAuditIssueType
+        .LOCAL_POSITION_MISSING_AT_BROKER
+    )
+
+
+def test_detects_quantity_mismatch() -> None:
+    report = audit(
+        local_positions=[
+            local_position(quantity=100)
+        ],
+        broker_positions=[
+            broker_position(quantity=80)
+        ],
+    )
+
+    assert report.error_count == 1
+    assert report.issues[0].issue_type is (
+        PortfolioAuditIssueType.QUANTITY_MISMATCH
+    )
+
+
+def test_detects_average_price_mismatch_as_warning() -> None:
+    report = audit(
+        local_positions=[
+            local_position(average_cost=2500.0)
+        ],
+        broker_positions=[
+            broker_position(average_price=2501.0)
+        ],
+        tolerance=PortfolioAuditTolerance(
+            price_absolute=0.1
+        ),
+    )
+
+    assert report.warning_count == 1
+    assert report.error_count == 0
+    assert report.issues[0].issue_type is (
+        PortfolioAuditIssueType
+        .AVERAGE_PRICE_MISMATCH
+    )
+
+
+def test_average_price_within_tolerance_is_ignored() -> None:
+    report = audit(
+        local_positions=[
+            local_position(average_cost=2500.0)
+        ],
+        broker_positions=[
+            broker_position(average_price=2500.05)
+        ],
+        tolerance=PortfolioAuditTolerance(
+            price_absolute=0.1
+        ),
+    )
+
+    assert report.is_consistent
+
+
+def test_detects_account_value_mismatches() -> None:
+    report = audit(
+        local_positions=[],
+        broker_positions=[],
+        portfolio=local_portfolio(
+            cash=700_000.0,
+            buying_power=700_000.0,
+            market_value=200_000.0,
+            equity=900_000.0,
+        ),
+    )
+
+    assert report.error_count == 4
+    assert {
+        issue.issue_type
+        for issue in report.issues
+    } == {
+        PortfolioAuditIssueType.CASH_BALANCE_MISMATCH,
+        PortfolioAuditIssueType.BUYING_POWER_MISMATCH,
+        PortfolioAuditIssueType.MARKET_VALUE_MISMATCH,
+        PortfolioAuditIssueType.EQUITY_MISMATCH,
+    }
+
+
+def test_account_values_within_tolerance_are_ignored() -> None:
+    report = audit(
+        local_positions=[],
+        broker_positions=[],
+        portfolio=local_portfolio(
+            cash=750_000.5,
+            buying_power=750_000.5,
+            market_value=260_000.5,
+            equity=1_010_000.5,
+        ),
+        tolerance=PortfolioAuditTolerance(
+            money_absolute=1.0
+        ),
+    )
+
+    assert report.is_consistent
+
+
+================================================================================
+FILE: tests\test_portfolio_repository.py
+================================================================================
+"""PortfolioRepositoryの統合テスト。"""
+
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from app.database import SCHEMA_VERSION, initialize_database
+from app.trading.broker_adapter import BrokerPositionSide
+from app.trading.portfolio_models import (
+    PortfolioPositionSnapshot,
+    PortfolioSnapshot,
+)
+from app.trading.portfolio_repository import (
+    DuplicatePortfolioSnapshotError,
+    PortfolioRepository,
+    PortfolioSnapshotNotFoundError,
+)
+
+
+GENERATED_AT = datetime(
+    2026,
+    7,
+    20,
+    1,
+    0,
+    tzinfo=timezone.utc,
+)
+CREATED_AT = GENERATED_AT + timedelta(seconds=1)
+
+
+def create_snapshot(
+    *,
+    generated_at: datetime = GENERATED_AT,
+    with_position: bool = True,
+) -> PortfolioSnapshot:
+    positions = (
+        (
+            PortfolioPositionSnapshot(
+                position_id="position-7203-long",
+                code="7203",
+                side=BrokerPositionSide.LONG,
+                quantity=100,
+                average_cost=2500.0,
+                market_price=2600.0,
+                realized_profit_loss=5000.0,
+            ),
+        )
+        if with_position
+        else ()
+    )
+
+    return PortfolioSnapshot(
+        currency="JPY",
+        cash_balance=750_000.0,
+        buying_power=750_000.0,
+        broker_market_value=260_000.0 if with_position else 0.0,
+        broker_equity=1_010_000.0 if with_position else 750_000.0,
+        positions=positions,
+        generated_at=generated_at,
+    )
+
+
+def create_repository(
+    tmp_path: Path,
+) -> tuple[Path, PortfolioRepository]:
+    database_path = tmp_path / "katana.db"
+    initialize_database(database_path)
+
+    return (
+        database_path,
+        PortfolioRepository(
+            database_path,
+            now_provider=lambda: CREATED_AT,
+        ),
+    )
+
+
+def test_initialize_database_creates_portfolio_tables(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "katana.db"
+    initialize_database(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name IN (
+                  'portfolio_snapshots',
+                  'portfolio_snapshot_positions'
+              )
+            ORDER BY name
+            """
+        ).fetchall()
+        version_row = connection.execute(
+            """
+            SELECT version
+            FROM schema_version
+            WHERE id = 1
+            """
+        ).fetchone()
+
+    assert rows == [
+        ("portfolio_snapshot_positions",),
+        ("portfolio_snapshots",),
+    ]
+    assert version_row == (SCHEMA_VERSION,)
+def test_repository_saves_and_reads_snapshot(
+    tmp_path: Path,
+) -> None:
+    _database_path, repository = create_repository(tmp_path)
+    snapshot = create_snapshot()
+
+    saved = repository.save(snapshot)
+
+    assert saved == snapshot
+    assert repository.get(GENERATED_AT) == snapshot
+    assert repository.count() == 1
+
+
+def test_repository_saves_empty_snapshot(
+    tmp_path: Path,
+) -> None:
+    _database_path, repository = create_repository(tmp_path)
+    snapshot = create_snapshot(with_position=False)
+
+    saved = repository.save(snapshot)
+
+    assert saved.position_count == 0
+    assert saved.positions == ()
+    assert repository.count() == 1
+
+
+def test_repository_rejects_duplicate_generated_at(
+    tmp_path: Path,
+) -> None:
+    _database_path, repository = create_repository(tmp_path)
+    repository.save(create_snapshot())
+
+    with pytest.raises(
+        DuplicatePortfolioSnapshotError,
+        match="同じ集計日時",
+    ):
+        repository.save(create_snapshot())
+
+
+def test_repository_returns_latest_snapshot(
+    tmp_path: Path,
+) -> None:
+    _database_path, repository = create_repository(tmp_path)
+    earlier = create_snapshot()
+    later = create_snapshot(
+        generated_at=GENERATED_AT + timedelta(minutes=1),
+        with_position=False,
+    )
+
+    repository.save(earlier)
+    repository.save(later)
+
+    assert repository.latest() == later
+    assert repository.count() == 2
+
+
+def test_repository_returns_none_when_empty(
+    tmp_path: Path,
+) -> None:
+    _database_path, repository = create_repository(tmp_path)
+
+    assert repository.latest() is None
+    assert repository.list_recent() == []
+    assert repository.count() == 0
+
+
+def test_repository_lists_recent_snapshots(
+    tmp_path: Path,
+) -> None:
+    _database_path, repository = create_repository(tmp_path)
+    earlier = create_snapshot()
+    later = create_snapshot(
+        generated_at=GENERATED_AT + timedelta(minutes=1),
+        with_position=False,
+    )
+
+    repository.save(earlier)
+    repository.save(later)
+
+    assert repository.list_recent() == [later, earlier]
+    assert repository.list_recent(limit=1) == [later]
+
+
+def test_repository_rejects_missing_snapshot(
+    tmp_path: Path,
+) -> None:
+    _database_path, repository = create_repository(tmp_path)
+
+    with pytest.raises(
+        PortfolioSnapshotNotFoundError,
+        match="存在しません",
+    ):
+        repository.get(GENERATED_AT)
+
+
+def test_repository_rejects_invalid_limit(
+    tmp_path: Path,
+) -> None:
+    _database_path, repository = create_repository(tmp_path)
+
+    with pytest.raises(ValueError, match="取得件数"):
+        repository.list_recent(limit=0)
+
+
+def test_repository_normalizes_generated_at_to_utc(
+    tmp_path: Path,
+) -> None:
+    _database_path, repository = create_repository(tmp_path)
+    jst = timezone(timedelta(hours=9))
+    jst_generated_at = datetime(
+        2026,
+        7,
+        20,
+        10,
+        0,
+        tzinfo=jst,
+    )
+
+    saved = repository.save(
+        create_snapshot(
+            generated_at=jst_generated_at
+        )
+    )
+
+    assert saved.generated_at == GENERATED_AT
+
+
+================================================================================
+FILE: tests\test_portfolio_service.py
+================================================================================
+"""PortfolioServiceの統合テスト。"""
+
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+from app.database import initialize_database
+from app.trading.broker_adapter import (
+    BrokerAccountSnapshot,
+    BrokerPosition,
+    BrokerPositionSide,
+)
+from app.trading.portfolio_service import (
+    PortfolioConsistencyError,
+    PortfolioPriceUnavailableError,
+    PortfolioService,
+)
+from app.trading.position_models import TradingPosition
+from app.trading.position_repository import PositionRepository
+
+
+CURRENT_TIME = datetime(
+    2026,
+    7,
+    20,
+    1,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+class StaticBroker:
+    """固定口座・ポジションを返すBroker。"""
+
+    def __init__(
+        self,
+        *,
+        positions: list[BrokerPosition],
+        account: BrokerAccountSnapshot,
+    ) -> None:
+        self.positions = positions
+        self.account = account
+
+    def list_positions(self) -> list[BrokerPosition]:
+        return list(self.positions)
+
+    def get_account(self) -> BrokerAccountSnapshot:
+        return self.account
+
+
+def create_repository(
+    tmp_path: Path,
+) -> PositionRepository:
+    """初期化済みPositionRepositoryを作成する。"""
+
+    database_path = tmp_path / "katana.db"
+    initialize_database(database_path)
+
+    return PositionRepository(
+        database_path,
+        now_provider=lambda: CURRENT_TIME,
+    )
+
+
+def create_account(
+    *,
+    cash_balance: float = 750_000.0,
+    buying_power: float = 750_000.0,
+    market_value: float = 260_000.0,
+    equity: float = 1_010_000.0,
+) -> BrokerAccountSnapshot:
+    """固定口座Snapshotを作成する。"""
+
+    return BrokerAccountSnapshot(
+        currency="JPY",
+        cash_balance=cash_balance,
+        buying_power=buying_power,
+        market_value=market_value,
+        equity=equity,
+        updated_at=CURRENT_TIME,
+    )
+
+
+def create_local_position(
+    repository: PositionRepository,
+    *,
+    quantity: int = 100,
+    average_cost: float = 2500.0,
+    realized_profit_loss: float = 5000.0,
+) -> None:
+    """ローカル現在ポジションを保存する。"""
+
+    repository.create(
+        TradingPosition(
+            position_id="position-7203-long",
+            code="7203",
+            side=BrokerPositionSide.LONG,
+            quantity=quantity,
+            average_cost=average_cost,
+            realized_profit_loss=realized_profit_loss,
+            opened_at=CURRENT_TIME,
+        )
+    )
+
+
+def create_broker_position(
+    *,
+    quantity: int = 100,
+    average_price: float = 2500.0,
+    market_price: float | None = 2600.0,
+) -> BrokerPosition:
+    """Broker現在ポジションを作成する。"""
+
+    return BrokerPosition(
+        code="7203",
+        side=BrokerPositionSide.LONG,
+        quantity=quantity,
+        average_price=average_price,
+        market_price=market_price,
+        updated_at=CURRENT_TIME,
+    )
+
+
+def test_service_creates_portfolio_snapshot(
+    tmp_path: Path,
+) -> None:
+    """現在ポジションと口座情報を集約する。"""
+
+    repository = create_repository(tmp_path)
+    create_local_position(repository)
+
+    service = PortfolioService(
+        position_repository=repository,
+        broker=StaticBroker(
+            positions=[create_broker_position()],
+            account=create_account(),
+        ),
+    )
+
+    snapshot = service.create_snapshot(
+        generated_at=CURRENT_TIME
+    )
+
+    assert snapshot.currency == "JPY"
+    assert snapshot.cash_balance == pytest.approx(
+        750_000.0
+    )
+    assert snapshot.buying_power == pytest.approx(
+        750_000.0
+    )
+    assert snapshot.position_count == 1
+    assert snapshot.total_acquisition_value == pytest.approx(
+        250_000.0
+    )
+    assert snapshot.total_market_value == pytest.approx(
+        260_000.0
+    )
+    assert (
+        snapshot.total_unrealized_profit_loss
+        == pytest.approx(10_000.0)
+    )
+    assert snapshot.total_realized_profit_loss == pytest.approx(
+        5000.0
+    )
+    assert snapshot.calculated_equity == pytest.approx(
+        1_010_000.0
+    )
+    assert snapshot.broker_equity == pytest.approx(
+        1_010_000.0
+    )
+    assert snapshot.generated_at == CURRENT_TIME
+
+
+def test_service_returns_empty_portfolio(
+    tmp_path: Path,
+) -> None:
+    """現在ポジションがなければ空の集計を返す。"""
+
+    repository = create_repository(tmp_path)
+
+    service = PortfolioService(
+        position_repository=repository,
+        broker=StaticBroker(
+            positions=[],
+            account=create_account(
+                cash_balance=1_000_000.0,
+                buying_power=1_000_000.0,
+                market_value=0.0,
+                equity=1_000_000.0,
+            ),
+        ),
+    )
+
+    snapshot = service.create_snapshot(
+        generated_at=CURRENT_TIME
+    )
+
+    assert snapshot.position_count == 0
+    assert snapshot.total_acquisition_value == 0
+    assert snapshot.total_market_value == 0
+    assert snapshot.total_unrealized_profit_loss == 0
+    assert snapshot.total_realized_profit_loss == 0
+    assert snapshot.calculated_equity == pytest.approx(
+        1_000_000.0
+    )
+
+
+def test_service_rejects_missing_broker_position(
+    tmp_path: Path,
+) -> None:
+    """Broker側に対応ポジションがなければ拒否する。"""
+
+    repository = create_repository(tmp_path)
+    create_local_position(repository)
+
+    service = PortfolioService(
+        position_repository=repository,
+        broker=StaticBroker(
+            positions=[],
+            account=create_account(),
+        ),
+    )
+
+    with pytest.raises(
+        PortfolioConsistencyError,
+        match="存在しません",
+    ):
+        service.create_snapshot(
+            generated_at=CURRENT_TIME
+        )
+
+
+def test_service_rejects_quantity_mismatch(
+    tmp_path: Path,
+) -> None:
+    """ローカルとBrokerの数量不一致を拒否する。"""
+
+    repository = create_repository(tmp_path)
+    create_local_position(repository, quantity=100)
+
+    service = PortfolioService(
+        position_repository=repository,
+        broker=StaticBroker(
+            positions=[
+                create_broker_position(quantity=90)
+            ],
+            account=create_account(),
+        ),
+    )
+
+    with pytest.raises(
+        PortfolioConsistencyError,
+        match="一致しません",
+    ):
+        service.create_snapshot(
+            generated_at=CURRENT_TIME
+        )
+
+
+def test_service_rejects_missing_market_price(
+    tmp_path: Path,
+) -> None:
+    """現在価格がなければ評価を拒否する。"""
+
+    repository = create_repository(tmp_path)
+    create_local_position(repository)
+
+    service = PortfolioService(
+        position_repository=repository,
+        broker=StaticBroker(
+            positions=[
+                create_broker_position(
+                    market_price=None
+                )
+            ],
+            account=create_account(),
+        ),
+    )
+
+    with pytest.raises(
+        PortfolioPriceUnavailableError,
+        match="現在価格",
+    ):
+        service.create_snapshot(
+            generated_at=CURRENT_TIME
+        )
+
+
+def test_service_normalizes_generated_at_to_utc(
+    tmp_path: Path,
+) -> None:
+    """集計日時をUTCへ正規化する。"""
+
+    repository = create_repository(tmp_path)
+    jst = timezone.utc
+
+    service = PortfolioService(
+        position_repository=repository,
+        broker=StaticBroker(
+            positions=[],
+            account=create_account(
+                cash_balance=1_000_000.0,
+                buying_power=1_000_000.0,
+                market_value=0.0,
+                equity=1_000_000.0,
+            ),
+        ),
+    )
+
+    snapshot = service.create_snapshot(
+        generated_at=CURRENT_TIME.astimezone(jst)
+    )
+
+    assert snapshot.generated_at == CURRENT_TIME
+
+
+def test_service_rejects_naive_generated_at(
+    tmp_path: Path,
+) -> None:
+    """タイムゾーンなし集計日時を拒否する。"""
+
+    repository = create_repository(tmp_path)
+
+    service = PortfolioService(
+        position_repository=repository,
+        broker=StaticBroker(
+            positions=[],
+            account=create_account(
+                cash_balance=1_000_000.0,
+                buying_power=1_000_000.0,
+                market_value=0.0,
+                equity=1_000_000.0,
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="タイムゾーン"):
+        service.create_snapshot(
+            generated_at=datetime(
+                2026,
+                7,
+                20,
+                10,
+                0,
+            )
+        )
+
+
+================================================================================
+FILE: tests\test_trading_loop_component.py
+================================================================================
+"""TradingLoopComponentのテスト。"""
+
+from datetime import datetime, timezone
+
+import pytest
+
+from app.application.application_component import (
+    ApplicationComponentRegistration,
+)
+from app.application.application_orchestrator import (
+    ApplicationOrchestrator,
+)
+from app.application.application_runner import (
+    ApplicationRunner,
+)
+from app.application.trading_loop_component import (
+    TradingLoopComponent,
+)
+from app.application.trading_loop_service import (
+    TradingLoopService,
+)
+from app.live.live_orchestrator_models import (
+    LiveCycleResult,
+    LiveCycleStatus,
+)
+from app.runtime.session_models import (
+    RuntimeSessionStatus,
+)
+from app.runtime.session_service import (
+    RuntimeSessionService,
+)
+
+
+NOW = datetime(
+    2026,
+    7,
+    18,
+    12,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+class FakeLiveOrchestrator:
+    def run_cycle(
+        self,
+        *,
+        cycle_number,
+        codes,
+        continue_on_error=True,
+    ):
+        return LiveCycleResult(
+            cycle_number=cycle_number,
+            started_at=NOW,
+            completed_at=NOW,
+            status=LiveCycleStatus.COMPLETED,
+            market_result=object(),
+            paper_trading_result=None,
+            error_message=None,
+        )
+
+
+def create_component():
+    session = RuntimeSessionService(
+        now_provider=lambda: NOW,
+        session_id_provider=lambda: "session-1",
+    )
+    service = TradingLoopService(
+        live_orchestrator=FakeLiveOrchestrator(),
+        runtime_session=session,
+        now_provider=lambda: NOW,
+    )
+    component = TradingLoopComponent(
+        service=service,
+        runtime_session=session,
+        codes=("7203", "6758"),
+    )
+    return component, session
+
+
+def test_component_starts_runs_cycles_and_stops() -> None:
+    component, session = create_component()
+
+    component.start()
+    first = component.run_cycle()
+    second = component.run_cycle()
+    component.stop()
+
+    assert component.component_name == "trading-loop"
+    assert first.cycle_number == 1
+    assert second.cycle_number == 2
+    assert component.is_running is False
+    assert component.last_session_report is not None
+    assert (
+        component.last_session_report
+        .snapshot
+        .status
+        is RuntimeSessionStatus.STOPPED
+    )
+    assert (
+        component.last_session_report
+        .total_cycle_count
+        == 2
+    )
+
+
+def test_component_rejects_cycle_before_start() -> None:
+    component, _session = create_component()
+
+    with pytest.raises(
+        RuntimeError,
+        match="開始されていません",
+    ):
+        component.run_cycle()
+
+
+def test_component_integrates_with_application_orchestrator() -> None:
+    component, _session = create_component()
+    orchestrator = ApplicationOrchestrator(
+        runner=ApplicationRunner(
+            now_provider=lambda: NOW,
+        ),
+        registrations=(
+            ApplicationComponentRegistration(
+                component=component,
+                start_order=10,
+            ),
+        ),
+    )
+
+    started = orchestrator.start()
+    cycle = component.run_cycle()
+    stopped = orchestrator.shutdown()
+
+    assert started.has_failures is False
+    assert cycle.is_successful
+    assert (
+        stopped.application_report
+        .graceful_shutdown
+    )
+    assert component.last_session_report is not None
+
+
+================================================================================
+FILE: tests\test_trading_loop_models.py
+================================================================================
+"""Trading Loopモデルのテスト。"""
+
+from datetime import datetime, timezone
+
+import pytest
+
+from app.application.trading_loop_models import (
+    TradingLoopCycleResult,
+    TradingLoopCycleStatus,
+    TradingLoopRunResult,
+)
+from app.live.live_orchestrator_models import (
+    LiveCycleResult,
+    LiveCycleStatus,
+)
+from app.runtime.session_models import (
+    RuntimeSessionSnapshot,
+    RuntimeSessionStatus,
+)
+
+
+NOW = datetime(
+    2026,
+    7,
+    18,
+    12,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+def runtime_snapshot() -> RuntimeSessionSnapshot:
+    return RuntimeSessionSnapshot(
+        session_id="session-1",
+        status=RuntimeSessionStatus.RUNNING,
+        started_at=NOW,
+        checked_at=NOW,
+        active_date=NOW.date(),
+        cycle_count=1,
+        successful_cycle_count=1,
+        failed_cycle_count=0,
+        heartbeat_count=1,
+        restart_count=0,
+        error_count=0,
+        completed_day_count=0,
+    )
+
+
+def live_cycle(
+    *,
+    status: LiveCycleStatus,
+) -> LiveCycleResult:
+    return LiveCycleResult(
+        cycle_number=1,
+        started_at=NOW,
+        completed_at=NOW,
+        status=status,
+        market_result=(
+            object()
+            if status is LiveCycleStatus.COMPLETED
+            else None
+        ),
+        paper_trading_result=None,
+        error_message=(
+            "failed"
+            if status is LiveCycleStatus.FAILED
+            else None
+        ),
+    )
+
+
+def test_completed_cycle_is_successful() -> None:
+    result = TradingLoopCycleResult(
+        cycle_number=1,
+        started_at=NOW,
+        completed_at=NOW,
+        status=TradingLoopCycleStatus.COMPLETED,
+        live_cycle_result=live_cycle(
+            status=LiveCycleStatus.COMPLETED
+        ),
+        runtime_session_snapshot=runtime_snapshot(),
+        resource_result=None,
+    )
+
+    assert result.is_successful
+    assert result.signal_count == 0
+    assert result.execution_count == 0
+
+
+def test_failed_cycle_requires_error_message() -> None:
+    with pytest.raises(
+        ValueError,
+        match="エラーメッセージ",
+    ):
+        TradingLoopCycleResult(
+            cycle_number=1,
+            started_at=NOW,
+            completed_at=NOW,
+            status=TradingLoopCycleStatus.FAILED,
+            live_cycle_result=None,
+            runtime_session_snapshot=runtime_snapshot(),
+            resource_result=None,
+        )
+
+
+def test_run_result_requires_consecutive_numbers() -> None:
+    first = TradingLoopCycleResult(
+        cycle_number=1,
+        started_at=NOW,
+        completed_at=NOW,
+        status=TradingLoopCycleStatus.COMPLETED,
+        live_cycle_result=live_cycle(
+            status=LiveCycleStatus.COMPLETED
+        ),
+        runtime_session_snapshot=runtime_snapshot(),
+        resource_result=None,
+    )
+    second = TradingLoopCycleResult(
+        cycle_number=3,
+        started_at=NOW,
+        completed_at=NOW,
+        status=TradingLoopCycleStatus.FAILED,
+        live_cycle_result=None,
+        runtime_session_snapshot=runtime_snapshot(),
+        resource_result=None,
+        error_message="failed",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="連番",
+    ):
+        TradingLoopRunResult(
+            cycles=(first, second)
+        )
+
+
+================================================================================
+FILE: tests\test_trading_loop_runner.py
+================================================================================
+"""TradingLoopRunnerのテスト。"""
+
+from datetime import datetime, timezone
+
+from app.application.trading_loop_models import (
+    TradingLoopCycleStatus,
+)
+from app.application.trading_loop_runner import (
+    TradingLoopRunner,
+)
+from app.application.trading_loop_runner_models import (
+    TradingLoopRunnerSettings,
+    TradingLoopRunnerStopReason,
+)
+
+
+NOW = datetime(
+    2026,
+    7,
+    18,
+    12,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+class FakeCycle:
+    def __init__(
+        self,
+        *,
+        cycle_number: int,
+        status: TradingLoopCycleStatus,
+    ) -> None:
+        self.cycle_number = cycle_number
+        self.started_at = NOW
+        self.completed_at = NOW
+        self.status = status
+        self.error_message = (
+            "failed"
+            if status is TradingLoopCycleStatus.FAILED
+            else None
+        )
+
+    @property
+    def is_successful(self) -> bool:
+        return (
+            self.status
+            is TradingLoopCycleStatus.COMPLETED
+        )
+
+    @property
+    def signal_count(self) -> int:
+        return 0
+
+    @property
+    def execution_count(self) -> int:
+        return 0
+
+
+class FakeComponent:
+    def __init__(
+        self,
+        statuses,
+        *,
+        raises_at: int | None = None,
+    ) -> None:
+        self.statuses = list(statuses)
+        self.raises_at = raises_at
+        self.calls = 0
+
+    def run_cycle(self):
+        self.calls += 1
+
+        if self.raises_at == self.calls:
+            raise RuntimeError("cycle error")
+
+        return FakeCycle(
+            cycle_number=self.calls,
+            status=self.statuses[self.calls - 1],
+        )
+
+
+def test_runner_stops_at_maximum_cycles() -> None:
+    sleeps = []
+    runner = TradingLoopRunner(
+        component=FakeComponent(
+            (
+                TradingLoopCycleStatus.COMPLETED,
+                TradingLoopCycleStatus.COMPLETED,
+            )
+        ),
+        settings=TradingLoopRunnerSettings(
+            cycle_interval_seconds=5.0,
+            maximum_cycles=2,
+        ),
+        now_provider=lambda: NOW,
+        sleeper=sleeps.append,
+    )
+
+    result = runner.run()
+
+    assert result.stop_reason is (
+        TradingLoopRunnerStopReason.MAX_CYCLES_REACHED
+    )
+    assert result.cycle_count == 2
+    assert result.successful_cycle_count == 2
+    assert sleeps == [5.0]
+
+
+def test_runner_stops_on_resource_critical() -> None:
+    runner = TradingLoopRunner(
+        component=FakeComponent(
+            (
+                TradingLoopCycleStatus.RESOURCE_CRITICAL,
+            )
+        ),
+        settings=TradingLoopRunnerSettings(
+            maximum_cycles=10,
+            stop_on_resource_critical=True,
+        ),
+        now_provider=lambda: NOW,
+        sleeper=lambda _seconds: None,
+    )
+
+    result = runner.run()
+
+    assert result.stop_reason is (
+        TradingLoopRunnerStopReason.RESOURCE_CRITICAL
+    )
+    assert result.cycle_count == 1
+
+
+def test_runner_can_stop_on_failed_cycle() -> None:
+    runner = TradingLoopRunner(
+        component=FakeComponent(
+            (
+                TradingLoopCycleStatus.FAILED,
+            )
+        ),
+        settings=TradingLoopRunnerSettings(
+            stop_on_cycle_failure=True,
+        ),
+        now_provider=lambda: NOW,
+        sleeper=lambda _seconds: None,
+    )
+
+    result = runner.run()
+
+    assert result.stop_reason is (
+        TradingLoopRunnerStopReason.CYCLE_FAILED
+    )
+    assert result.failed_cycle_count == 1
+
+
+def test_runner_converts_exception_to_error_result() -> None:
+    runner = TradingLoopRunner(
+        component=FakeComponent(
+            (
+                TradingLoopCycleStatus.COMPLETED,
+            ),
+            raises_at=1,
+        ),
+        now_provider=lambda: NOW,
+    )
+
+    result = runner.run()
+
+    assert result.stop_reason is (
+        TradingLoopRunnerStopReason.ERROR
+    )
+    assert result.error_message == "cycle error"
+    assert result.cycle_count == 0
+
+
+def test_runner_honors_stop_request_before_first_cycle() -> None:
+    component = FakeComponent(
+        (
+            TradingLoopCycleStatus.COMPLETED,
+        )
+    )
+    runner = TradingLoopRunner(
+        component=component,
+        now_provider=lambda: NOW,
+        stop_requested=lambda: True,
+    )
+
+    result = runner.run()
+
+    assert result.stop_reason is (
+        TradingLoopRunnerStopReason.STOP_REQUESTED
+    )
+    assert component.calls == 0
+
+
+================================================================================
+FILE: tests\test_trading_loop_runner_models.py
+================================================================================
+"""Trading Loop Runnerモデルのテスト。"""
+
+from datetime import datetime, timezone
+
+import pytest
+
+from app.application.trading_loop_runner_models import (
+    TradingLoopRunnerResult,
+    TradingLoopRunnerSettings,
+    TradingLoopRunnerStopReason,
+)
+
+
+NOW = datetime(
+    2026,
+    7,
+    18,
+    12,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+def test_settings_validate_interval_and_cycle_limit() -> None:
+    with pytest.raises(ValueError, match="0秒以上"):
+        TradingLoopRunnerSettings(
+            cycle_interval_seconds=-1.0
+        )
+
+    with pytest.raises(ValueError, match="0より大きい"):
+        TradingLoopRunnerSettings(
+            maximum_cycles=0
+        )
+
+
+def test_empty_result_is_valid_for_stop_request() -> None:
+    result = TradingLoopRunnerResult(
+        started_at=NOW,
+        completed_at=NOW,
+        stop_reason=(
+            TradingLoopRunnerStopReason.STOP_REQUESTED
+        ),
+        cycles=(),
+    )
+
+    assert result.cycle_count == 0
+    assert result.successful_cycle_count == 0
+    assert result.failed_cycle_count == 0
+
+
+def test_error_result_requires_message() -> None:
+    with pytest.raises(
+        ValueError,
+        match="エラーメッセージ",
+    ):
+        TradingLoopRunnerResult(
+            started_at=NOW,
+            completed_at=NOW,
+            stop_reason=(
+                TradingLoopRunnerStopReason.ERROR
+            ),
+            cycles=(),
+        )
+
+
+================================================================================
+FILE: tests\test_trading_loop_runner_report.py
+================================================================================
+"""Trading Loop Runner JSON変換のテスト。"""
+
+import json
+from datetime import datetime, timezone
+
+from app.application.trading_loop_runner_models import (
+    TradingLoopRunnerResult,
+    TradingLoopRunnerStopReason,
+)
+from app.application.trading_loop_runner_report import (
+    trading_loop_runner_result_to_dict,
+)
+
+
+NOW = datetime(
+    2026,
+    7,
+    18,
+    12,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+def test_empty_runner_result_is_json_compatible() -> None:
+    result = TradingLoopRunnerResult(
+        started_at=NOW,
+        completed_at=NOW,
+        stop_reason=(
+            TradingLoopRunnerStopReason.STOP_REQUESTED
+        ),
+        cycles=(),
+    )
+
+    payload = trading_loop_runner_result_to_dict(
+        result
+    )
+    serialized = json.dumps(payload)
+
+    assert payload["stop_reason"] == "stop_requested"
+    assert payload["cycle_count"] == 0
+    assert payload["cycles"] == []
+    assert "stop_requested" in serialized
+
+
+================================================================================
+FILE: tests\test_trading_loop_service.py
+================================================================================
+"""TradingLoopServiceのテスト。"""
+
+from datetime import datetime, timezone
+
+import pytest
+
+from app.application.trading_loop_models import (
+    TradingLoopCycleStatus,
+)
+from app.application.trading_loop_service import (
+    TradingLoopService,
+)
+from app.live.live_orchestrator_models import (
+    LiveCycleResult,
+    LiveCycleStatus,
+)
+from app.runtime.resource_integration import (
+    RuntimeResourceIntegrationResult,
+)
+from app.runtime.resource_models import (
+    RuntimeResourceSnapshot,
+    RuntimeResourceThresholds,
+)
+from app.runtime.session_service import (
+    RuntimeSessionService,
+)
+
+
+NOW = datetime(
+    2026,
+    7,
+    18,
+    12,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+class FakeLiveOrchestrator:
+    def __init__(
+        self,
+        *,
+        failed: bool = False,
+        raises: bool = False,
+    ) -> None:
+        self.failed = failed
+        self.raises = raises
+        self.calls = []
+
+    def run_cycle(
+        self,
+        *,
+        cycle_number,
+        codes,
+        continue_on_error=True,
+    ):
+        self.calls.append(
+            (
+                cycle_number,
+                tuple(codes),
+                continue_on_error,
+            )
+        )
+
+        if self.raises:
+            raise RuntimeError("live error")
+
+        status = (
+            LiveCycleStatus.FAILED
+            if self.failed
+            else LiveCycleStatus.COMPLETED
+        )
+
+        return LiveCycleResult(
+            cycle_number=cycle_number,
+            started_at=NOW,
+            completed_at=NOW,
+            status=status,
+            market_result=(
+                object()
+                if not self.failed
+                else None
+            ),
+            paper_trading_result=None,
+            error_message=(
+                "live failed"
+                if self.failed
+                else None
+            ),
+        )
+
+
+class FakeResourceIntegration:
+    def __init__(
+        self,
+        *,
+        critical: bool = False,
+    ) -> None:
+        self.critical = critical
+        self.calls = []
+
+    def sample_once(
+        self,
+        *,
+        continue_on_notification_error=True,
+    ):
+        self.calls.append(
+            continue_on_notification_error
+        )
+
+        thresholds = RuntimeResourceThresholds(
+            cpu_warning_percent=50.0,
+            cpu_critical_percent=90.0,
+            rss_warning_bytes=1000,
+            rss_critical_bytes=2000,
+            thread_warning_count=10,
+            thread_critical_count=20,
+        )
+        evaluation = RuntimeResourceSnapshot(
+            sampled_at=NOW,
+            cpu_percent=(
+                95.0
+                if self.critical
+                else 10.0
+            ),
+            rss_bytes=100,
+            vms_bytes=200,
+            thread_count=1,
+            process_uptime_seconds=3600.0,
+        ).evaluate(thresholds)
+
+        return RuntimeResourceIntegrationResult(
+            evaluation=evaluation,
+            notification_result=None,
+            supervisor_snapshot=None,
+        )
+
+
+def runtime_session() -> RuntimeSessionService:
+    service = RuntimeSessionService(
+        now_provider=lambda: NOW,
+        session_id_provider=lambda: "session-1",
+    )
+    service.start()
+    return service
+
+
+def test_completed_live_cycle_updates_runtime_session() -> None:
+    live = FakeLiveOrchestrator()
+    resource = FakeResourceIntegration()
+    session = runtime_session()
+    service = TradingLoopService(
+        live_orchestrator=live,
+        runtime_session=session,
+        resource_integration=resource,
+        now_provider=lambda: NOW,
+    )
+
+    result = service.run_cycle(
+        cycle_number=1,
+        codes=("7203", "6758"),
+    )
+
+    assert result.status is (
+        TradingLoopCycleStatus.COMPLETED
+    )
+    assert result.runtime_session_snapshot.cycle_count == 1
+    assert (
+        result.runtime_session_snapshot
+        .successful_cycle_count
+        == 1
+    )
+    assert result.runtime_session_snapshot.heartbeat_count == 1
+    assert live.calls == [
+        (1, ("7203", "6758"), True)
+    ]
+    assert resource.calls == [True]
+
+
+def test_failed_live_cycle_is_recorded_as_failure() -> None:
+    session = runtime_session()
+    service = TradingLoopService(
+        live_orchestrator=FakeLiveOrchestrator(
+            failed=True
+        ),
+        runtime_session=session,
+        now_provider=lambda: NOW,
+    )
+
+    result = service.run_cycle(
+        cycle_number=1,
+        codes=("7203",),
+    )
+
+    assert result.status is (
+        TradingLoopCycleStatus.FAILED
+    )
+    assert result.error_message == "live failed"
+    assert (
+        result.runtime_session_snapshot
+        .failed_cycle_count
+        == 1
+    )
+    assert result.runtime_session_snapshot.error_count == 1
+
+
+def test_resource_critical_marks_cycle_unsuccessful() -> None:
+    session = runtime_session()
+    service = TradingLoopService(
+        live_orchestrator=FakeLiveOrchestrator(),
+        runtime_session=session,
+        resource_integration=FakeResourceIntegration(
+            critical=True
+        ),
+        now_provider=lambda: NOW,
+    )
+
+    result = service.run_cycle(
+        cycle_number=1,
+        codes=("7203",),
+    )
+
+    assert result.status is (
+        TradingLoopCycleStatus.RESOURCE_CRITICAL
+    )
+    assert (
+        result.runtime_session_snapshot
+        .failed_cycle_count
+        == 1
+    )
+
+
+def test_unexpected_error_can_be_returned_as_failed_cycle() -> None:
+    session = runtime_session()
+    service = TradingLoopService(
+        live_orchestrator=FakeLiveOrchestrator(
+            raises=True
+        ),
+        runtime_session=session,
+        now_provider=lambda: NOW,
+    )
+
+    result = service.run_cycle(
+        cycle_number=1,
+        codes=("7203",),
+        continue_on_error=True,
+    )
+
+    assert result.status is (
+        TradingLoopCycleStatus.FAILED
+    )
+    assert result.error_message == "live error"
+    assert (
+        result.runtime_session_snapshot
+        .failed_cycle_count
+        == 1
+    )
+
+
+def test_unexpected_error_can_be_raised() -> None:
+    service = TradingLoopService(
+        live_orchestrator=FakeLiveOrchestrator(
+            raises=True
+        ),
+        runtime_session=runtime_session(),
+        now_provider=lambda: NOW,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="live error",
+    ):
+        service.run_cycle(
+            cycle_number=1,
+            codes=("7203",),
+            continue_on_error=False,
+        )
+
+
+def test_empty_codes_are_rejected() -> None:
+    service = TradingLoopService(
+        live_orchestrator=FakeLiveOrchestrator(),
+        runtime_session=runtime_session(),
+        now_provider=lambda: NOW,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="監視対象銘柄",
+    ):
+        service.run_cycle(
+            cycle_number=1,
+            codes=(),
+        )
+

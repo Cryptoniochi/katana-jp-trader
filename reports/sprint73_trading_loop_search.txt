@@ -1,0 +1,93 @@
+[TradingLoop] app\application\market_aware_trading_loop_runner.py:20: class ScheduledTradingLoopComponent(Protocol):
+[run_cycle] app\application\market_aware_trading_loop_runner.py:23: def run_cycle(self):
+[TradingLoop] app\application\market_aware_trading_loop_runner.py:32: class MarketAwareTradingLoopRunner:
+[TradingLoop] app\application\trading_loop_component.py:20: class TradingLoopRuntimeLifecycle(Protocol):
+[TradingLoop] app\application\trading_loop_component.py:35: class TradingLoopComponent:
+[run_cycle] app\application\trading_loop_component.py:108: def run_cycle(self) -> TradingLoopCycleResult:
+[TradingLoop] app\application\trading_loop_models.py:16: class TradingLoopCycleStatus(StrEnum):
+[TradingLoop] app\application\trading_loop_models.py:25: class TradingLoopCycleResult:
+[TradingLoop] app\application\trading_loop_models.py:128: class TradingLoopRunResult:
+[TradingLoop] app\application\trading_loop_runner.py:20: class TradingLoopCycleRunner(Protocol):
+[run_cycle] app\application\trading_loop_runner.py:23: def run_cycle(self):
+[TradingLoop] app\application\trading_loop_runner.py:32: class TradingLoopRunner:
+[TradingLoop] app\application\trading_loop_runner_models.py:14: class TradingLoopRunnerStopReason(StrEnum):
+[TradingLoop] app\application\trading_loop_runner_models.py:25: class TradingLoopRunnerSettings:
+[TradingLoop] app\application\trading_loop_runner_models.py:51: class TradingLoopRunnerResult:
+[TradingLoop] app\application\trading_loop_service.py:21: class TradingLoopLiveOrchestrator(Protocol):
+[run_cycle] app\application\trading_loop_service.py:24: def run_cycle(
+[TradingLoop] app\application\trading_loop_service.py:34: class TradingLoopRuntimeSession(Protocol):
+[TradingLoop] app\application\trading_loop_service.py:48: class TradingLoopResourceIntegration(Protocol):
+[TradingLoop] app\application\trading_loop_service.py:59: class TradingLoopService:
+[run_cycle] app\application\trading_loop_service.py:83: def run_cycle(
+[PortfolioService] app\backtest\backtest_portfolio_update_service.py:20: class BacktestPortfolioUpdateResult:
+[PortfolioService] app\backtest\backtest_portfolio_update_service.py:48: class BacktestPortfolioBatchUpdateResult:
+[PortfolioService] app\backtest\backtest_portfolio_update_service.py:92: class BacktestPortfolioUpdateService:
+[create_snapshot] app\dashboard\dashboard_cli.py:24: def create_snapshot(self) -> DashboardSnapshot:
+[PortfolioService] app\dashboard\dashboard_service.py:44: class DashboardPortfolioReader(Protocol):
+[create_snapshot] app\dashboard\dashboard_service.py:45: def create_snapshot(
+[create_snapshot] app\dashboard\dashboard_service.py:133: def create_snapshot(
+[create_snapshot] app\dashboard\dashboard_snapshot_file.py:29: def create_snapshot(self) -> dict[str, Any]:
+[create_snapshot] app\dashboard\dashboard_snapshot_publish_service.py:17: def create_snapshot(self) -> DashboardSnapshot:
+[create_snapshot] app\dashboard\dashboard_web_service.py:24: def create_snapshot(
+[run_cycle] app\live\live_orchestrator.py:170: def run_cycle(
+[PortfolioService] app\live\recovery_manager.py:55: class RecoveryPortfolioService(Protocol):
+[create_snapshot] app\live\recovery_manager.py:56: def create_snapshot(
+[PortfolioService] app\live\recovery_manager.py:64: class RecoveryPortfolioAuditService(Protocol):
+[PortfolioService] app\live\recovery_manager.py:73: class RecoveryPortfolioRepository(Protocol):
+[PortfolioService] app\live\risk_models.py:78: class RiskPortfolioSnapshot:
+[create_snapshot] app\market\realtime_market_service.py:71: def create_snapshot(
+[run_cycle] app\runtime\burn_in_runner.py:24: def run_cycle(self):
+[run_cycle] app\runtime\paper_trading_day_service.py:39: def run_cycle(self):
+[run_cycle] app\runtime\paper_trading_runtime.py:20: def run_cycle(self):
+[PortfolioService] app\runtime\paper_trading_runtime.py:24: class PaperTradingPortfolioReader(Protocol):
+[create_snapshot] app\runtime\paper_trading_runtime.py:27: def create_snapshot(
+[run_cycle] app\runtime\paper_trading_runtime.py:82: def run_cycle(self) -> PaperTradingCycleRecord:
+[PortfolioService] app\trading\equity_curve_service.py:12: class PortfolioHistoryReader(Protocol):
+[PortfolioService] app\trading\portfolio_audit_models.py:11: class PortfolioAuditSeverity(StrEnum):
+[PortfolioService] app\trading\portfolio_audit_models.py:17: class PortfolioAuditIssueType(StrEnum):
+[PortfolioService] app\trading\portfolio_audit_models.py:29: class PortfolioAuditTolerance:
+[PortfolioService] app\trading\portfolio_audit_models.py:41: class PortfolioAuditIssue:
+[PortfolioService] app\trading\portfolio_audit_models.py:69: class PortfolioAuditReport:
+[PortfolioService] app\trading\portfolio_audit_service.py:23: class PortfolioAuditPositionReader(Protocol):
+[PortfolioService] app\trading\portfolio_audit_service.py:34: class PortfolioAuditBrokerReader(Protocol):
+[PortfolioService] app\trading\portfolio_audit_service.py:42: class PortfolioAuditService:
+[PortfolioService] app\trading\portfolio_models.py:10: class PortfolioPositionSnapshot:
+[PortfolioService] app\trading\portfolio_models.py:100: class PortfolioSnapshot:
+[PortfolioService] app\trading\portfolio_repository.py:15: class PortfolioRepositoryError(RuntimeError):
+[PortfolioService] app\trading\portfolio_repository.py:19: class PortfolioSnapshotNotFoundError(PortfolioRepositoryError):
+[PortfolioService] app\trading\portfolio_repository.py:23: class DuplicatePortfolioSnapshotError(PortfolioRepositoryError):
+[PortfolioService] app\trading\portfolio_repository.py:27: class PortfolioRepository:
+[PortfolioService] app\trading\portfolio_service.py:17: class PortfolioPositionReader(Protocol):
+[PortfolioService] app\trading\portfolio_service.py:30: class PortfolioBrokerReader(Protocol):
+[PortfolioService] app\trading\portfolio_service.py:40: class PortfolioPriceUnavailableError(RuntimeError):
+[PortfolioService] app\trading\portfolio_service.py:44: class PortfolioConsistencyError(RuntimeError):
+[PortfolioService] app\trading\portfolio_service.py:48: class PortfolioService:
+[create_snapshot] app\trading\portfolio_service.py:62: def create_snapshot(
+[run_cycle] tests\test_burn_in_runner.py:76: def run_cycle(self):
+[create_snapshot] tests\test_dashboard_cli.py:36: def create_snapshot(self) -> DashboardSnapshot:
+[create_snapshot] tests\test_dashboard_resource_integration.py:37: def create_snapshot(self, *, generated_at=None):
+[create_snapshot] tests\test_dashboard_service.py:125: def create_snapshot(self, *, generated_at=None):
+[create_snapshot] tests\test_dashboard_service.py:145: def create_snapshot(self, *, generated_at=None):
+[create_snapshot] tests\test_dashboard_snapshot_publish_service.py:30: def create_snapshot(self) -> DashboardSnapshot:
+[create_snapshot] tests\test_dashboard_web_service.py:31: def create_snapshot(self) -> DashboardSnapshot:
+[create_snapshot] tests\test_dashboard_web_service_analytics.py:29: def create_snapshot(self):
+[create_snapshot] tests\test_dashboard_web_service_file_snapshot.py:21: def create_snapshot(self):
+[create_snapshot] tests\test_equity_curve_service.py:23: def create_snapshot(
+[PortfolioService] tests\test_equity_curve_service.py:49: class FakePortfolioRepository:
+[run_cycle] tests\test_market_aware_trading_loop_runner.py:57: def run_cycle(self):
+[run_cycle] tests\test_paper_trading_day_dashboard_integration.py:41: def run_cycle(self):
+[run_cycle] tests\test_paper_trading_day_post_run_hooks.py:39: def run_cycle(self):
+[run_cycle] tests\test_paper_trading_day_service.py:90: def run_cycle(self):
+[run_cycle] tests\test_paper_trading_runtime.py:52: def run_cycle(self):
+[PortfolioService] tests\test_paper_trading_runtime.py:57: class FakePortfolioReader:
+[create_snapshot] tests\test_paper_trading_runtime.py:62: def create_snapshot(
+[PaperTradingRuntime] tests\test_paper_trading_runtime.py:81: return PaperTradingRuntime(
+[create_snapshot] tests\test_portfolio_repository.py:33: def create_snapshot(
+[PortfolioService] tests\test_realtime_paper_trading_service.py:159: class FakePortfolioResult:
+[PortfolioService] tests\test_realtime_paper_trading_service.py:165: class FakePortfolioService:
+[PortfolioService] tests\test_recovery_manager.py:83: class FakePortfolioService:
+[create_snapshot] tests\test_recovery_manager.py:88: def create_snapshot(self, *, generated_at=None):
+[PortfolioService] tests\test_recovery_manager.py:94: class FakePortfolioRepository:
+[run_cycle] tests\test_trading_loop_component.py:45: def run_cycle(
+[run_cycle] tests\test_trading_loop_runner.py:71: def run_cycle(self):
+[run_cycle] tests\test_trading_loop_service.py:50: def run_cycle(
