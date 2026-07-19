@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Callable
+from typing import Callable, Protocol
 
 from app.backtest.backtest_portfolio_update_service import (
     BacktestPortfolioBatchUpdateResult,
@@ -28,8 +28,20 @@ from app.market.realtime_signal_models import (
     RealtimeSignalDecision,
     RealtimeSignalProcessResult,
 )
+from app.risk.risk_aware_queue_execution_service import (
+    QueueExecutionRiskState,
+    RiskAwareQueueExecutionResult,
+    RiskAwareQueueExecutionService,
+)
 from app.trading.order_models import OrderType
 from app.trading.signal_models import TradeSignal
+
+
+class RealtimeRiskResultProvider(Protocol):
+    """注文執行前に利用する最新Risk結果の取得処理。"""
+
+    def __call__(self) -> QueueExecutionRiskState:
+        """最新のRisk結果を返す。"""
 
 
 class RealtimePaperTradingStatus(StrEnum):
@@ -48,6 +60,10 @@ class RealtimePaperTradingResult:
     queue_results: tuple[BacktestOrderQueueResult, ...]
     execution_result: BacktestQueueExecutionBatchResult | None
     portfolio_result: BacktestPortfolioBatchUpdateResult | None
+    risk_execution_results: tuple[
+        RiskAwareQueueExecutionResult,
+        ...,
+    ] = ()
     error_message: str | None = None
 
     def __post_init__(self) -> None:
@@ -118,6 +134,27 @@ class RealtimePaperTradingResult:
         return self.portfolio_result.applied_count
 
     @property
+    def risk_evaluated_count(self) -> int:
+        """注文ゲートでRisk判定した回数を返す。"""
+
+        return len(self.risk_execution_results)
+
+    @property
+    def risk_blocked_count(self) -> int:
+        """Risk判定によりBroker送信を停止した回数を返す。"""
+
+        return sum(
+            result.was_blocked
+            for result in self.risk_execution_results
+        )
+
+    @property
+    def was_risk_blocked(self) -> bool:
+        """1件以上の注文がRisk判定で停止されたか返す。"""
+
+        return self.risk_blocked_count > 0
+
+    @property
     def is_completed(self) -> bool:
         """正常完了したか返す。"""
 
@@ -142,8 +179,32 @@ class RealtimePaperTradingService:
         portfolio_update_service: BacktestPortfolioUpdateService,
         market_price_updater: Callable[[str, float], object],
         clock_updater: Callable[[datetime], None] | None = None,
+        risk_aware_execution_service: (
+            RiskAwareQueueExecutionService | None
+        ) = None,
+        risk_result_provider: (
+            RealtimeRiskResultProvider | None
+        ) = None,
     ) -> None:
         """Paper Tradingパイプラインの依存関係を設定する。"""
+
+        if (
+            risk_aware_execution_service is None
+            and risk_result_provider is not None
+        ):
+            raise ValueError(
+                "risk_result_providerを使用する場合は"
+                "risk_aware_execution_serviceも必要です。"
+            )
+
+        if (
+            risk_aware_execution_service is not None
+            and risk_result_provider is None
+        ):
+            raise ValueError(
+                "risk_aware_execution_serviceを使用する場合は"
+                "risk_result_providerも必要です。"
+            )
 
         self.signal_engine = signal_engine
         self.order_queue_service = order_queue_service
@@ -151,6 +212,10 @@ class RealtimePaperTradingService:
         self.portfolio_update_service = portfolio_update_service
         self.market_price_updater = market_price_updater
         self.clock_updater = clock_updater
+        self.risk_aware_execution_service = (
+            risk_aware_execution_service
+        )
+        self.risk_result_provider = risk_result_provider
 
     def process(
         self,
@@ -185,6 +250,9 @@ class RealtimePaperTradingService:
             ] = []
             execution_items: list[
                 BacktestQueueExecutionItemResult
+            ] = []
+            risk_execution_results: list[
+                RiskAwareQueueExecutionResult
             ] = []
             portfolio_items = []
 
@@ -228,8 +296,11 @@ class RealtimePaperTradingService:
                         )
 
                     execution_result = (
-                        self.queue_execution_service.execute_all(
+                        self._execute_queued_orders(
                             continue_on_error=continue_on_error,
+                            risk_execution_results=(
+                                risk_execution_results
+                            ),
                         )
                     )
                     execution_items.extend(
@@ -255,6 +326,10 @@ class RealtimePaperTradingService:
                         for item in execution_result.items
                         if item.execution_record is not None
                     )
+
+                    if not records:
+                        continue
+
                     portfolio_result = (
                         self.portfolio_update_service
                         .apply_executions(
@@ -288,6 +363,9 @@ class RealtimePaperTradingService:
                         items=tuple(portfolio_items)
                     )
                 ),
+                risk_execution_results=tuple(
+                    risk_execution_results
+                ),
                 error_message=None,
             )
 
@@ -301,8 +379,43 @@ class RealtimePaperTradingService:
                 queue_results=(),
                 execution_result=None,
                 portfolio_result=None,
+                risk_execution_results=(),
                 error_message=str(error),
             )
+
+    def _execute_queued_orders(
+        self,
+        *,
+        continue_on_error: bool,
+        risk_execution_results: list[
+            RiskAwareQueueExecutionResult
+        ],
+    ) -> BacktestQueueExecutionBatchResult:
+        """Risk Gate経由または従来経路で注文キューを執行する。"""
+
+        if (
+            self.risk_aware_execution_service is None
+            or self.risk_result_provider is None
+        ):
+            return self.queue_execution_service.execute_all(
+                continue_on_error=continue_on_error,
+            )
+
+        risk_result = self.risk_result_provider()
+        gated_result = (
+            self.risk_aware_execution_service.execute_all(
+                risk_result=risk_result,
+                continue_on_error=continue_on_error,
+            )
+        )
+        risk_execution_results.append(gated_result)
+
+        if gated_result.execution_result is None:
+            return BacktestQueueExecutionBatchResult(
+                items=()
+            )
+
+        return gated_result.execution_result
 
     @staticmethod
     def _combine_signal_results(

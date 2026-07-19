@@ -26,6 +26,10 @@ from app.market.realtime_paper_trading_service import (
 from app.market.realtime_signal_engine import (
     RealtimeSignalEngine,
 )
+from app.risk.risk_aware_queue_execution_service import (
+    RiskAwareQueueExecutionDecision,
+    RiskAwareQueueExecutionResult,
+)
 from app.trading.order_models import OrderType
 from app.trading.signal_models import (
     SignalAction,
@@ -156,6 +160,58 @@ class FakeExecutionService:
         return FakeExecutionBatch(())
 
 
+@dataclass(frozen=True)
+class FakeRiskResult:
+    """注文執行可否を示すRisk結果。"""
+
+    allows_new_entries: bool
+    is_blocked: bool
+
+
+class FakeRiskAwareExecutionService:
+    """Risk Gate呼び出しを記録する。"""
+
+    def __init__(
+        self,
+        *,
+        blocked: bool,
+    ) -> None:
+        self.blocked = blocked
+        self.calls = []
+
+    def execute_all(
+        self,
+        *,
+        risk_result,
+        continue_on_error: bool,
+    ) -> RiskAwareQueueExecutionResult:
+        self.calls.append(
+            {
+                "risk_result": risk_result,
+                "continue_on_error": continue_on_error,
+            }
+        )
+
+        if self.blocked:
+            return RiskAwareQueueExecutionResult(
+                decision=(
+                    RiskAwareQueueExecutionDecision.BLOCKED
+                ),
+                execution_result=None,
+                message="risk blocked",
+            )
+
+        return RiskAwareQueueExecutionResult(
+            decision=(
+                RiskAwareQueueExecutionDecision.EXECUTED
+            ),
+            execution_result=(
+                BacktestQueueExecutionBatchResult(items=())
+            ),
+            message=None,
+        )
+
+
 class FakePortfolioResult:
     """空のポートフォリオ更新結果。"""
 
@@ -180,7 +236,11 @@ class FakePortfolioService:
         return FakePortfolioResult()
 
 
-def create_service():
+def create_service(
+    *,
+    risk_aware_execution_service=None,
+    risk_result_provider=None,
+):
     """テスト対象と各Fakeを作成する。"""
 
     queue = FakeQueueService()
@@ -198,6 +258,10 @@ def create_service():
             prices.append((code, value))
         ),
         clock_updater=clocks.append,
+        risk_aware_execution_service=(
+            risk_aware_execution_service
+        ),
+        risk_result_provider=risk_result_provider,
     )
 
     return (
@@ -217,7 +281,7 @@ def test_service_runs_signal_to_order_pipeline() -> None:
         service,
         queue,
         execution,
-        portfolio,
+        _portfolio,
         updated_prices,
         clocks,
     ) = create_service()
@@ -229,9 +293,104 @@ def test_service_runs_signal_to_order_pipeline() -> None:
     assert result.queued_count == 1
     assert queue.signals[0].action is SignalAction.BUY
     assert execution.call_count == 1
-    assert portfolio.call_count == 1
     assert len(updated_prices) == 5
     assert len(clocks) == 5
+    assert result.risk_evaluated_count == 0
+
+
+def test_service_uses_risk_gate_when_configured() -> None:
+    """Risk Gate設定時は従来執行サービスを直接呼ばない。"""
+
+    risk_result = FakeRiskResult(
+        allows_new_entries=True,
+        is_blocked=False,
+    )
+    gate = FakeRiskAwareExecutionService(
+        blocked=False,
+    )
+    (
+        service,
+        _queue,
+        execution,
+        _portfolio,
+        _prices,
+        _clocks,
+    ) = create_service(
+        risk_aware_execution_service=gate,
+        risk_result_provider=lambda: risk_result,
+    )
+
+    result = service.process(bars())
+
+    assert execution.call_count == 0
+    assert len(gate.calls) == 1
+    assert gate.calls[0]["risk_result"] is risk_result
+    assert result.risk_evaluated_count == 1
+    assert result.risk_blocked_count == 0
+    assert not result.was_risk_blocked
+
+
+def test_service_blocks_broker_send_when_risk_blocks() -> None:
+    """Risk BLOCKED時はBroker送信とPortfolio更新を行わない。"""
+
+    risk_result = FakeRiskResult(
+        allows_new_entries=False,
+        is_blocked=True,
+    )
+    gate = FakeRiskAwareExecutionService(
+        blocked=True,
+    )
+    (
+        service,
+        _queue,
+        execution,
+        portfolio,
+        _prices,
+        _clocks,
+    ) = create_service(
+        risk_aware_execution_service=gate,
+        risk_result_provider=lambda: risk_result,
+    )
+
+    result = service.process(bars())
+
+    assert result.is_completed
+    assert result.signal_count == 1
+    assert result.queued_count == 1
+    assert execution.call_count == 0
+    assert len(gate.calls) == 1
+    assert portfolio.call_count == 0
+    assert result.execution_count == 0
+    assert result.risk_evaluated_count == 1
+    assert result.risk_blocked_count == 1
+    assert result.was_risk_blocked
+
+
+def test_service_requires_risk_dependencies_together() -> None:
+    """Risk GateとProviderの片方だけの設定を拒否する。"""
+
+    gate = FakeRiskAwareExecutionService(
+        blocked=False,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="risk_result_provider",
+    ):
+        create_service(
+            risk_aware_execution_service=gate,
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="risk_aware_execution_service",
+    ):
+        create_service(
+            risk_result_provider=lambda: FakeRiskResult(
+                allows_new_entries=True,
+                is_blocked=False,
+            ),
+        )
 
 
 def test_service_updates_market_price_before_order() -> None:
@@ -259,7 +418,7 @@ def test_service_skips_duplicate_cycle() -> None:
         service,
         queue,
         execution,
-        portfolio,
+        _portfolio,
         _prices,
         _clocks,
     ) = create_service()
@@ -273,7 +432,6 @@ def test_service_skips_duplicate_cycle() -> None:
     assert second.signal_result.skipped_duplicate_count == 5
     assert len(queue.signals) == 1
     assert execution.call_count == 1
-    assert portfolio.call_count == 1
 
 
 def test_service_processes_out_of_order_prices() -> None:
@@ -367,3 +525,4 @@ def test_service_returns_safe_empty_result() -> None:
     assert result.execution_count == 0
     assert result.portfolio_update_count == 0
     assert result.queue_results == ()
+    assert result.risk_execution_results == ()
