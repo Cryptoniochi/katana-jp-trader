@@ -9,6 +9,7 @@ from enum import StrEnum
 from app.application.trading_loop_models import (
     TradingLoopCycleResult,
 )
+from app.risk.risk_engine import RiskEngineResult
 from app.trading.portfolio_models import PortfolioSnapshot
 
 
@@ -22,10 +23,11 @@ class PaperTradingRuntimeStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class PaperTradingCycleRecord:
-    """1回分のTrading Cycleと資産状態。"""
+    """1回分のTrading Cycle・資産状態・リスク判定。"""
 
     cycle_result: TradingLoopCycleResult
     portfolio_snapshot: PortfolioSnapshot | None
+    risk_result: RiskEngineResult | None = None
 
     @property
     def cycle_number(self) -> int:
@@ -38,6 +40,21 @@ class PaperTradingCycleRecord:
         """サイクルが正常完了したか返す。"""
 
         return self.cycle_result.is_successful
+
+    @property
+    def has_risk_result(self) -> bool:
+        """リスク判定結果を保持しているか返す。"""
+
+        return self.risk_result is not None
+
+    @property
+    def allows_new_entries(self) -> bool | None:
+        """新規エントリー可否を返す。"""
+
+        if self.risk_result is None:
+            return None
+
+        return self.risk_result.allows_new_entries
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +170,34 @@ class PaperTradingDailySummary:
             record.cycle_result.execution_count
             for record in self.records
         )
+
+    @property
+    def risk_evaluated_cycle_count(self) -> int:
+        """リスク判定済みサイクル数を返す。"""
+
+        return sum(
+            record.has_risk_result
+            for record in self.records
+        )
+
+    @property
+    def risk_blocked_cycle_count(self) -> int:
+        """新規エントリー停止判定となったサイクル数を返す。"""
+
+        return sum(
+            record.allows_new_entries is False
+            for record in self.records
+        )
+
+    @property
+    def latest_risk_result(self) -> RiskEngineResult | None:
+        """最新のリスク判定結果を返す。"""
+
+        for record in reversed(self.records):
+            if record.risk_result is not None:
+                return record.risk_result
+
+        return None
 
     @property
     def net_profit_loss(self) -> float | None:

@@ -13,6 +13,7 @@ from app.run_paper_trading import (
     StopController,
     build_argument_parser,
     create_production_settings,
+    create_runtime_notification_gateway,
     run,
 )
 from app.runtime.paper_trading_day_models import (
@@ -152,6 +153,41 @@ class FakeCompositionFactory:
         cls.stop_requested = stop_requested
         return cls.bundle
 
+
+
+class FakeNotificationGateway:
+    """Runtime通知要求を記録するFake Gateway。"""
+
+    def __init__(
+        self,
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        self.error = error
+        self.requests = []
+        self.continue_on_error_values = []
+
+    def send(
+        self,
+        request,
+        *,
+        continue_on_error=True,
+    ):
+        self.requests.append(request)
+        self.continue_on_error_values.append(
+            continue_on_error
+        )
+
+        if self.error is not None:
+            raise self.error
+
+        return object()
+
+
+def no_notification_gateway(_environ):
+    """外部通知なしのテスト用Factory。"""
+
+    return None
 
 def create_watchlist(
     tmp_path: Path,
@@ -363,6 +399,9 @@ def test_run_creates_composition_and_executes_bundle(
         output=output,
         error_output=error_output,
         install_signals=False,
+        notification_gateway_factory=(
+            no_notification_gateway
+        ),
     )
 
     assert exit_code == 0
@@ -456,6 +495,9 @@ def test_run_returns_exit_code_for_stop_reason(
         output=StringIO(),
         error_output=StringIO(),
         install_signals=False,
+        notification_gateway_factory=(
+            no_notification_gateway
+        ),
     )
 
     assert exit_code == expected_exit_code
@@ -490,6 +532,9 @@ def test_run_returns_one_when_bundle_raises(
         output=StringIO(),
         error_output=error_output,
         install_signals=False,
+        notification_gateway_factory=(
+            no_notification_gateway
+        ),
     )
 
     assert exit_code == 1
@@ -526,3 +571,130 @@ def test_fail_fast_and_resource_flags_are_applied(
     assert settings.continue_on_cycle_error is False
     assert settings.stop_on_cycle_failure is True
     assert settings.stop_on_resource_critical is False
+
+
+def test_run_sends_started_and_finished_notifications(
+    tmp_path: Path,
+) -> None:
+    """正常運用時に開始・終了通知を送る。"""
+
+    watchlist_path = create_watchlist(
+        tmp_path
+    )
+    FakeCompositionFactory.reset()
+    gateway = FakeNotificationGateway()
+
+    exit_code = run(
+        [
+            "--watchlist",
+            str(watchlist_path),
+        ],
+        composition_factory=FakeCompositionFactory,
+        environ={},
+        output=StringIO(),
+        error_output=StringIO(),
+        install_signals=False,
+        notification_gateway_factory=(
+            lambda _environ: gateway
+        ),
+    )
+
+    assert exit_code == 0
+    assert len(gateway.requests) == 2
+    assert gateway.requests[0].context["title"] == (
+        "Paper Trading Started"
+    )
+    assert gateway.requests[0].metadata[
+        "event_type"
+    ] == "paper_trading_started"
+    assert gateway.requests[1].context["title"] == (
+        "Paper Trading Finished"
+    )
+    assert gateway.requests[1].metadata[
+        "event_type"
+    ] == "paper_trading_finished"
+    assert gateway.continue_on_error_values == [
+        True,
+        True,
+    ]
+
+
+def test_run_sends_failure_notification_when_bundle_raises(
+    tmp_path: Path,
+) -> None:
+    """Runtime例外をCRITICAL通知へ変換する。"""
+
+    watchlist_path = create_watchlist(
+        tmp_path
+    )
+    FakeCompositionFactory.reset(
+        bundle=FakeBundle(
+            error=RuntimeError(
+                "application failed"
+            )
+        )
+    )
+    gateway = FakeNotificationGateway()
+
+    exit_code = run(
+        [
+            "--watchlist",
+            str(watchlist_path),
+        ],
+        composition_factory=FakeCompositionFactory,
+        environ={},
+        output=StringIO(),
+        error_output=StringIO(),
+        install_signals=False,
+        notification_gateway_factory=(
+            lambda _environ: gateway
+        ),
+    )
+
+    assert exit_code == 1
+    assert len(gateway.requests) == 2
+    assert gateway.requests[1].context["title"] == (
+        "Paper Trading Failed"
+    )
+    assert gateway.requests[1].metadata[
+        "event_type"
+    ] == "paper_trading_failed"
+
+
+def test_notification_failure_does_not_stop_runtime(
+    tmp_path: Path,
+) -> None:
+    """通知障害がPaper Tradingを停止させない。"""
+
+    watchlist_path = create_watchlist(
+        tmp_path
+    )
+    FakeCompositionFactory.reset()
+    gateway = FakeNotificationGateway(
+        error=RuntimeError(
+            "notification unavailable"
+        )
+    )
+    error_output = StringIO()
+
+    exit_code = run(
+        [
+            "--watchlist",
+            str(watchlist_path),
+        ],
+        composition_factory=FakeCompositionFactory,
+        environ={},
+        output=StringIO(),
+        error_output=error_output,
+        install_signals=False,
+        notification_gateway_factory=(
+            lambda _environ: gateway
+        ),
+    )
+
+    assert exit_code == 0
+    assert FakeCompositionFactory.bundle.run_count == 1
+    assert (
+        "外部通知の送信に失敗しました"
+        in error_output.getvalue()
+    )

@@ -13,6 +13,9 @@ from app.notifications.webhook_models import (
 )
 
 
+DEFAULT_USER_AGENT = "Project-KATANA/0.9"
+
+
 class WebhookTransportError(RuntimeError):
     """Webhook通信自体に失敗したことを表す。"""
 
@@ -52,7 +55,9 @@ class UrlLibWebhookTransport:
         ).encode("utf-8")
 
         headers = {
-            "Content-Type": "application/json; charset=utf-8",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": DEFAULT_USER_AGENT,
             **request.headers,
         }
 

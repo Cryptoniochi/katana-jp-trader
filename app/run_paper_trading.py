@@ -6,11 +6,32 @@ import argparse
 import os
 import signal
 import sys
+from collections.abc import Callable
+from datetime import datetime, timezone
+from uuid import uuid4
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from threading import Event
 from typing import Protocol, TextIO
 
+from app.notifications.notification_composition import (
+    NotificationComposition,
+)
+from app.notifications.notification_gateway import (
+    NotificationGateway,
+)
+from app.notifications.notification_gateway_models import (
+    NotificationGatewayRequest,
+)
+from app.notifications.notification_models import (
+    NotificationSeverity,
+)
+from app.notifications.notification_rule_models import (
+    NotificationRulePolicy,
+)
+from app.notifications.notification_template import (
+    NotificationTemplateName,
+)
 from app.runtime.paper_trading_composition import (
     PaperTradingComposition,
     PaperTradingProductionSettings,
@@ -23,6 +44,7 @@ from app.runtime.production_readiness import (
     ProductionReadinessChecker,
     ProductionReadinessReport,
 )
+from app.settings import ROOT_DIR, Settings
 from app.watchlist import load_watchlist
 
 
@@ -52,6 +74,14 @@ class PaperTradingCompositionFactory(Protocol):
     ) -> PaperTradingApplicationBundle:
         """本番Application Bundleを生成する。"""
 
+
+
+
+
+RuntimeNotificationGatewayFactory = Callable[
+    [Mapping[str, str] | None],
+    NotificationGateway | None,
+]
 
 class StopController:
     """OSシグナルから安全停止要求を管理する。"""
@@ -354,6 +384,122 @@ def create_production_settings(
     )
 
 
+
+def create_runtime_notification_gateway(
+    environ: Mapping[str, str] | None = None,
+) -> NotificationGateway | None:
+    """有効な外部通知チャネルからRuntime用Gatewayを作成する。"""
+
+    app_settings = Settings.from_environment(
+        environment=environ,
+        env_file=ROOT_DIR / ".env",
+    )
+    provisional = NotificationComposition.create(
+        settings=app_settings.notifications,
+        require_channel=False,
+    )
+
+    if not provisional.channels:
+        return None
+
+    channel_names = provisional.channel_names
+    policy = NotificationRulePolicy(
+        info_channels=channel_names,
+        warning_channels=channel_names,
+        error_channels=channel_names,
+        critical_channels=channel_names,
+        duplicate_cooldown_seconds=0,
+    )
+    bundle = NotificationComposition.create(
+        settings=app_settings.notifications,
+        policy=policy,
+        require_channel=True,
+    )
+
+    return bundle.gateway
+
+
+def _send_runtime_notification(
+    gateway: NotificationGateway | None,
+    *,
+    title: str,
+    message: str,
+    severity: NotificationSeverity,
+    event_type: str,
+    error_output: TextIO,
+) -> None:
+    """Runtime通知を送り、通知障害を取引処理から隔離する。"""
+
+    if gateway is None:
+        return
+
+    try:
+        gateway.send(
+            NotificationGatewayRequest(
+                notification_id=(
+                    f"paper-runtime-{uuid4().hex}"
+                ),
+                template_name=(
+                    NotificationTemplateName.GENERIC
+                ),
+                created_at=datetime.now(timezone.utc),
+                source="paper-trading-runtime",
+                context={
+                    "title": title,
+                    "message": message,
+                },
+                severity=severity,
+                metadata={
+                    "event_type": event_type,
+                },
+            ),
+            continue_on_error=True,
+        )
+    except Exception as error:
+        detail = (
+            str(error).strip()
+            or type(error).__name__
+        )
+        print(
+            "外部通知の送信に失敗しました。"
+            f" event_type={event_type}"
+            f" error={detail}",
+            file=error_output,
+        )
+
+
+def _startup_notification_message(
+    settings: PaperTradingProductionSettings,
+) -> str:
+    """開始通知本文を生成する。"""
+
+    return (
+        "Paper Tradingを開始します。\\n"
+        f"監視銘柄数: {len(settings.codes)}\\n"
+        f"監視銘柄: {','.join(settings.codes)}\\n"
+        f"初期資金: {settings.initial_cash:,.0f}円\\n"
+        "実行間隔: "
+        f"{settings.cycle_interval_seconds:g}秒\\n"
+        f"最大サイクル数: {settings.maximum_cycles}"
+    )
+
+
+def _finished_notification_message(
+    result: PaperTradingDayResult,
+) -> str:
+    """終了通知本文を生成する。"""
+
+    return (
+        "Paper Tradingが終了しました。\\n"
+        f"取引日: {result.trading_date.isoformat()}\\n"
+        f"終了理由: {result.stop_reason.value}\\n"
+        f"サイクル数: {result.cycle_count}\\n"
+        f"損益: {result.net_profit_loss}\\n"
+        f"収益率: {result.return_rate}\\n"
+        f"エラー: {result.error_message}"
+    )
+
+
 def run(
     argv: Sequence[str] | None = None,
     *,
@@ -364,6 +510,9 @@ def run(
     output: TextIO | None = None,
     error_output: TextIO | None = None,
     install_signals: bool = True,
+    notification_gateway_factory: (
+        RuntimeNotificationGatewayFactory
+    ) = create_runtime_notification_gateway,
 ) -> int:
     """本番Paper Tradingを起動して終了コードを返す。"""
 
@@ -381,6 +530,7 @@ def run(
     parser = build_argument_parser()
     arguments = parser.parse_args(argv)
     stop_controller = StopController()
+    notification_gateway: NotificationGateway | None = None
     previous_signal_handlers: dict[
         signal.Signals,
         signal.Handlers,
@@ -405,6 +555,22 @@ def run(
             )
             return 0 if report.is_ready else 1
 
+        try:
+            notification_gateway = (
+                notification_gateway_factory(environ)
+            )
+        except Exception as error:
+            detail = (
+                str(error).strip()
+                or type(error).__name__
+            )
+            print(
+                "外部通知の初期化に失敗しました。"
+                f" error={detail}",
+                file=resolved_error_output,
+            )
+            notification_gateway = None
+
         if install_signals:
             previous_signal_handlers = (
                 _install_signal_handlers(
@@ -422,6 +588,17 @@ def run(
             stop_requested=stop_controller,
         )
 
+        _send_runtime_notification(
+            notification_gateway,
+            title="Paper Trading Started",
+            message=_startup_notification_message(
+                settings
+            ),
+            severity=NotificationSeverity.INFO,
+            event_type="paper_trading_started",
+            error_output=resolved_error_output,
+        )
+
         result = bundle.run()
 
         _print_result(
@@ -429,7 +606,31 @@ def run(
             output=resolved_output,
         )
 
-        return _resolve_exit_code(result)
+        exit_code = _resolve_exit_code(result)
+        _send_runtime_notification(
+            notification_gateway,
+            title=(
+                "Paper Trading Finished"
+                if exit_code == 0
+                else "Paper Trading Stopped"
+            ),
+            message=_finished_notification_message(
+                result
+            ),
+            severity=(
+                NotificationSeverity.INFO
+                if exit_code == 0
+                else NotificationSeverity.ERROR
+            ),
+            event_type=(
+                "paper_trading_finished"
+                if exit_code == 0
+                else "paper_trading_stopped"
+            ),
+            error_output=resolved_error_output,
+        )
+
+        return exit_code
 
     except KeyboardInterrupt:
         stop_controller.request_stop()
@@ -438,6 +639,17 @@ def run(
             "KeyboardInterruptを受信しました。"
             "Paper Tradingを停止します。",
             file=resolved_error_output,
+        )
+        _send_runtime_notification(
+            notification_gateway,
+            title="Paper Trading Interrupted",
+            message=(
+                "KeyboardInterruptを受信したため、"
+                "Paper Tradingを停止します。"
+            ),
+            severity=NotificationSeverity.WARNING,
+            event_type="paper_trading_interrupted",
+            error_output=resolved_error_output,
         )
 
         return 130
@@ -452,6 +664,18 @@ def run(
             "Paper Tradingを起動または実行できませんでした。"
             f" error={message}",
             file=resolved_error_output,
+        )
+        _send_runtime_notification(
+            notification_gateway,
+            title="Paper Trading Failed",
+            message=(
+                "Paper Tradingで例外が発生しました。\n"
+                f"例外種別: {type(error).__name__}\n"
+                f"詳細: {message}"
+            ),
+            severity=NotificationSeverity.CRITICAL,
+            event_type="paper_trading_failed",
+            error_output=resolved_error_output,
         )
 
         return 1
