@@ -14,6 +14,9 @@ from app.run_paper_trading import (
     build_argument_parser,
     create_production_settings,
     create_runtime_notification_gateway,
+    _finished_notification_message,
+    _format_money,
+    _format_percentage,
     run,
 )
 from app.runtime.paper_trading_day_models import (
@@ -698,3 +701,83 @@ def test_notification_failure_does_not_stop_runtime(
         "外部通知の送信に失敗しました"
         in error_output.getvalue()
     )
+
+
+
+def test_finished_notification_is_daily_summary() -> None:
+    """終了通知に主要な日次指標を含める。"""
+
+    result = FakeResult()
+
+    message = _finished_notification_message(
+        result
+    )
+
+    assert "Paper Trading Daily Summary" in message
+    assert "取引日: 2026-07-22" in message
+    assert "Runtime状態: completed" in message
+    assert "サイクル数: 0" in message
+    assert "シグナル数: 0" in message
+    assert "約定数: 0" in message
+    assert "初期純資産: 10,000,000.00円" in message
+    assert "最終純資産: 10,100,000.00円" in message
+    assert "日次損益: +100,000.00円" in message
+    assert "日次収益率: +1.0000%" in message
+    assert "エラー: なし" in message
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (1000.0, "1,000.00円"),
+        (-1000.0, "-1,000.00円"),
+        (0.0, "0.00円"),
+        (None, "N/A"),
+    ],
+)
+def test_format_money(
+    value,
+    expected,
+) -> None:
+    """残高金額を桁区切り付きで整形する。"""
+
+    assert _format_money(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (1000.0, "+1,000.00円"),
+        (-1000.0, "-1,000.00円"),
+        (0.0, "0.00円"),
+        (None, "N/A"),
+    ],
+)
+def test_format_money_with_positive_sign(
+    value,
+    expected,
+) -> None:
+    """損益金額は正数へプラス記号を付ける。"""
+
+    assert _format_money(
+        value,
+        show_positive_sign=True,
+    ) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (0.012345, "+1.2345%"),
+        (-0.012345, "-1.2345%"),
+        (0.0, "0.0000%"),
+        (None, "N/A"),
+    ],
+)
+def test_format_percentage(
+    value,
+    expected,
+) -> None:
+    """比率を百分率表示へ整形する。"""
+
+    assert _format_percentage(value) == expected

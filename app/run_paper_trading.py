@@ -40,6 +40,7 @@ from app.runtime.paper_trading_day_models import (
     PaperTradingDayResult,
     PaperTradingDayStopReason,
 )
+from app.market.market_calendar import TokyoMarketCalendar
 from app.runtime.production_readiness import (
     ProductionReadinessChecker,
     ProductionReadinessReport,
@@ -487,17 +488,82 @@ def _startup_notification_message(
 def _finished_notification_message(
     result: PaperTradingDayResult,
 ) -> str:
-    """終了通知本文を生成する。"""
+    """終了通知を日次サマリー形式で生成する。"""
+
+    summary = result.summary
+    duration_seconds = (
+        result.completed_at - result.started_at
+    ).total_seconds()
+    net_profit_loss = _format_money(
+        result.net_profit_loss,
+        show_positive_sign=True,
+    )
+    return_rate = _format_percentage(
+        result.return_rate
+    )
+    error_message = (
+        result.error_message
+        if result.error_message is not None
+        else "なし"
+    )
 
     return (
-        "Paper Tradingが終了しました。\\n"
+        "Paper Trading Daily Summary\\n"
         f"取引日: {result.trading_date.isoformat()}\\n"
         f"終了理由: {result.stop_reason.value}\\n"
-        f"サイクル数: {result.cycle_count}\\n"
-        f"損益: {result.net_profit_loss}\\n"
-        f"収益率: {result.return_rate}\\n"
-        f"エラー: {result.error_message}"
+        f"Runtime状態: {summary.status.value}\\n"
+        f"実行時間: {duration_seconds:,.1f}秒\\n"
+        f"サイクル数: {summary.cycle_count}\\n"
+        "成功サイクル: "
+        f"{summary.successful_cycle_count}\\n"
+        f"失敗サイクル: {summary.failed_cycle_count}\\n"
+        f"シグナル数: {summary.signal_count}\\n"
+        f"約定数: {summary.execution_count}\\n"
+        "リスク判定済みサイクル: "
+        f"{summary.risk_evaluated_cycle_count}\\n"
+        "リスク停止サイクル: "
+        f"{summary.risk_blocked_cycle_count}\\n"
+        f"初期純資産: {_format_money(summary.initial_equity)}\\n"
+        f"最終純資産: {_format_money(summary.final_equity)}\\n"
+        f"日次損益: {net_profit_loss}\\n"
+        f"日次収益率: {return_rate}\\n"
+        f"エラー: {error_message}"
     )
+
+
+def _format_money(
+    value: float | None,
+    *,
+    show_positive_sign: bool = False,
+) -> str:
+    """金額を通知表示向けに整形する。"""
+
+    if value is None:
+        return "N/A"
+
+    sign = (
+        "+"
+        if show_positive_sign and value > 0
+        else ""
+    )
+    return f"{sign}{value:,.2f}円"
+
+
+def _format_percentage(
+    value: float | None,
+) -> str:
+    """比率を百分率表示へ整形する。"""
+
+    if value is None:
+        return "N/A"
+
+    percentage = value * 100.0
+    sign = (
+        "+"
+        if percentage > 0
+        else ""
+    )
+    return f"{sign}{percentage:,.4f}%"
 
 
 def run(
@@ -543,8 +609,33 @@ def run(
         )
 
         if arguments.readiness_check:
+            readiness_app_settings = (
+                Settings.from_environment(
+                    environment=environ,
+                    env_file=ROOT_DIR / ".env",
+                )
+            )
+            readiness_notification_bundle = (
+                NotificationComposition.create(
+                    settings=(
+                        readiness_app_settings.notifications
+                    ),
+                    require_channel=False,
+                )
+            )
+            market_calendar = TokyoMarketCalendar()
+
             checker = ProductionReadinessChecker(
                 composition_factory=composition_factory,
+                notification_channel_provider=(
+                    lambda: (
+                        readiness_notification_bundle
+                        .channel_names
+                    )
+                ),
+                trading_day_provider=(
+                    market_calendar.is_business_day
+                ),
             )
             report = checker.check(
                 settings=settings
