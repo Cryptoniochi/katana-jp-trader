@@ -77,7 +77,56 @@ class FakePortfolioReader:
         )
 
 
-def create_runtime():
+class FakeRiskResult:
+    def __init__(
+        self,
+        *,
+        allows_new_entries: bool,
+        approved_quantity: int,
+    ) -> None:
+        self.allows_new_entries = allows_new_entries
+        self.is_blocked = not allows_new_entries
+        self.approved_quantity = (
+            approved_quantity
+            if allows_new_entries
+            else 0
+        )
+
+
+class FakeRiskRunRecord:
+    def __init__(self, result) -> None:
+        self.result = result
+
+
+class FakeRiskRunner:
+    def __init__(self, results) -> None:
+        self.results = list(results)
+        self.calls = []
+
+    def run(
+        self,
+        *,
+        cycle_result,
+        portfolio_snapshot,
+        evaluated_at,
+    ):
+        self.calls.append(
+            {
+                "cycle_result": cycle_result,
+                "portfolio_snapshot": portfolio_snapshot,
+                "evaluated_at": evaluated_at,
+            }
+        )
+
+        return FakeRiskRunRecord(
+            self.results[len(self.calls) - 1]
+        )
+
+
+def create_runtime(
+    *,
+    risk_runner=None,
+):
     return PaperTradingRuntime(
         cycle_runner=FakeCycleRunner(),
         portfolio_reader=FakePortfolioReader(
@@ -88,6 +137,7 @@ def create_runtime():
                 1_010_000.0,
             )
         ),
+        risk_runner=risk_runner,
         now_provider=lambda: NOW,
     )
 
@@ -108,6 +158,9 @@ def test_runtime_records_cycles_and_completes() -> None:
     assert summary.final_equity == 1_010_000.0
     assert summary.net_profit_loss == 10_000.0
     assert len(runtime.records()) == 2
+    assert summary.risk_evaluated_cycle_count == 0
+    assert summary.risk_blocked_cycle_count == 0
+    assert summary.latest_risk_result is None
 
 
 def test_runtime_can_fail_with_summary() -> None:
@@ -143,3 +196,88 @@ def test_runtime_rejects_double_start() -> None:
         match="すでに稼働中",
     ):
         runtime.start()
+
+
+def test_runtime_runs_risk_after_portfolio_snapshot() -> None:
+    risk_result = FakeRiskResult(
+        allows_new_entries=True,
+        approved_quantity=200,
+    )
+    risk_runner = FakeRiskRunner((risk_result,))
+    runtime = create_runtime(
+        risk_runner=risk_runner,
+    )
+
+    runtime.start()
+    record = runtime.run_cycle()
+
+    assert len(risk_runner.calls) == 1
+    call = risk_runner.calls[0]
+    assert call["cycle_result"] is record.cycle_result
+    assert (
+        call["portfolio_snapshot"]
+        is record.portfolio_snapshot
+    )
+    assert call["evaluated_at"] == NOW
+    assert record.risk_result is risk_result
+    assert record.has_risk_result
+    assert record.allows_new_entries is True
+    assert runtime.last_risk_result is risk_result
+
+
+def test_runtime_records_blocked_risk_result() -> None:
+    risk_result = FakeRiskResult(
+        allows_new_entries=False,
+        approved_quantity=200,
+    )
+    runtime = create_runtime(
+        risk_runner=FakeRiskRunner((risk_result,)),
+    )
+
+    runtime.start()
+    record = runtime.run_cycle()
+    summary = runtime.complete()
+
+    assert record.allows_new_entries is False
+    assert summary.risk_evaluated_cycle_count == 1
+    assert summary.risk_blocked_cycle_count == 1
+    assert summary.latest_risk_result is risk_result
+
+
+def test_runtime_tracks_latest_risk_result() -> None:
+    first_result = FakeRiskResult(
+        allows_new_entries=True,
+        approved_quantity=100,
+    )
+    second_result = FakeRiskResult(
+        allows_new_entries=False,
+        approved_quantity=100,
+    )
+    runtime = create_runtime(
+        risk_runner=FakeRiskRunner(
+            (
+                first_result,
+                second_result,
+            )
+        ),
+    )
+
+    runtime.start()
+    runtime.run_cycle()
+    runtime.run_cycle()
+
+    assert runtime.last_risk_result is second_result
+    assert runtime.records()[0].risk_result is first_result
+    assert runtime.records()[1].risk_result is second_result
+
+
+def test_runtime_without_risk_runner_is_backward_compatible() -> None:
+    runtime = create_runtime()
+
+    runtime.start()
+    record = runtime.run_cycle()
+
+    assert record.risk_result is None
+    assert not record.has_risk_result
+    assert record.allows_new_entries is None
+    assert runtime.last_risk_result is None

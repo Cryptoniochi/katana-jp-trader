@@ -6,6 +6,8 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Protocol
 
+from app.risk.risk_engine import RiskEngineResult
+from app.risk.risk_engine_runner import RiskEngineRunner
 from app.runtime.paper_trading_runtime_models import (
     PaperTradingCycleRecord,
     PaperTradingDailySummary,
@@ -39,20 +41,22 @@ class PaperTradingPortfolioReader(Protocol):
 
 
 class PaperTradingRuntime:
-    """1営業日のTrading Cycleと資産推移を集約する。"""
+    """1営業日のTrading Cycle・資産推移・リスク状態を集約する。"""
 
     def __init__(
         self,
         *,
         cycle_runner: PaperTradingCycleRunner,
         portfolio_reader: PaperTradingPortfolioReader,
+        risk_runner: RiskEngineRunner | None = None,
         heartbeat_service: RuntimeHeartbeatService | None = None,
         now_provider: Callable[[], datetime] | None = None,
     ) -> None:
-        """Trading Loop・Portfolio・Heartbeat・時計を設定する。"""
+        """Trading Loop・Portfolio・Risk・Heartbeat・時計を設定する。"""
 
         self.cycle_runner = cycle_runner
         self.portfolio_reader = portfolio_reader
+        self.risk_runner = risk_runner
         self.heartbeat_service = heartbeat_service
         self.now_provider = (
             now_provider
@@ -83,6 +87,18 @@ class PaperTradingRuntime:
             return None
 
         return self.heartbeat_service.last_heartbeat
+
+    @property
+    def last_risk_result(
+        self,
+    ) -> RiskEngineResult | None:
+        """最新のRisk Engine結果を返す。"""
+
+        for record in reversed(self._records):
+            if record.risk_result is not None:
+                return record.risk_result
+
+        return None
 
     def start(self) -> None:
         """終日Runtimeを開始する。"""
@@ -117,7 +133,7 @@ class PaperTradingRuntime:
         )
 
     def run_cycle(self) -> PaperTradingCycleRecord:
-        """Trading Cycleを実行してPortfolioを記録する。"""
+        """Trading Cycle・Portfolio取得・Risk判定を実行する。"""
 
         self._require_running()
         cycle_result = self.cycle_runner.run_cycle()
@@ -125,18 +141,43 @@ class PaperTradingRuntime:
         snapshot = self.portfolio_reader.create_snapshot(
             generated_at=recorded_at
         )
+        risk_result = self._run_risk_evaluation(
+            cycle_result=cycle_result,
+            portfolio_snapshot=snapshot,
+            evaluated_at=recorded_at,
+        )
         record = PaperTradingCycleRecord(
             cycle_result=cycle_result,
             portfolio_snapshot=snapshot,
+            risk_result=risk_result,
         )
         self._records.append(record)
+
+        heartbeat_details: dict[str, object] = {
+            "record_count": len(self._records),
+            "broker_equity": snapshot.broker_equity,
+        }
+
+        if risk_result is not None:
+            heartbeat_details.update(
+                {
+                    "risk_evaluated": True,
+                    "risk_blocked": risk_result.is_blocked,
+                    "allows_new_entries": (
+                        risk_result.allows_new_entries
+                    ),
+                    "approved_quantity": (
+                        risk_result.approved_quantity
+                    ),
+                }
+            )
+        else:
+            heartbeat_details["risk_evaluated"] = False
+
         self._record_heartbeat(
             event="cycle_completed",
             recorded_at=recorded_at,
-            details={
-                "record_count": len(self._records),
-                "broker_equity": snapshot.broker_equity,
-            },
+            details=heartbeat_details,
         )
 
         return record
@@ -175,6 +216,26 @@ class PaperTradingRuntime:
 
         return tuple(self._records)
 
+    def _run_risk_evaluation(
+        self,
+        *,
+        cycle_result: object,
+        portfolio_snapshot: PortfolioSnapshot,
+        evaluated_at: datetime,
+    ) -> RiskEngineResult | None:
+        """Risk Runnerが設定されている場合だけリスク判定を行う。"""
+
+        if self.risk_runner is None:
+            return None
+
+        run_record = self.risk_runner.run(
+            cycle_result=cycle_result,
+            portfolio_snapshot=portfolio_snapshot,
+            evaluated_at=evaluated_at,
+        )
+
+        return run_record.result
+
     def _finalize(
         self,
         *,
@@ -211,6 +272,12 @@ class PaperTradingRuntime:
         heartbeat_details: dict[str, object] = {
             "record_count": len(self._records),
             "broker_equity": final_snapshot.broker_equity,
+            "risk_evaluated_cycle_count": (
+                summary.risk_evaluated_cycle_count
+            ),
+            "risk_blocked_cycle_count": (
+                summary.risk_blocked_cycle_count
+            ),
         }
 
         if error_message is not None:
