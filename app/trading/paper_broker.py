@@ -454,6 +454,187 @@ class PaperBroker:
             normalized_code,
         )
 
+    def restore_state(
+        self,
+        *,
+        cash_balance: float,
+        positions: list[BrokerPosition],
+        orders: list[tuple[TradeOrder, BrokerOrderSnapshot]] | None = None,
+        market_prices: dict[str, float] | None = None,
+    ) -> None:
+        """永続化済み状態からPaper Brokerを一括復元する。"""
+
+        if cash_balance < 0:
+            raise ValueError(
+                "復元する現金残高は0以上である必要があります。"
+            )
+
+        current_time = self._current_time()
+        restored_orders = orders or []
+        restored_market_prices = market_prices or {}
+
+        next_positions: dict[
+            tuple[str, BrokerPositionSide],
+            _PaperPositionState,
+        ] = {}
+        next_orders: dict[str, _PaperOrderState] = {}
+        next_client_order_ids: dict[str, str] = {}
+        next_market_prices: dict[str, float] = {}
+
+        for code, market_price in restored_market_prices.items():
+            normalized_code = self._normalize_code(code)
+            normalized_price = float(market_price)
+
+            if normalized_price <= 0:
+                raise ValueError(
+                    "復元する現在価格は0より大きい必要があります。 "
+                    f"code={normalized_code} "
+                    f"market_price={normalized_price}"
+                )
+
+            next_market_prices[normalized_code] = normalized_price
+
+        for position in positions:
+            normalized_code = self._normalize_code(position.code)
+            resolved_market_price = (
+                float(position.market_price)
+                if position.market_price is not None
+                else next_market_prices.get(
+                    normalized_code,
+                    float(position.average_price),
+                )
+            )
+            resolved_updated_at = (
+                position.updated_at.astimezone(timezone.utc)
+                if position.updated_at is not None
+                else current_time
+            )
+            position_key = (
+                normalized_code,
+                position.side,
+            )
+
+            if position_key in next_positions:
+                raise ValueError(
+                    "復元するポジションの銘柄・方向が重複しています。 "
+                    f"code={normalized_code} "
+                    f"side={position.side.value}"
+                )
+
+            next_positions[position_key] = _PaperPositionState(
+                code=normalized_code,
+                side=position.side,
+                quantity=position.quantity,
+                average_price=float(position.average_price),
+                market_price=resolved_market_price,
+                updated_at=resolved_updated_at,
+            )
+            next_market_prices[normalized_code] = resolved_market_price
+
+        maximum_order_number = 0
+
+        for order, snapshot in restored_orders:
+            self._validate_restored_order(
+                order=order,
+                snapshot=snapshot,
+            )
+
+            if snapshot.broker_order_id in next_orders:
+                raise ValueError(
+                    "復元するBroker注文IDが重複しています。 "
+                    f"broker_order_id={snapshot.broker_order_id}"
+                )
+
+            if order.order_id in next_client_order_ids:
+                raise ValueError(
+                    "復元するクライアント注文IDが重複しています。 "
+                    f"order_id={order.order_id}"
+                )
+
+            stop_triggered = (
+                order.order_type is OrderType.STOP_LIMIT
+                and "stop triggered"
+                in (snapshot.status_reason or "").lower()
+            )
+
+            next_orders[snapshot.broker_order_id] = _PaperOrderState(
+                order=order,
+                broker_order_id=snapshot.broker_order_id,
+                status=snapshot.status,
+                filled_quantity=snapshot.filled_quantity,
+                average_fill_price=snapshot.average_fill_price,
+                submitted_at=snapshot.submitted_at.astimezone(
+                    timezone.utc
+                ),
+                updated_at=snapshot.updated_at.astimezone(
+                    timezone.utc
+                ),
+                status_reason=snapshot.status_reason,
+                stop_triggered=stop_triggered,
+            )
+            next_client_order_ids[
+                order.order_id
+            ] = snapshot.broker_order_id
+            maximum_order_number = max(
+                maximum_order_number,
+                self._extract_broker_order_number(
+                    snapshot.broker_order_id
+                ),
+            )
+
+        self._cash_balance = float(cash_balance)
+        self._positions = next_positions
+        self._orders = next_orders
+        self._client_order_ids = next_client_order_ids
+        self._market_prices = next_market_prices
+        self._next_broker_order_number = (
+            maximum_order_number + 1
+        )
+
+    @staticmethod
+    def _validate_restored_order(
+        *,
+        order: TradeOrder,
+        snapshot: BrokerOrderSnapshot,
+    ) -> None:
+        """復元対象の注文内容とBroker Snapshotを照合する。"""
+
+        mismatches: list[str] = []
+
+        if snapshot.client_order_id != order.order_id:
+            mismatches.append("client_order_id")
+        if snapshot.code != order.code:
+            mismatches.append("code")
+        if snapshot.side is not order.side:
+            mismatches.append("side")
+        if snapshot.quantity != order.quantity:
+            mismatches.append("quantity")
+
+        if mismatches:
+            raise ValueError(
+                "復元する注文とBroker Snapshotが一致しません。 "
+                f"order_id={order.order_id} "
+                f"mismatches={','.join(mismatches)}"
+            )
+
+    @staticmethod
+    def _extract_broker_order_number(
+        broker_order_id: str,
+    ) -> int:
+        """Paper注文ID末尾の連番を返す。"""
+
+        prefix = "paper-order-"
+
+        if not broker_order_id.startswith(prefix):
+            return 0
+
+        number_text = broker_order_id[len(prefix):]
+
+        if not number_text.isdigit():
+            return 0
+
+        return int(number_text)
+
     def _process_order(
         self,
         *,

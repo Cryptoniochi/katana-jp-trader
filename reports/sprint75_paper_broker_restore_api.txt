@@ -1,0 +1,6441 @@
+================================================================================
+FILE: app\trading\paper_broker.py
+================================================================================
+"""実資金を使わずに注文・約定・ポジションを再現するPaper Broker。"""
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+from app.trading.broker_adapter import (
+    BrokerAccountSnapshot,
+    BrokerAdapter,
+    BrokerOrderNotFoundError,
+    BrokerOrderRejectedError,
+    BrokerOrderSnapshot,
+    BrokerPosition,
+    BrokerPositionSide,
+    BrokerRequestError,
+)
+from app.trading.order_models import (
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    TradeOrder,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PaperBrokerSettings:
+    """Paper Brokerの初期資金と約定条件。"""
+
+    initial_cash: float = 10_000_000.0
+    commission_per_order: float = 0.0
+    slippage_rate: float = 0.0
+    currency: str = "JPY"
+    broker_name: str = "paper"
+
+    def __post_init__(self) -> None:
+        """不正な設定を拒否して文字列を正規化する。"""
+
+        normalized_currency = self.currency.strip().upper()
+        normalized_broker_name = self.broker_name.strip()
+
+        if self.initial_cash < 0:
+            raise ValueError(
+                "初期資金は0以上である必要があります。"
+            )
+
+        if self.commission_per_order < 0:
+            raise ValueError(
+                "注文手数料は0以上である必要があります。"
+            )
+
+        if self.slippage_rate < 0:
+            raise ValueError(
+                "スリッページ率は0以上である必要があります。"
+            )
+
+        if (
+            len(normalized_currency) != 3
+            or not normalized_currency.isalpha()
+        ):
+            raise ValueError(
+                "通貨コードは英字3文字で指定してください。"
+            )
+
+        if not normalized_broker_name:
+            raise ValueError(
+                "Broker名を指定してください。"
+            )
+
+        object.__setattr__(
+            self,
+            "currency",
+            normalized_currency,
+        )
+        object.__setattr__(
+            self,
+            "broker_name",
+            normalized_broker_name,
+        )
+
+
+@dataclass(slots=True)
+class _PaperOrderState:
+    """Paper Broker内部の注文状態。"""
+
+    order: TradeOrder
+    broker_order_id: str
+    status: OrderStatus
+    filled_quantity: int
+    average_fill_price: float | None
+    submitted_at: datetime
+    updated_at: datetime
+    status_reason: str | None = None
+    stop_triggered: bool = False
+
+
+@dataclass(slots=True)
+class _PaperPositionState:
+    """Paper Broker内部のポジション状態。"""
+
+    code: str
+    side: BrokerPositionSide
+    quantity: int
+    average_price: float
+    market_price: float
+    updated_at: datetime
+
+
+class PaperBroker:
+    """市場価格を使ってPaper注文を処理するインメモリBroker。"""
+
+    def __init__(
+        self,
+        *,
+        price_provider: Callable[[str], float],
+        settings: PaperBrokerSettings | None = None,
+        now_provider: Callable[[], datetime] | None = None,
+    ) -> None:
+        """設定・現在価格取得処理・時計を受け取る。"""
+
+        self.settings = (
+            settings
+            if settings is not None
+            else PaperBrokerSettings()
+        )
+        self.price_provider = price_provider
+        self.now_provider = (
+            now_provider
+            if now_provider is not None
+            else lambda: datetime.now(timezone.utc)
+        )
+
+        self._cash_balance = self.settings.initial_cash
+
+        self._orders: dict[
+            str,
+            _PaperOrderState,
+        ] = {}
+
+        self._client_order_ids: dict[
+            str,
+            str,
+        ] = {}
+
+        self._positions: dict[
+            tuple[str, BrokerPositionSide],
+            _PaperPositionState,
+        ] = {}
+
+        self._market_prices: dict[
+            str,
+            float,
+        ] = {}
+
+        self._next_broker_order_number = 1
+
+    @property
+    def broker_name(self) -> str:
+        """Broker名を返す。"""
+
+        return self.settings.broker_name
+
+    def submit_order(
+        self,
+        order: TradeOrder,
+    ) -> BrokerOrderSnapshot:
+        """注文を登録し、条件成立時は即時約定する。"""
+
+        existing_broker_order_id = (
+            self._client_order_ids.get(
+                order.order_id,
+            )
+        )
+
+        if existing_broker_order_id is not None:
+            return self.get_order(
+                existing_broker_order_id,
+            )
+
+        current_time = self._current_time()
+        market_price = self._get_market_price(
+            order.code,
+        )
+
+        self._market_prices[
+            order.code
+        ] = market_price
+
+        broker_order_id = self._create_broker_order_id()
+
+        state = _PaperOrderState(
+            order=order,
+            broker_order_id=broker_order_id,
+            status=OrderStatus.SENT,
+            filled_quantity=0,
+            average_fill_price=None,
+            submitted_at=current_time,
+            updated_at=current_time,
+            status_reason="paper order accepted",
+        )
+
+        self._orders[
+            broker_order_id
+        ] = state
+        self._client_order_ids[
+            order.order_id
+        ] = broker_order_id
+
+        try:
+            self._process_order(
+                state=state,
+                market_price=market_price,
+                processed_at=current_time,
+            )
+
+        except Exception:
+            self._orders.pop(
+                broker_order_id,
+                None,
+            )
+            self._client_order_ids.pop(
+                order.order_id,
+                None,
+            )
+            raise
+
+        return self._to_snapshot(
+            state,
+        )
+
+    def cancel_order(
+        self,
+        broker_order_id: str,
+    ) -> BrokerOrderSnapshot:
+        """未完了注文を取り消す。"""
+
+        state = self._get_state(
+            broker_order_id,
+        )
+
+        if state.status.is_terminal:
+            raise BrokerRequestError(
+                "終了済み注文は取り消せません。 "
+                f"broker_order_id={state.broker_order_id} "
+                f"status={state.status.value}"
+            )
+
+        current_time = self._current_time()
+
+        state.status = OrderStatus.CANCELLED
+        state.updated_at = current_time
+        state.status_reason = "cancelled by client"
+
+        return self._to_snapshot(
+            state,
+        )
+
+    def get_order(
+        self,
+        broker_order_id: str,
+    ) -> BrokerOrderSnapshot:
+        """Broker注文の最新状態を返す。"""
+
+        return self._to_snapshot(
+            self._get_state(
+                broker_order_id,
+            )
+        )
+
+    def list_orders(
+        self,
+        *,
+        active_only: bool = False,
+    ) -> list[BrokerOrderSnapshot]:
+        """Broker注文一覧を新しい順に返す。"""
+
+        states = list(
+            self._orders.values()
+        )
+
+        if active_only:
+            states = [
+                state
+                for state in states
+                if not state.status.is_terminal
+            ]
+
+        sorted_states = sorted(
+            states,
+            key=lambda item: (
+                item.submitted_at,
+                item.broker_order_id,
+            ),
+            reverse=True,
+        )
+
+        return [
+            self._to_snapshot(state)
+            for state in sorted_states
+        ]
+
+    def list_positions(
+        self,
+    ) -> list[BrokerPosition]:
+        """現在保有しているポジション一覧を返す。"""
+
+        states = sorted(
+            self._positions.values(),
+            key=lambda item: (
+                item.code,
+                item.side.value,
+            ),
+        )
+
+        return [
+            BrokerPosition(
+                code=state.code,
+                side=state.side,
+                quantity=state.quantity,
+                average_price=state.average_price,
+                market_price=state.market_price,
+                updated_at=state.updated_at,
+            )
+            for state in states
+            if state.quantity > 0
+        ]
+
+    def get_account(
+        self,
+    ) -> BrokerAccountSnapshot:
+        """現金・時価総額・純資産額を返す。"""
+
+        current_time = self._current_time()
+
+        long_market_value = sum(
+            position.market_price
+            * position.quantity
+            for position in self._positions.values()
+            if position.side
+            is BrokerPositionSide.LONG
+        )
+
+        short_market_value = sum(
+            position.market_price
+            * position.quantity
+            for position in self._positions.values()
+            if position.side
+            is BrokerPositionSide.SHORT
+        )
+
+        equity = (
+            self._cash_balance
+            + long_market_value
+            - short_market_value
+        )
+
+        return BrokerAccountSnapshot(
+            currency=self.settings.currency,
+            cash_balance=self._cash_balance,
+            buying_power=self._cash_balance,
+            market_value=(
+                long_market_value
+                + short_market_value
+            ),
+            equity=equity,
+            updated_at=current_time,
+        )
+
+    def update_market_price(
+        self,
+        code: str,
+        market_price: float,
+    ) -> list[BrokerOrderSnapshot]:
+        """価格を更新し、条件成立した待機注文を処理する。"""
+
+        normalized_code = self._normalize_code(
+            code,
+        )
+
+        if market_price <= 0:
+            raise ValueError(
+                "現在価格は0より大きい必要があります。"
+            )
+
+        current_time = self._current_time()
+
+        self._market_prices[
+            normalized_code
+        ] = market_price
+
+        for (
+            position_code,
+            _position_side,
+        ), position in self._positions.items():
+            if position_code != normalized_code:
+                continue
+
+            position.market_price = market_price
+            position.updated_at = current_time
+
+        changed_snapshots: list[
+            BrokerOrderSnapshot
+        ] = []
+
+        active_states = sorted(
+            (
+                state
+                for state in self._orders.values()
+                if (
+                    state.order.code
+                    == normalized_code
+                    and not state.status.is_terminal
+                )
+            ),
+            key=lambda item: (
+                item.submitted_at,
+                item.broker_order_id,
+            ),
+        )
+
+        for state in active_states:
+            previous_status = state.status
+            previous_triggered = state.stop_triggered
+
+            self._process_order(
+                state=state,
+                market_price=market_price,
+                processed_at=current_time,
+            )
+
+            if (
+                state.status is not previous_status
+                or state.stop_triggered
+                is not previous_triggered
+            ):
+                changed_snapshots.append(
+                    self._to_snapshot(
+                        state,
+                    )
+                )
+
+        return changed_snapshots
+
+    def get_market_price(
+        self,
+        code: str,
+    ) -> float | None:
+        """Paper Brokerが保持する最新価格を返す。"""
+
+        normalized_code = self._normalize_code(
+            code,
+        )
+
+        return self._market_prices.get(
+            normalized_code,
+        )
+
+    def _process_order(
+        self,
+        *,
+        state: _PaperOrderState,
+        market_price: float,
+        processed_at: datetime,
+    ) -> None:
+        """注文種別に応じて発動・約定条件を判定する。"""
+
+        if state.status.is_terminal:
+            return
+
+        order = state.order
+
+        if order.order_type is OrderType.MARKET:
+            fill_price = self._calculate_market_fill_price(
+                side=order.side,
+                market_price=market_price,
+            )
+
+            self._execute_fill(
+                state=state,
+                fill_price=fill_price,
+                filled_at=processed_at,
+            )
+            return
+
+        if order.order_type is OrderType.LIMIT:
+            if not self._is_limit_marketable(
+                order=order,
+                market_price=market_price,
+            ):
+                state.status_reason = (
+                    "waiting for limit price"
+                )
+                return
+
+            fill_price = self._calculate_limit_fill_price(
+                order=order,
+                market_price=market_price,
+            )
+
+            self._execute_fill(
+                state=state,
+                fill_price=fill_price,
+                filled_at=processed_at,
+            )
+            return
+
+        if order.order_type is OrderType.STOP:
+            if not self._is_stop_triggered(
+                order=order,
+                market_price=market_price,
+            ):
+                state.status_reason = (
+                    "waiting for stop trigger"
+                )
+                return
+
+            state.stop_triggered = True
+
+            fill_price = self._calculate_market_fill_price(
+                side=order.side,
+                market_price=market_price,
+            )
+
+            self._execute_fill(
+                state=state,
+                fill_price=fill_price,
+                filled_at=processed_at,
+            )
+            return
+
+        if order.order_type is OrderType.STOP_LIMIT:
+            if not state.stop_triggered:
+                if not self._is_stop_triggered(
+                    order=order,
+                    market_price=market_price,
+                ):
+                    state.status_reason = (
+                        "waiting for stop trigger"
+                    )
+                    return
+
+                state.stop_triggered = True
+                state.updated_at = processed_at
+                state.status_reason = (
+                    "stop triggered; "
+                    "waiting for limit price"
+                )
+
+            if not self._is_limit_marketable(
+                order=order,
+                market_price=market_price,
+            ):
+                return
+
+            fill_price = self._calculate_limit_fill_price(
+                order=order,
+                market_price=market_price,
+            )
+
+            self._execute_fill(
+                state=state,
+                fill_price=fill_price,
+                filled_at=processed_at,
+            )
+            return
+
+        raise BrokerRequestError(
+            "未対応の注文種別です。 "
+            f"order_type={order.order_type.value}"
+        )
+
+    def _execute_fill(
+        self,
+        *,
+        state: _PaperOrderState,
+        fill_price: float,
+        filled_at: datetime,
+    ) -> None:
+        """全約定を資金とポジションへ反映する。"""
+
+        order = state.order
+
+        self._validate_execution(
+            order=order,
+            fill_price=fill_price,
+        )
+
+        gross_amount = (
+            fill_price
+            * order.quantity
+        )
+        commission = (
+            self.settings.commission_per_order
+        )
+
+        if order.side is OrderSide.BUY:
+            self._cash_balance -= (
+                gross_amount
+                + commission
+            )
+
+            self._increase_position(
+                code=order.code,
+                side=BrokerPositionSide.LONG,
+                quantity=order.quantity,
+                fill_price=fill_price,
+                filled_at=filled_at,
+            )
+
+        else:
+            self._execute_sell(
+                code=order.code,
+                quantity=order.quantity,
+                fill_price=fill_price,
+                commission=commission,
+                filled_at=filled_at,
+            )
+
+        state.status = OrderStatus.FILLED
+        state.filled_quantity = order.quantity
+        state.average_fill_price = fill_price
+        state.updated_at = filled_at
+        state.status_reason = "paper order filled"
+
+    def _execute_sell(
+        self,
+        *,
+        code: str,
+        quantity: int,
+        fill_price: float,
+        commission: float,
+        filled_at: datetime,
+    ) -> None:
+        """買いポジションを売却する。"""
+
+        position_key = (
+            code,
+            BrokerPositionSide.LONG,
+        )
+
+        position = self._positions.get(
+            position_key,
+        )
+
+        available_quantity = (
+            position.quantity
+            if position is not None
+            else 0
+        )
+
+        if available_quantity < quantity:
+            raise BrokerOrderRejectedError(
+                "売却可能数量が不足しています。 "
+                f"code={code} "
+                f"required={quantity} "
+                f"available={available_quantity}"
+            )
+
+        proceeds = (
+            fill_price
+            * quantity
+            - commission
+        )
+
+        self._cash_balance += proceeds
+
+        assert position is not None
+
+        position.quantity -= quantity
+        position.market_price = fill_price
+        position.updated_at = filled_at
+
+        if position.quantity == 0:
+            del self._positions[
+                position_key
+            ]
+
+    def _increase_position(
+        self,
+        *,
+        code: str,
+        side: BrokerPositionSide,
+        quantity: int,
+        fill_price: float,
+        filled_at: datetime,
+    ) -> None:
+        """同方向ポジションを加重平均で増加させる。"""
+
+        position_key = (
+            code,
+            side,
+        )
+
+        existing = self._positions.get(
+            position_key,
+        )
+
+        if existing is None:
+            self._positions[
+                position_key
+            ] = _PaperPositionState(
+                code=code,
+                side=side,
+                quantity=quantity,
+                average_price=fill_price,
+                market_price=fill_price,
+                updated_at=filled_at,
+            )
+            return
+
+        total_quantity = (
+            existing.quantity
+            + quantity
+        )
+
+        weighted_average = (
+            existing.average_price
+            * existing.quantity
+            + fill_price
+            * quantity
+        ) / total_quantity
+
+        existing.quantity = total_quantity
+        existing.average_price = weighted_average
+        existing.market_price = fill_price
+        existing.updated_at = filled_at
+
+    def _validate_execution(
+        self,
+        *,
+        order: TradeOrder,
+        fill_price: float,
+    ) -> None:
+        """約定直前の資金・保有数量を検証する。"""
+
+        if order.side is OrderSide.BUY:
+            required_cash = (
+                fill_price
+                * order.quantity
+                + self.settings.commission_per_order
+            )
+
+            if required_cash > self._cash_balance:
+                raise BrokerOrderRejectedError(
+                    "買付余力が不足しています。 "
+                    f"required={required_cash} "
+                    f"available={self._cash_balance}"
+                )
+            return
+
+        position = self._positions.get(
+            (
+                order.code,
+                BrokerPositionSide.LONG,
+            )
+        )
+
+        available_quantity = (
+            position.quantity
+            if position is not None
+            else 0
+        )
+
+        if available_quantity < order.quantity:
+            raise BrokerOrderRejectedError(
+                "売却可能数量が不足しています。 "
+                f"code={order.code} "
+                f"required={order.quantity} "
+                f"available={available_quantity}"
+            )
+
+    def _calculate_market_fill_price(
+        self,
+        *,
+        side: OrderSide,
+        market_price: float,
+    ) -> float:
+        """成行約定価格へスリッページを反映する。"""
+
+        if side is OrderSide.BUY:
+            return market_price * (
+                1.0
+                + self.settings.slippage_rate
+            )
+
+        return market_price * (
+            1.0
+            - self.settings.slippage_rate
+        )
+
+    def _calculate_limit_fill_price(
+        self,
+        *,
+        order: TradeOrder,
+        market_price: float,
+    ) -> float:
+        """指値より不利にならない約定価格を返す。"""
+
+        if order.limit_price is None:
+            raise BrokerRequestError(
+                "指値価格が設定されていません。"
+            )
+
+        slipped_price = (
+            self._calculate_market_fill_price(
+                side=order.side,
+                market_price=market_price,
+            )
+        )
+
+        if order.side is OrderSide.BUY:
+            return min(
+                slipped_price,
+                order.limit_price,
+            )
+
+        return max(
+            slipped_price,
+            order.limit_price,
+        )
+
+    @staticmethod
+    def _is_limit_marketable(
+        *,
+        order: TradeOrder,
+        market_price: float,
+    ) -> bool:
+        """指値注文が現在価格で約定可能か返す。"""
+
+        if order.limit_price is None:
+            return False
+
+        if order.side is OrderSide.BUY:
+            return (
+                market_price
+                <= order.limit_price
+            )
+
+        return (
+            market_price
+            >= order.limit_price
+        )
+
+    @staticmethod
+    def _is_stop_triggered(
+        *,
+        order: TradeOrder,
+        market_price: float,
+    ) -> bool:
+        """逆指値条件へ到達したか返す。"""
+
+        if order.stop_price is None:
+            return False
+
+        if order.side is OrderSide.BUY:
+            return (
+                market_price
+                >= order.stop_price
+            )
+
+        return (
+            market_price
+            <= order.stop_price
+        )
+
+    def _get_market_price(
+        self,
+        code: str,
+    ) -> float:
+        """現在価格を取得して検証する。"""
+
+        normalized_code = self._normalize_code(
+            code,
+        )
+
+        try:
+            price = float(
+                self.price_provider(
+                    normalized_code,
+                )
+            )
+
+        except Exception as error:
+            raise BrokerRequestError(
+                "現在価格を取得できませんでした。 "
+                f"code={normalized_code}"
+            ) from error
+
+        if price <= 0:
+            raise BrokerRequestError(
+                "現在価格は0より大きい必要があります。 "
+                f"code={normalized_code} "
+                f"price={price}"
+            )
+
+        return price
+
+    def _get_state(
+        self,
+        broker_order_id: str,
+    ) -> _PaperOrderState:
+        """Broker注文IDに対応する内部状態を返す。"""
+
+        normalized_broker_order_id = (
+            broker_order_id.strip()
+        )
+
+        if not normalized_broker_order_id:
+            raise ValueError(
+                "Broker注文IDを指定してください。"
+            )
+
+        state = self._orders.get(
+            normalized_broker_order_id,
+        )
+
+        if state is None:
+            raise BrokerOrderNotFoundError(
+                "指定されたPaper注文が存在しません。 "
+                f"broker_order_id="
+                f"{normalized_broker_order_id}"
+            )
+
+        return state
+
+    def _create_broker_order_id(
+        self,
+    ) -> str:
+        """連番のPaper注文IDを生成する。"""
+
+        broker_order_id = (
+            "paper-order-"
+            f"{self._next_broker_order_number:08d}"
+        )
+
+        self._next_broker_order_number += 1
+
+        return broker_order_id
+
+    def _current_time(
+        self,
+    ) -> datetime:
+        """UTCの現在日時を返す。"""
+
+        current_time = self.now_provider()
+
+        if current_time.tzinfo is None:
+            raise ValueError(
+                "現在日時にはタイムゾーンが必要です。"
+            )
+
+        return current_time.astimezone(
+            timezone.utc,
+        )
+
+    @staticmethod
+    def _normalize_code(
+        code: str,
+    ) -> str:
+        """銘柄コードを検証して正規化する。"""
+
+        normalized_code = code.strip()
+
+        if not normalized_code:
+            raise ValueError(
+                "銘柄コードを指定してください。"
+            )
+
+        if not normalized_code.isdigit():
+            raise ValueError(
+                "銘柄コードは数字で指定してください。"
+            )
+
+        if len(normalized_code) not in {
+            4,
+            5,
+        }:
+            raise ValueError(
+                "銘柄コードは4桁または5桁で"
+                "指定してください。"
+            )
+
+        return normalized_code
+
+    @staticmethod
+    def _to_snapshot(
+        state: _PaperOrderState,
+    ) -> BrokerOrderSnapshot:
+        """内部注文状態を公開Snapshotへ変換する。"""
+
+        return BrokerOrderSnapshot(
+            broker_order_id=state.broker_order_id,
+            client_order_id=state.order.order_id,
+            code=state.order.code,
+            side=state.order.side,
+            status=state.status,
+            quantity=state.order.quantity,
+            filled_quantity=state.filled_quantity,
+            average_fill_price=(
+                state.average_fill_price
+            ),
+            submitted_at=state.submitted_at,
+            updated_at=state.updated_at,
+            status_reason=state.status_reason,
+        )
+
+
+def ensure_broker_adapter(
+    broker: BrokerAdapter,
+) -> BrokerAdapter:
+    """型検査用途としてBrokerAdapterをそのまま返す。"""
+
+    return broker
+
+================================================================================
+FILE: app\trading\broker_adapter.py
+================================================================================
+"""証券会社やPaper Brokerが実装する共通インターフェース。"""
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+from typing import Protocol, runtime_checkable
+
+from app.trading.order_models import (
+    OrderSide,
+    OrderStatus,
+    TradeOrder,
+)
+
+
+class BrokerError(RuntimeError):
+    """Broker Adapterで発生する例外の基底クラス。"""
+
+
+class BrokerConnectionError(BrokerError):
+    """証券会社またはPaper Brokerへの接続失敗。"""
+
+
+class BrokerAuthenticationError(BrokerError):
+    """証券会社への認証失敗。"""
+
+
+class BrokerRequestError(BrokerError):
+    """注文送信や照会要求の失敗。"""
+
+
+class BrokerOrderNotFoundError(BrokerError):
+    """指定した注文がBroker側に存在しないことを表す。"""
+
+
+class BrokerOrderRejectedError(BrokerError):
+    """Brokerが注文を拒否したことを表す。"""
+
+
+class BrokerAccountError(BrokerError):
+    """口座情報または買付余力の取得失敗。"""
+
+
+class BrokerPositionSide(StrEnum):
+    """Broker上の保有ポジション方向。"""
+
+    LONG = "long"
+    SHORT = "short"
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerOrderSnapshot:
+    """Broker側に存在する注文の最新状態。"""
+
+    broker_order_id: str
+    client_order_id: str
+    code: str
+    side: OrderSide
+    status: OrderStatus
+    quantity: int
+    filled_quantity: int
+    average_fill_price: float | None
+    submitted_at: datetime
+    updated_at: datetime
+    status_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        """Broker注文状態の整合性を検証する。"""
+
+        normalized_broker_order_id = (
+            self.broker_order_id.strip()
+        )
+        normalized_client_order_id = (
+            self.client_order_id.strip()
+        )
+        normalized_code = self.code.strip()
+        normalized_status_reason = (
+            self.status_reason.strip()
+            if self.status_reason is not None
+            else None
+        )
+
+        if not normalized_broker_order_id:
+            raise ValueError(
+                "Broker注文IDを指定してください。"
+            )
+
+        if not normalized_client_order_id:
+            raise ValueError(
+                "クライアント注文IDを指定してください。"
+            )
+
+        if not normalized_code:
+            raise ValueError(
+                "銘柄コードを指定してください。"
+            )
+
+        if not normalized_code.isdigit():
+            raise ValueError(
+                "銘柄コードは数字で指定してください。"
+            )
+
+        if len(normalized_code) not in {
+            4,
+            5,
+        }:
+            raise ValueError(
+                "銘柄コードは4桁または5桁で指定してください。"
+            )
+
+        if self.quantity <= 0:
+            raise ValueError(
+                "注文数量は0より大きい必要があります。"
+            )
+
+        if not (
+            0
+            <= self.filled_quantity
+            <= self.quantity
+        ):
+            raise ValueError(
+                "約定数量は0以上かつ注文数量以下で"
+                "ある必要があります。"
+            )
+
+        if (
+            self.average_fill_price is not None
+            and self.average_fill_price <= 0
+        ):
+            raise ValueError(
+                "平均約定価格は0より大きい必要があります。"
+            )
+
+        if (
+            self.filled_quantity == 0
+            and self.average_fill_price is not None
+        ):
+            raise ValueError(
+                "未約定注文には平均約定価格を"
+                "設定できません。"
+            )
+
+        if (
+            self.filled_quantity > 0
+            and self.average_fill_price is None
+        ):
+            raise ValueError(
+                "約定済み注文には平均約定価格が必要です。"
+            )
+
+        if (
+            self.status is OrderStatus.PARTIALLY_FILLED
+            and not (
+                0
+                < self.filled_quantity
+                < self.quantity
+            )
+        ):
+            raise ValueError(
+                "部分約定状態には注文数量未満の"
+                "約定数量が必要です。"
+            )
+
+        if (
+            self.status is OrderStatus.FILLED
+            and self.filled_quantity != self.quantity
+        ):
+            raise ValueError(
+                "全約定状態では約定数量と"
+                "注文数量が一致する必要があります。"
+            )
+
+        if self.submitted_at.tzinfo is None:
+            raise ValueError(
+                "注文送信日時にはタイムゾーンが必要です。"
+            )
+
+        if self.updated_at.tzinfo is None:
+            raise ValueError(
+                "注文更新日時にはタイムゾーンが必要です。"
+            )
+
+        if self.updated_at < self.submitted_at:
+            raise ValueError(
+                "注文更新日時は送信日時以後である必要があります。"
+            )
+
+        if normalized_status_reason == "":
+            normalized_status_reason = None
+
+        object.__setattr__(
+            self,
+            "broker_order_id",
+            normalized_broker_order_id,
+        )
+        object.__setattr__(
+            self,
+            "client_order_id",
+            normalized_client_order_id,
+        )
+        object.__setattr__(
+            self,
+            "code",
+            normalized_code,
+        )
+        object.__setattr__(
+            self,
+            "status_reason",
+            normalized_status_reason,
+        )
+
+    @property
+    def remaining_quantity(self) -> int:
+        """未約定数量を返す。"""
+
+        return (
+            self.quantity
+            - self.filled_quantity
+        )
+
+    @property
+    def is_terminal(self) -> bool:
+        """Broker注文が終了状態か返す。"""
+
+        return self.status.is_terminal
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerPosition:
+    """Broker上の現在ポジション。"""
+
+    code: str
+    side: BrokerPositionSide
+    quantity: int
+    average_price: float
+    market_price: float | None = None
+    updated_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        """ポジション情報を検証する。"""
+
+        normalized_code = self.code.strip()
+
+        if not normalized_code:
+            raise ValueError(
+                "銘柄コードを指定してください。"
+            )
+
+        if not normalized_code.isdigit():
+            raise ValueError(
+                "銘柄コードは数字で指定してください。"
+            )
+
+        if len(normalized_code) not in {
+            4,
+            5,
+        }:
+            raise ValueError(
+                "銘柄コードは4桁または5桁で指定してください。"
+            )
+
+        if self.quantity <= 0:
+            raise ValueError(
+                "保有数量は0より大きい必要があります。"
+            )
+
+        if self.average_price <= 0:
+            raise ValueError(
+                "平均取得価格は0より大きい必要があります。"
+            )
+
+        if (
+            self.market_price is not None
+            and self.market_price <= 0
+        ):
+            raise ValueError(
+                "現在価格は0より大きい必要があります。"
+            )
+
+        if (
+            self.updated_at is not None
+            and self.updated_at.tzinfo is None
+        ):
+            raise ValueError(
+                "ポジション更新日時には"
+                "タイムゾーンが必要です。"
+            )
+
+        object.__setattr__(
+            self,
+            "code",
+            normalized_code,
+        )
+
+    @property
+    def market_value(self) -> float | None:
+        """現在価格があれば時価評価額を返す。"""
+
+        if self.market_price is None:
+            return None
+
+        return (
+            self.market_price
+            * self.quantity
+        )
+
+    @property
+    def acquisition_value(self) -> float:
+        """取得金額を返す。"""
+
+        return (
+            self.average_price
+            * self.quantity
+        )
+
+    @property
+    def unrealized_profit_loss(
+        self,
+    ) -> float | None:
+        """現在価格があれば含み損益を返す。"""
+
+        if self.market_price is None:
+            return None
+
+        raw_profit_loss = (
+            self.market_price
+            - self.average_price
+        ) * self.quantity
+
+        if self.side is BrokerPositionSide.SHORT:
+            return -raw_profit_loss
+
+        return raw_profit_loss
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerAccountSnapshot:
+    """Broker口座の資金情報。"""
+
+    currency: str
+    cash_balance: float
+    buying_power: float
+    market_value: float
+    equity: float
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        """口座資金情報を検証する。"""
+
+        normalized_currency = (
+            self.currency.strip().upper()
+        )
+
+        if not normalized_currency:
+            raise ValueError(
+                "通貨コードを指定してください。"
+            )
+
+        if len(normalized_currency) != 3:
+            raise ValueError(
+                "通貨コードは3文字で指定してください。"
+            )
+
+        if not normalized_currency.isalpha():
+            raise ValueError(
+                "通貨コードは英字3文字で指定してください。"
+            )
+
+        if self.cash_balance < 0:
+            raise ValueError(
+                "現金残高は0以上である必要があります。"
+            )
+
+        if self.buying_power < 0:
+            raise ValueError(
+                "買付余力は0以上である必要があります。"
+            )
+
+        if self.market_value < 0:
+            raise ValueError(
+                "保有時価総額は0以上である必要があります。"
+            )
+
+        if self.equity < 0:
+            raise ValueError(
+                "純資産額は0以上である必要があります。"
+            )
+
+        if self.updated_at.tzinfo is None:
+            raise ValueError(
+                "口座更新日時にはタイムゾーンが必要です。"
+            )
+
+        object.__setattr__(
+            self,
+            "currency",
+            normalized_currency,
+        )
+
+
+@runtime_checkable
+class BrokerAdapter(Protocol):
+    """証券会社またはPaper Brokerの共通インターフェース。"""
+
+    @property
+    def broker_name(self) -> str:
+        """Brokerを識別する名前を返す。"""
+
+    def submit_order(
+        self,
+        order: TradeOrder,
+    ) -> BrokerOrderSnapshot:
+        """注文をBrokerへ送信し、最新状態を返す。"""
+
+    def cancel_order(
+        self,
+        broker_order_id: str,
+    ) -> BrokerOrderSnapshot:
+        """Broker注文を取り消し、最新状態を返す。"""
+
+    def get_order(
+        self,
+        broker_order_id: str,
+    ) -> BrokerOrderSnapshot:
+        """Broker注文の最新状態を返す。"""
+
+    def list_orders(
+        self,
+        *,
+        active_only: bool = False,
+    ) -> list[BrokerOrderSnapshot]:
+        """Broker注文一覧を返す。"""
+
+    def list_positions(
+        self,
+    ) -> list[BrokerPosition]:
+        """Broker上の保有ポジション一覧を返す。"""
+
+    def get_account(
+        self,
+    ) -> BrokerAccountSnapshot:
+        """Broker口座の資金情報を返す。"""
+
+================================================================================
+FILE: app\trading\order_models.py
+================================================================================
+"""証券会社へ送信する注文の共通データモデル。"""
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+
+
+class OrderSide(StrEnum):
+    """注文の売買方向。"""
+
+    BUY = "buy"
+    SELL = "sell"
+
+
+class OrderType(StrEnum):
+    """注文価格の指定方式。"""
+
+    MARKET = "market"
+    LIMIT = "limit"
+    STOP = "stop"
+    STOP_LIMIT = "stop_limit"
+
+
+class OrderStatus(StrEnum):
+    """注文のライフサイクル状態。"""
+
+    NEW = "new"
+    QUEUED = "queued"
+    SENT = "sent"
+    PARTIALLY_FILLED = "partially_filled"
+    FILLED = "filled"
+    CANCELLED = "cancelled"
+    REJECTED = "rejected"
+    FAILED = "failed"
+
+    @property
+    def is_terminal(self) -> bool:
+        """これ以上状態遷移しない終了状態か返す。"""
+
+        return self in {
+            OrderStatus.FILLED,
+            OrderStatus.CANCELLED,
+            OrderStatus.REJECTED,
+            OrderStatus.FAILED,
+        }
+
+    @property
+    def is_active(self) -> bool:
+        """発注処理が継続中の状態か返す。"""
+
+        return not self.is_terminal
+
+
+@dataclass(frozen=True, slots=True)
+class TradeOrder:
+    """売買シグナルから作成された注文内容。"""
+
+    order_id: str
+    signal_id: str
+    code: str
+    side: OrderSide
+    order_type: OrderType
+    quantity: int
+    limit_price: float | None = None
+    stop_price: float | None = None
+
+    def __post_init__(self) -> None:
+        """注文内容を検証して文字列を正規化する。"""
+
+        normalized_order_id = self.order_id.strip()
+        normalized_signal_id = self.signal_id.strip()
+        normalized_code = self.code.strip()
+
+        if not normalized_order_id:
+            raise ValueError(
+                "注文IDを指定してください。"
+            )
+
+        if not normalized_signal_id:
+            raise ValueError(
+                "シグナルIDを指定してください。"
+            )
+
+        if not normalized_code:
+            raise ValueError(
+                "銘柄コードを指定してください。"
+            )
+
+        if not normalized_code.isdigit():
+            raise ValueError(
+                "銘柄コードは数字で指定してください。"
+            )
+
+        if len(normalized_code) not in {
+            4,
+            5,
+        }:
+            raise ValueError(
+                "銘柄コードは4桁または5桁で指定してください。"
+            )
+
+        if self.quantity <= 0:
+            raise ValueError(
+                "注文数量は0より大きい必要があります。"
+            )
+
+        if (
+            self.limit_price is not None
+            and self.limit_price <= 0
+        ):
+            raise ValueError(
+                "指値価格は0より大きい必要があります。"
+            )
+
+        if (
+            self.stop_price is not None
+            and self.stop_price <= 0
+        ):
+            raise ValueError(
+                "逆指値価格は0より大きい必要があります。"
+            )
+
+        if (
+            self.order_type is OrderType.MARKET
+            and (
+                self.limit_price is not None
+                or self.stop_price is not None
+            )
+        ):
+            raise ValueError(
+                "成行注文には指値価格・逆指値価格を"
+                "設定できません。"
+            )
+
+        if (
+            self.order_type is OrderType.LIMIT
+            and self.limit_price is None
+        ):
+            raise ValueError(
+                "指値注文には指値価格が必要です。"
+            )
+
+        if (
+            self.order_type is OrderType.LIMIT
+            and self.stop_price is not None
+        ):
+            raise ValueError(
+                "指値注文には逆指値価格を設定できません。"
+            )
+
+        if (
+            self.order_type is OrderType.STOP
+            and self.stop_price is None
+        ):
+            raise ValueError(
+                "逆指値注文には逆指値価格が必要です。"
+            )
+
+        if (
+            self.order_type is OrderType.STOP
+            and self.limit_price is not None
+        ):
+            raise ValueError(
+                "逆指値注文には指値価格を設定できません。"
+            )
+
+        if (
+            self.order_type is OrderType.STOP_LIMIT
+            and (
+                self.limit_price is None
+                or self.stop_price is None
+            )
+        ):
+            raise ValueError(
+                "逆指値付き指値注文には"
+                "指値価格と逆指値価格が必要です。"
+            )
+
+        object.__setattr__(
+            self,
+            "order_id",
+            normalized_order_id,
+        )
+        object.__setattr__(
+            self,
+            "signal_id",
+            normalized_signal_id,
+        )
+        object.__setattr__(
+            self,
+            "code",
+            normalized_code,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TradeOrderRecord:
+    """SQLiteへ保存された注文と現在状態。"""
+
+    id: int
+    order: TradeOrder
+    status: OrderStatus
+    filled_quantity: int
+    average_fill_price: float | None
+    broker_order_id: str | None
+    status_reason: str | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+    submitted_at: datetime | None
+    completed_at: datetime | None
+
+    def __post_init__(self) -> None:
+        """保存済み注文の整合性を検証する。"""
+
+        if self.id <= 0:
+            raise ValueError(
+                "保存IDは0より大きい必要があります。"
+            )
+
+        for name, value in {
+            "作成日時": self.created_at,
+            "更新日時": self.updated_at,
+        }.items():
+            if value.tzinfo is None:
+                raise ValueError(
+                    f"{name}にはタイムゾーンが必要です。"
+                )
+
+        if self.updated_at < self.created_at:
+            raise ValueError(
+                "更新日時は作成日時以後である必要があります。"
+            )
+
+        if (
+            self.submitted_at is not None
+            and self.submitted_at.tzinfo is None
+        ):
+            raise ValueError(
+                "送信日時にはタイムゾーンが必要です。"
+            )
+
+        if (
+            self.completed_at is not None
+            and self.completed_at.tzinfo is None
+        ):
+            raise ValueError(
+                "完了日時にはタイムゾーンが必要です。"
+            )
+
+        if not (
+            0
+            <= self.filled_quantity
+            <= self.order.quantity
+        ):
+            raise ValueError(
+                "約定数量は0以上かつ"
+                "注文数量以下である必要があります。"
+            )
+
+        if (
+            self.average_fill_price is not None
+            and self.average_fill_price <= 0
+        ):
+            raise ValueError(
+                "平均約定価格は0より大きい必要があります。"
+            )
+
+        if (
+            self.filled_quantity == 0
+            and self.average_fill_price is not None
+        ):
+            raise ValueError(
+                "未約定注文には平均約定価格を"
+                "設定できません。"
+            )
+
+        if (
+            self.filled_quantity > 0
+            and self.average_fill_price is None
+        ):
+            raise ValueError(
+                "約定済み注文には平均約定価格が必要です。"
+            )
+
+        if (
+            self.status is OrderStatus.PARTIALLY_FILLED
+            and not (
+                0
+                < self.filled_quantity
+                < self.order.quantity
+            )
+        ):
+            raise ValueError(
+                "部分約定状態には注文数量未満の"
+                "約定数量が必要です。"
+            )
+
+        if (
+            self.status is OrderStatus.FILLED
+            and self.filled_quantity
+            != self.order.quantity
+        ):
+            raise ValueError(
+                "全約定状態では約定数量と"
+                "注文数量が一致する必要があります。"
+            )
+
+        if (
+            self.status.is_terminal
+            and self.completed_at is None
+        ):
+            raise ValueError(
+                "終了状態には完了日時が必要です。"
+            )
+
+        if (
+            not self.status.is_terminal
+            and self.completed_at is not None
+        ):
+            raise ValueError(
+                "継続中状態には完了日時を"
+                "設定できません。"
+            )
+
+    @property
+    def order_id(self) -> str:
+        """注文IDを返す。"""
+
+        return self.order.order_id
+
+    @property
+    def signal_id(self) -> str:
+        """元シグナルIDを返す。"""
+
+        return self.order.signal_id
+
+    @property
+    def code(self) -> str:
+        """銘柄コードを返す。"""
+
+        return self.order.code
+
+    @property
+    def remaining_quantity(self) -> int:
+        """未約定数量を返す。"""
+
+        return (
+            self.order.quantity
+            - self.filled_quantity
+        )
+
+================================================================================
+FILE: app\trading\order_repository.py
+================================================================================
+"""売買注文とライフサイクルをSQLiteで管理する。"""
+
+import sqlite3
+from collections.abc import Callable
+from datetime import datetime, timezone
+from pathlib import Path
+
+from app.trading.order_models import (
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    TradeOrder,
+    TradeOrderRecord,
+)
+
+
+class OrderRepositoryError(RuntimeError):
+    """注文Repositoryの基底例外。"""
+
+
+class OrderNotFoundError(OrderRepositoryError):
+    """指定された注文が存在しないことを表す。"""
+
+
+class DuplicateOrderError(OrderRepositoryError):
+    """注文IDまたはシグナルIDが重複したことを表す。"""
+
+
+class OrderStateTransitionError(OrderRepositoryError):
+    """許可されない注文状態遷移を表す。"""
+
+
+class OrderRepository:
+    """注文の作成・取得・状態遷移を管理する。"""
+
+    ALLOWED_TRANSITIONS = {
+        OrderStatus.NEW: {
+            OrderStatus.QUEUED,
+            OrderStatus.CANCELLED,
+            OrderStatus.REJECTED,
+            OrderStatus.FAILED,
+        },
+        OrderStatus.QUEUED: {
+            OrderStatus.SENT,
+            OrderStatus.CANCELLED,
+            OrderStatus.REJECTED,
+            OrderStatus.FAILED,
+        },
+        OrderStatus.SENT: {
+            OrderStatus.PARTIALLY_FILLED,
+            OrderStatus.FILLED,
+            OrderStatus.CANCELLED,
+            OrderStatus.REJECTED,
+            OrderStatus.FAILED,
+        },
+        OrderStatus.PARTIALLY_FILLED: {
+            OrderStatus.PARTIALLY_FILLED,
+            OrderStatus.FILLED,
+            OrderStatus.CANCELLED,
+            OrderStatus.FAILED,
+        },
+    }
+
+    def __init__(
+        self,
+        database_path: Path,
+        *,
+        now_provider: Callable[[], datetime] | None = None,
+    ) -> None:
+        """DBパスと現在日時取得処理を設定する。"""
+
+        self.database_path = database_path
+        self.now_provider = (
+            now_provider
+            if now_provider is not None
+            else lambda: datetime.now(timezone.utc)
+        )
+
+    def create(
+        self,
+        order: TradeOrder,
+    ) -> TradeOrderRecord:
+        """注文をNEW状態で保存する。"""
+
+        current_time = self._current_time()
+
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO trade_orders (
+                        order_id,
+                        signal_id,
+                        code,
+                        side,
+                        order_type,
+                        quantity,
+                        limit_price,
+                        stop_price,
+                        status,
+                        filled_quantity,
+                        average_fill_price,
+                        broker_order_id,
+                        status_reason,
+                        error_message,
+                        created_at,
+                        updated_at,
+                        submitted_at,
+                        completed_at
+                    )
+                    VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, 0, NULL, NULL, NULL, NULL,
+                        ?, ?, NULL, NULL
+                    )
+                    """,
+                    (
+                        order.order_id,
+                        order.signal_id,
+                        order.code,
+                        order.side.value,
+                        order.order_type.value,
+                        order.quantity,
+                        order.limit_price,
+                        order.stop_price,
+                        OrderStatus.NEW.value,
+                        current_time.isoformat(),
+                        current_time.isoformat(),
+                    ),
+                )
+
+                connection.commit()
+                record_id = int(cursor.lastrowid)
+
+        except sqlite3.IntegrityError as error:
+            raise DuplicateOrderError(
+                "注文IDまたはシグナルIDが"
+                "既に使用されています。 "
+                f"order_id={order.order_id} "
+                f"signal_id={order.signal_id}"
+            ) from error
+
+        except sqlite3.Error as error:
+            raise OrderRepositoryError(
+                "注文を保存できませんでした。 "
+                f"order_id={order.order_id}"
+            ) from error
+
+        return TradeOrderRecord(
+            id=record_id,
+            order=order,
+            status=OrderStatus.NEW,
+            filled_quantity=0,
+            average_fill_price=None,
+            broker_order_id=None,
+            status_reason=None,
+            error_message=None,
+            created_at=current_time,
+            updated_at=current_time,
+            submitted_at=None,
+            completed_at=None,
+        )
+
+    def get(
+        self,
+        order_id: str,
+    ) -> TradeOrderRecord:
+        """注文IDに一致する注文を返す。"""
+
+        normalized_order_id = self._normalize_required(
+            order_id,
+            "注文ID",
+        )
+
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    self._select_sql()
+                    + """
+                    WHERE order_id = ?
+                    """,
+                    (
+                        normalized_order_id,
+                    ),
+                ).fetchone()
+
+        except sqlite3.Error as error:
+            raise OrderRepositoryError(
+                "注文を読み込めませんでした。 "
+                f"order_id={normalized_order_id}"
+            ) from error
+
+        if row is None:
+            raise OrderNotFoundError(
+                "指定された注文が存在しません。 "
+                f"order_id={normalized_order_id}"
+            )
+
+        return self._row_to_record(
+            row,
+        )
+
+    def get_by_signal_id(
+        self,
+        signal_id: str,
+    ) -> TradeOrderRecord | None:
+        """元シグナルIDに対応する注文を返す。"""
+
+        normalized_signal_id = self._normalize_required(
+            signal_id,
+            "シグナルID",
+        )
+
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    self._select_sql()
+                    + """
+                    WHERE signal_id = ?
+                    """,
+                    (
+                        normalized_signal_id,
+                    ),
+                ).fetchone()
+
+        except sqlite3.Error as error:
+            raise OrderRepositoryError(
+                "シグナルに対応する注文を"
+                "読み込めませんでした。 "
+                f"signal_id={normalized_signal_id}"
+            ) from error
+
+        if row is None:
+            return None
+
+        return self._row_to_record(
+            row,
+        )
+
+    def list_recent(
+        self,
+        *,
+        limit: int = 100,
+        code: str | None = None,
+        status: OrderStatus | None = None,
+        side: OrderSide | None = None,
+    ) -> list[TradeOrderRecord]:
+        """条件に一致する注文を新しい順に返す。"""
+
+        if limit <= 0:
+            raise ValueError(
+                "取得件数は0より大きい必要があります。"
+            )
+
+        conditions: list[str] = []
+        parameters: list[object] = []
+
+        if code is not None:
+            conditions.append(
+                "code = ?"
+            )
+            parameters.append(
+                self._normalize_code(code)
+            )
+
+        if status is not None:
+            conditions.append(
+                "status = ?"
+            )
+            parameters.append(
+                status.value
+            )
+
+        if side is not None:
+            conditions.append(
+                "side = ?"
+            )
+            parameters.append(
+                side.value
+            )
+
+        where_clause = ""
+
+        if conditions:
+            where_clause = (
+                "WHERE "
+                + " AND ".join(conditions)
+            )
+
+        parameters.append(limit)
+
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    self._select_sql()
+                    + f"""
+                    {where_clause}
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    parameters,
+                ).fetchall()
+
+        except sqlite3.Error as error:
+            raise OrderRepositoryError(
+                "注文一覧を読み込めませんでした。"
+            ) from error
+
+        return [
+            self._row_to_record(row)
+            for row in rows
+        ]
+
+    def count(
+        self,
+        *,
+        code: str | None = None,
+        status: OrderStatus | None = None,
+        side: OrderSide | None = None,
+    ) -> int:
+        """条件に一致する注文件数を返す。"""
+
+        conditions: list[str] = []
+        parameters: list[object] = []
+
+        if code is not None:
+            conditions.append("code = ?")
+            parameters.append(
+                self._normalize_code(code)
+            )
+
+        if status is not None:
+            conditions.append("status = ?")
+            parameters.append(status.value)
+
+        if side is not None:
+            conditions.append("side = ?")
+            parameters.append(side.value)
+
+        where_clause = ""
+
+        if conditions:
+            where_clause = (
+                "WHERE "
+                + " AND ".join(conditions)
+            )
+
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM trade_orders
+                    {where_clause}
+                    """,
+                    parameters,
+                ).fetchone()
+
+        except sqlite3.Error as error:
+            raise OrderRepositoryError(
+                "注文件数を取得できませんでした。"
+            ) from error
+
+        if row is None:
+            return 0
+
+        return int(row[0])
+
+    def transition(
+        self,
+        order_id: str,
+        *,
+        target_status: OrderStatus,
+        filled_quantity: int | None = None,
+        average_fill_price: float | None = None,
+        broker_order_id: str | None = None,
+        status_reason: str | None = None,
+        error_message: str | None = None,
+    ) -> TradeOrderRecord:
+        """注文を許可された次状態へ更新する。"""
+
+        current = self.get(order_id)
+
+        allowed_statuses = self.ALLOWED_TRANSITIONS.get(
+            current.status,
+            set(),
+        )
+
+        if target_status not in allowed_statuses:
+            raise OrderStateTransitionError(
+                "許可されていない注文状態遷移です。 "
+                f"order_id={current.order_id} "
+                f"current={current.status.value} "
+                f"target={target_status.value}"
+            )
+
+        resolved_filled_quantity = (
+            current.filled_quantity
+            if filled_quantity is None
+            else filled_quantity
+        )
+
+        resolved_average_fill_price = (
+            current.average_fill_price
+            if average_fill_price is None
+            else average_fill_price
+        )
+
+        resolved_broker_order_id = (
+            current.broker_order_id
+            if broker_order_id is None
+            else self._normalize_optional(
+                broker_order_id
+            )
+        )
+
+        resolved_status_reason = (
+            current.status_reason
+            if status_reason is None
+            else self._normalize_optional(
+                status_reason
+            )
+        )
+
+        resolved_error_message = (
+            current.error_message
+            if error_message is None
+            else self._normalize_optional(
+                error_message
+            )
+        )
+
+        current_time = self._current_time()
+
+        if current_time < current.updated_at:
+            raise ValueError(
+                "状態遷移日時は直前の更新日時以後で"
+                "ある必要があります。"
+            )
+
+        submitted_at = current.submitted_at
+
+        if (
+            target_status is OrderStatus.SENT
+            and submitted_at is None
+        ):
+            submitted_at = current_time
+
+        completed_at = (
+            current_time
+            if target_status.is_terminal
+            else None
+        )
+
+        candidate = TradeOrderRecord(
+            id=current.id,
+            order=current.order,
+            status=target_status,
+            filled_quantity=resolved_filled_quantity,
+            average_fill_price=resolved_average_fill_price,
+            broker_order_id=resolved_broker_order_id,
+            status_reason=resolved_status_reason,
+            error_message=resolved_error_message,
+            created_at=current.created_at,
+            updated_at=current_time,
+            submitted_at=submitted_at,
+            completed_at=completed_at,
+        )
+
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE trade_orders
+                    SET
+                        status = ?,
+                        filled_quantity = ?,
+                        average_fill_price = ?,
+                        broker_order_id = ?,
+                        status_reason = ?,
+                        error_message = ?,
+                        updated_at = ?,
+                        submitted_at = ?,
+                        completed_at = ?
+                    WHERE order_id = ?
+                      AND status = ?
+                    """,
+                    (
+                        candidate.status.value,
+                        candidate.filled_quantity,
+                        candidate.average_fill_price,
+                        candidate.broker_order_id,
+                        candidate.status_reason,
+                        candidate.error_message,
+                        candidate.updated_at.isoformat(),
+                        (
+                            candidate.submitted_at.isoformat()
+                            if candidate.submitted_at is not None
+                            else None
+                        ),
+                        (
+                            candidate.completed_at.isoformat()
+                            if candidate.completed_at is not None
+                            else None
+                        ),
+                        candidate.order_id,
+                        current.status.value,
+                    ),
+                )
+
+                connection.commit()
+
+                if cursor.rowcount != 1:
+                    raise OrderStateTransitionError(
+                        "注文状態を更新できませんでした。 "
+                        f"order_id={candidate.order_id}"
+                    )
+
+        except OrderStateTransitionError:
+            raise
+
+        except sqlite3.Error as error:
+            raise OrderRepositoryError(
+                "注文状態を更新できませんでした。 "
+                f"order_id={candidate.order_id}"
+            ) from error
+
+        return self.get(
+            candidate.order_id
+        )
+
+    def _connect(
+        self,
+    ) -> sqlite3.Connection:
+        """外部キー制約を有効にした接続を返す。"""
+
+        connection = sqlite3.connect(
+            self.database_path
+        )
+        connection.execute(
+            "PRAGMA foreign_keys = ON"
+        )
+
+        return connection
+
+    def _current_time(
+        self,
+    ) -> datetime:
+        """UTCの現在日時を返す。"""
+
+        current_time = self.now_provider()
+
+        if current_time.tzinfo is None:
+            raise ValueError(
+                "現在日時にはタイムゾーンが必要です。"
+            )
+
+        return current_time.astimezone(
+            timezone.utc
+        )
+
+    @staticmethod
+    def _normalize_required(
+        value: str,
+        name: str,
+    ) -> str:
+        """必須文字列を正規化する。"""
+
+        normalized = value.strip()
+
+        if not normalized:
+            raise ValueError(
+                f"{name}を指定してください。"
+            )
+
+        return normalized
+
+    @classmethod
+    def _normalize_code(
+        cls,
+        code: str,
+    ) -> str:
+        """銘柄コードを検証する。"""
+
+        normalized = cls._normalize_required(
+            code,
+            "銘柄コード",
+        )
+
+        if not normalized.isdigit():
+            raise ValueError(
+                "銘柄コードは数字で指定してください。"
+            )
+
+        if len(normalized) not in {
+            4,
+            5,
+        }:
+            raise ValueError(
+                "銘柄コードは4桁または5桁で"
+                "指定してください。"
+            )
+
+        return normalized
+
+    @staticmethod
+    def _normalize_optional(
+        value: str,
+    ) -> str | None:
+        """任意文字列を正規化する。"""
+
+        normalized = value.strip()
+
+        if not normalized:
+            return None
+
+        return normalized
+
+    @staticmethod
+    def _select_sql() -> str:
+        """注文取得用SELECT文を返す。"""
+
+        return """
+            SELECT
+                id,
+                order_id,
+                signal_id,
+                code,
+                side,
+                order_type,
+                quantity,
+                limit_price,
+                stop_price,
+                status,
+                filled_quantity,
+                average_fill_price,
+                broker_order_id,
+                status_reason,
+                error_message,
+                created_at,
+                updated_at,
+                submitted_at,
+                completed_at
+            FROM trade_orders
+        """
+
+    @classmethod
+    def _row_to_record(
+        cls,
+        row: tuple[object, ...],
+    ) -> TradeOrderRecord:
+        """SQLiteの1行を注文レコードへ変換する。"""
+
+        order = TradeOrder(
+            order_id=str(row[1]),
+            signal_id=str(row[2]),
+            code=str(row[3]),
+            side=OrderSide(str(row[4])),
+            order_type=OrderType(str(row[5])),
+            quantity=int(row[6]),
+            limit_price=(
+                float(row[7])
+                if row[7] is not None
+                else None
+            ),
+            stop_price=(
+                float(row[8])
+                if row[8] is not None
+                else None
+            ),
+        )
+
+        return TradeOrderRecord(
+            id=int(row[0]),
+            order=order,
+            status=OrderStatus(str(row[9])),
+            filled_quantity=int(row[10]),
+            average_fill_price=(
+                float(row[11])
+                if row[11] is not None
+                else None
+            ),
+            broker_order_id=(
+                str(row[12])
+                if row[12] is not None
+                else None
+            ),
+            status_reason=(
+                str(row[13])
+                if row[13] is not None
+                else None
+            ),
+            error_message=(
+                str(row[14])
+                if row[14] is not None
+                else None
+            ),
+            created_at=datetime.fromisoformat(
+                str(row[15])
+            ),
+            updated_at=datetime.fromisoformat(
+                str(row[16])
+            ),
+            submitted_at=(
+                datetime.fromisoformat(str(row[17]))
+                if row[17] is not None
+                else None
+            ),
+            completed_at=(
+                datetime.fromisoformat(str(row[18]))
+                if row[18] is not None
+                else None
+            ),
+        )
+
+================================================================================
+FILE: app\trading\position_models.py
+================================================================================
+"""現在保有ポジションの共通データモデル。"""
+
+from dataclasses import dataclass
+from datetime import datetime
+
+from app.trading.broker_adapter import BrokerPositionSide
+
+
+@dataclass(frozen=True, slots=True)
+class TradingPosition:
+    """現在保有している1つのポジション。"""
+
+    position_id: str
+    code: str
+    side: BrokerPositionSide
+    quantity: int
+    average_cost: float
+    realized_profit_loss: float
+    opened_at: datetime
+
+    def __post_init__(self) -> None:
+        """ポジション内容を検証して文字列を正規化する。"""
+
+        normalized_position_id = self.position_id.strip()
+        normalized_code = self.code.strip()
+
+        if not normalized_position_id:
+            raise ValueError(
+                "ポジションIDを指定してください。"
+            )
+
+        if not normalized_code:
+            raise ValueError(
+                "銘柄コードを指定してください。"
+            )
+
+        if not normalized_code.isdigit():
+            raise ValueError(
+                "銘柄コードは数字で指定してください。"
+            )
+
+        if len(normalized_code) not in {4, 5}:
+            raise ValueError(
+                "銘柄コードは4桁または5桁で指定してください。"
+            )
+
+        if self.quantity <= 0:
+            raise ValueError(
+                "保有数量は0より大きい必要があります。"
+            )
+
+        if self.average_cost <= 0:
+            raise ValueError(
+                "平均取得価格は0より大きい必要があります。"
+            )
+
+        if self.opened_at.tzinfo is None:
+            raise ValueError(
+                "ポジション開始日時にはタイムゾーンが必要です。"
+            )
+
+        object.__setattr__(
+            self,
+            "position_id",
+            normalized_position_id,
+        )
+        object.__setattr__(
+            self,
+            "code",
+            normalized_code,
+        )
+
+    @property
+    def acquisition_value(self) -> float:
+        """取得金額を返す。"""
+
+        return self.average_cost * self.quantity
+
+
+@dataclass(frozen=True, slots=True)
+class TradingPositionRecord:
+    """SQLiteへ保存された現在ポジション。"""
+
+    id: int
+    position: TradingPosition
+    created_at: datetime
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        """保存済みポジションの整合性を検証する。"""
+
+        if self.id <= 0:
+            raise ValueError(
+                "保存IDは0より大きい必要があります。"
+            )
+
+        if self.created_at.tzinfo is None:
+            raise ValueError(
+                "作成日時にはタイムゾーンが必要です。"
+            )
+
+        if self.updated_at.tzinfo is None:
+            raise ValueError(
+                "更新日時にはタイムゾーンが必要です。"
+            )
+
+        if self.updated_at < self.created_at:
+            raise ValueError(
+                "更新日時は作成日時以後である必要があります。"
+            )
+
+    @property
+    def position_id(self) -> str:
+        """ポジションIDを返す。"""
+
+        return self.position.position_id
+
+    @property
+    def code(self) -> str:
+        """銘柄コードを返す。"""
+
+        return self.position.code
+
+    @property
+    def side(self) -> BrokerPositionSide:
+        """ポジション方向を返す。"""
+
+        return self.position.side
+
+    @property
+    def quantity(self) -> int:
+        """保有数量を返す。"""
+
+        return self.position.quantity
+
+
+================================================================================
+FILE: app\trading\position_repository.py
+================================================================================
+"""現在ポジションをSQLiteで管理する。"""
+
+import sqlite3
+from collections.abc import Callable
+from datetime import datetime, timezone
+from pathlib import Path
+
+from app.trading.broker_adapter import BrokerPositionSide
+from app.trading.position_models import (
+    TradingPosition,
+    TradingPositionRecord,
+)
+
+
+class PositionRepositoryError(RuntimeError):
+    """ポジションRepositoryの基底例外。"""
+
+
+class PositionNotFoundError(PositionRepositoryError):
+    """指定されたポジションが存在しないことを表す。"""
+
+
+class DuplicatePositionError(PositionRepositoryError):
+    """ポジションIDまたは銘柄・方向が重複したことを表す。"""
+
+
+class PositionRepository:
+    """現在保有ポジションを永続化する。"""
+
+    def __init__(
+        self,
+        database_path: Path,
+        *,
+        now_provider: Callable[[], datetime] | None = None,
+    ) -> None:
+        """DBパスと時計を設定する。"""
+
+        self.database_path = database_path
+        self.now_provider = (
+            now_provider
+            if now_provider is not None
+            else lambda: datetime.now(timezone.utc)
+        )
+
+    def create(
+        self,
+        position: TradingPosition,
+    ) -> TradingPositionRecord:
+        """新しい現在ポジションを保存する。"""
+
+        current_time = self._current_time()
+        normalized_opened_at = position.opened_at.astimezone(
+            timezone.utc
+        )
+        normalized_position = TradingPosition(
+            position_id=position.position_id,
+            code=position.code,
+            side=position.side,
+            quantity=position.quantity,
+            average_cost=position.average_cost,
+            realized_profit_loss=position.realized_profit_loss,
+            opened_at=normalized_opened_at,
+        )
+
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO positions (
+                        position_id,
+                        code,
+                        side,
+                        quantity,
+                        average_cost,
+                        realized_profit_loss,
+                        opened_at,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_position.position_id,
+                        normalized_position.code,
+                        normalized_position.side.value,
+                        normalized_position.quantity,
+                        normalized_position.average_cost,
+                        normalized_position.realized_profit_loss,
+                        normalized_position.opened_at.isoformat(),
+                        current_time.isoformat(),
+                        current_time.isoformat(),
+                    ),
+                )
+                connection.commit()
+                record_id = int(cursor.lastrowid)
+
+        except sqlite3.IntegrityError as error:
+            raise DuplicatePositionError(
+                "ポジションIDまたは銘柄・方向が"
+                "既に使用されています。 "
+                f"position_id={normalized_position.position_id} "
+                f"code={normalized_position.code} "
+                f"side={normalized_position.side.value}"
+            ) from error
+        except sqlite3.Error as error:
+            raise PositionRepositoryError(
+                "ポジションを保存できませんでした。 "
+                f"position_id={normalized_position.position_id}"
+            ) from error
+
+        return TradingPositionRecord(
+            id=record_id,
+            position=normalized_position,
+            created_at=current_time,
+            updated_at=current_time,
+        )
+
+    def get(
+        self,
+        position_id: str,
+    ) -> TradingPositionRecord:
+        """ポジションIDに一致する現在ポジションを返す。"""
+
+        normalized_position_id = self._normalize_required(
+            position_id,
+            "ポジションID",
+        )
+
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    self._select_sql()
+                    + """
+                    WHERE position_id = ?
+                    """,
+                    (normalized_position_id,),
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise PositionRepositoryError(
+                "ポジションを読み込めませんでした。 "
+                f"position_id={normalized_position_id}"
+            ) from error
+
+        if row is None:
+            raise PositionNotFoundError(
+                "指定されたポジションが存在しません。 "
+                f"position_id={normalized_position_id}"
+            )
+
+        return self._row_to_record(row)
+
+    def get_by_identity(
+        self,
+        *,
+        code: str,
+        side: BrokerPositionSide,
+    ) -> TradingPositionRecord | None:
+        """銘柄コード・方向に一致する現在ポジションを返す。"""
+
+        normalized_code = self._normalize_code(code)
+
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    self._select_sql()
+                    + """
+                    WHERE code = ?
+                      AND side = ?
+                    """,
+                    (
+                        normalized_code,
+                        side.value,
+                    ),
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise PositionRepositoryError(
+                "銘柄・方向に対応するポジションを"
+                "読み込めませんでした。 "
+                f"code={normalized_code} "
+                f"side={side.value}"
+            ) from error
+
+        if row is None:
+            return None
+
+        return self._row_to_record(row)
+
+    def update(
+        self,
+        position: TradingPosition,
+    ) -> TradingPositionRecord:
+        """既存ポジションの数量・平均取得価格等を更新する。"""
+
+        current = self.get(position.position_id)
+
+        if (
+            current.code != position.code.strip()
+            or current.side is not position.side
+        ):
+            raise ValueError(
+                "更新時に銘柄コードまたは"
+                "ポジション方向を変更できません。"
+            )
+
+        current_time = self._current_time()
+
+        if current_time < current.updated_at:
+            raise ValueError(
+                "更新日時は前回更新日時以後である必要があります。"
+            )
+
+        normalized_position = TradingPosition(
+            position_id=position.position_id,
+            code=position.code,
+            side=position.side,
+            quantity=position.quantity,
+            average_cost=position.average_cost,
+            realized_profit_loss=position.realized_profit_loss,
+            opened_at=position.opened_at.astimezone(timezone.utc),
+        )
+
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE positions
+                    SET
+                        quantity = ?,
+                        average_cost = ?,
+                        realized_profit_loss = ?,
+                        opened_at = ?,
+                        updated_at = ?
+                    WHERE position_id = ?
+                    """,
+                    (
+                        normalized_position.quantity,
+                        normalized_position.average_cost,
+                        normalized_position.realized_profit_loss,
+                        normalized_position.opened_at.isoformat(),
+                        current_time.isoformat(),
+                        normalized_position.position_id,
+                    ),
+                )
+                connection.commit()
+
+                if cursor.rowcount != 1:
+                    raise PositionNotFoundError(
+                        "更新対象ポジションが存在しません。 "
+                        f"position_id={normalized_position.position_id}"
+                    )
+        except PositionNotFoundError:
+            raise
+        except sqlite3.Error as error:
+            raise PositionRepositoryError(
+                "ポジションを更新できませんでした。 "
+                f"position_id={normalized_position.position_id}"
+            ) from error
+
+        return self.get(normalized_position.position_id)
+
+
+    def delete(
+        self,
+        position_id: str,
+    ) -> TradingPositionRecord:
+        """現在ポジションを削除し、削除前レコードを返す。"""
+
+        current = self.get(position_id)
+
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    DELETE FROM positions
+                    WHERE position_id = ?
+                    """,
+                    (current.position_id,),
+                )
+                connection.commit()
+
+                if cursor.rowcount != 1:
+                    raise PositionNotFoundError(
+                        "削除対象ポジションが存在しません。 "
+                        f"position_id={current.position_id}"
+                    )
+        except PositionNotFoundError:
+            raise
+        except sqlite3.Error as error:
+            raise PositionRepositoryError(
+                "ポジションを削除できませんでした。 "
+                f"position_id={current.position_id}"
+            ) from error
+
+        return current
+
+    def list_recent(
+        self,
+        *,
+        limit: int = 100,
+        code: str | None = None,
+        side: BrokerPositionSide | None = None,
+    ) -> list[TradingPositionRecord]:
+        """現在ポジションを更新日時の新しい順に返す。"""
+
+        if limit <= 0:
+            raise ValueError(
+                "取得件数は0より大きい必要があります。"
+            )
+
+        conditions: list[str] = []
+        parameters: list[object] = []
+
+        if code is not None:
+            conditions.append("code = ?")
+            parameters.append(self._normalize_code(code))
+
+        if side is not None:
+            conditions.append("side = ?")
+            parameters.append(side.value)
+
+        where_clause = (
+            "WHERE " + " AND ".join(conditions)
+            if conditions
+            else ""
+        )
+        parameters.append(limit)
+
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    self._select_sql()
+                    + f"""
+                    {where_clause}
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    parameters,
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise PositionRepositoryError(
+                "ポジション一覧を読み込めませんでした。"
+            ) from error
+
+        return [self._row_to_record(row) for row in rows]
+
+    def count(
+        self,
+        *,
+        code: str | None = None,
+        side: BrokerPositionSide | None = None,
+    ) -> int:
+        """条件に一致する現在ポジション件数を返す。"""
+
+        conditions: list[str] = []
+        parameters: list[object] = []
+
+        if code is not None:
+            conditions.append("code = ?")
+            parameters.append(self._normalize_code(code))
+
+        if side is not None:
+            conditions.append("side = ?")
+            parameters.append(side.value)
+
+        where_clause = (
+            "WHERE " + " AND ".join(conditions)
+            if conditions
+            else ""
+        )
+
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM positions
+                    {where_clause}
+                    """,
+                    parameters,
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise PositionRepositoryError(
+                "ポジション件数を取得できませんでした。"
+            ) from error
+
+        return int(row[0]) if row is not None else 0
+
+    def _connect(self) -> sqlite3.Connection:
+        """SQLite接続を返す。"""
+
+        return sqlite3.connect(self.database_path)
+
+    def _current_time(self) -> datetime:
+        """現在日時をUTCへ正規化する。"""
+
+        current_time = self.now_provider()
+
+        if current_time.tzinfo is None:
+            raise ValueError(
+                "現在日時にはタイムゾーンが必要です。"
+            )
+
+        return current_time.astimezone(timezone.utc)
+
+    @staticmethod
+    def _normalize_required(
+        value: str,
+        name: str,
+    ) -> str:
+        """必須文字列を正規化する。"""
+
+        normalized = value.strip()
+
+        if not normalized:
+            raise ValueError(
+                f"{name}を指定してください。"
+            )
+
+        return normalized
+
+    @classmethod
+    def _normalize_code(cls, code: str) -> str:
+        """銘柄コードを検証する。"""
+
+        normalized = cls._normalize_required(
+            code,
+            "銘柄コード",
+        )
+
+        if not normalized.isdigit():
+            raise ValueError(
+                "銘柄コードは数字で指定してください。"
+            )
+
+        if len(normalized) not in {4, 5}:
+            raise ValueError(
+                "銘柄コードは4桁または5桁で指定してください。"
+            )
+
+        return normalized
+
+    @staticmethod
+    def _select_sql() -> str:
+        """ポジション取得用SELECT文を返す。"""
+
+        return """
+            SELECT
+                id,
+                position_id,
+                code,
+                side,
+                quantity,
+                average_cost,
+                realized_profit_loss,
+                opened_at,
+                created_at,
+                updated_at
+            FROM positions
+        """
+
+    @classmethod
+    def _row_to_record(
+        cls,
+        row: tuple[object, ...],
+    ) -> TradingPositionRecord:
+        """SQLiteの1行をポジションへ変換する。"""
+
+        position = TradingPosition(
+            position_id=str(row[1]),
+            code=str(row[2]),
+            side=BrokerPositionSide(str(row[3])),
+            quantity=int(row[4]),
+            average_cost=float(row[5]),
+            realized_profit_loss=float(row[6]),
+            opened_at=cls._parse_datetime(str(row[7])),
+        )
+
+        return TradingPositionRecord(
+            id=int(row[0]),
+            position=position,
+            created_at=cls._parse_datetime(str(row[8])),
+            updated_at=cls._parse_datetime(str(row[9])),
+        )
+
+    @staticmethod
+    def _parse_datetime(value: str) -> datetime:
+        """SQLite日時文字列をUTC日時へ変換する。"""
+
+        parsed = datetime.fromisoformat(value)
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+
+        return parsed.astimezone(timezone.utc)
+
+
+================================================================================
+FILE: app\trading\portfolio_models.py
+================================================================================
+"""ポートフォリオ集計の共通データモデル。"""
+
+from dataclasses import dataclass
+from datetime import datetime
+
+from app.trading.broker_adapter import BrokerPositionSide
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioPositionSnapshot:
+    """1つの現在ポジションの評価結果。"""
+
+    position_id: str
+    code: str
+    side: BrokerPositionSide
+    quantity: int
+    average_cost: float
+    market_price: float
+    realized_profit_loss: float
+
+    def __post_init__(self) -> None:
+        """評価結果を検証して文字列を正規化する。"""
+
+        normalized_position_id = self.position_id.strip()
+        normalized_code = self.code.strip()
+
+        if not normalized_position_id:
+            raise ValueError(
+                "ポジションIDを指定してください。"
+            )
+
+        if not normalized_code:
+            raise ValueError(
+                "銘柄コードを指定してください。"
+            )
+
+        if not normalized_code.isdigit():
+            raise ValueError(
+                "銘柄コードは数字で指定してください。"
+            )
+
+        if len(normalized_code) not in {4, 5}:
+            raise ValueError(
+                "銘柄コードは4桁または5桁で指定してください。"
+            )
+
+        if self.quantity <= 0:
+            raise ValueError(
+                "保有数量は0より大きい必要があります。"
+            )
+
+        if self.average_cost <= 0:
+            raise ValueError(
+                "平均取得価格は0より大きい必要があります。"
+            )
+
+        if self.market_price <= 0:
+            raise ValueError(
+                "現在価格は0より大きい必要があります。"
+            )
+
+        object.__setattr__(
+            self,
+            "position_id",
+            normalized_position_id,
+        )
+        object.__setattr__(
+            self,
+            "code",
+            normalized_code,
+        )
+
+    @property
+    def acquisition_value(self) -> float:
+        """取得金額を返す。"""
+
+        return self.average_cost * self.quantity
+
+    @property
+    def market_value(self) -> float:
+        """現在評価額を返す。"""
+
+        return self.market_price * self.quantity
+
+    @property
+    def unrealized_profit_loss(self) -> float:
+        """含み損益を返す。"""
+
+        raw_profit_loss = (
+            self.market_price - self.average_cost
+        ) * self.quantity
+
+        if self.side is BrokerPositionSide.SHORT:
+            return -raw_profit_loss
+
+        return raw_profit_loss
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioSnapshot:
+    """口座・現在ポジションを集約したポートフォリオ。"""
+
+    currency: str
+    cash_balance: float
+    buying_power: float
+    broker_market_value: float
+    broker_equity: float
+    positions: tuple[
+        PortfolioPositionSnapshot,
+        ...
+    ]
+    generated_at: datetime
+
+    def __post_init__(self) -> None:
+        """ポートフォリオ集計結果を検証する。"""
+
+        normalized_currency = self.currency.strip().upper()
+
+        if (
+            len(normalized_currency) != 3
+            or not normalized_currency.isalpha()
+        ):
+            raise ValueError(
+                "通貨コードは英字3文字で指定してください。"
+            )
+
+        for name, value in {
+            "現金残高": self.cash_balance,
+            "買付余力": self.buying_power,
+            "Broker評価額": self.broker_market_value,
+            "Broker純資産": self.broker_equity,
+        }.items():
+            if value < 0:
+                raise ValueError(
+                    f"{name}は0以上である必要があります。"
+                )
+
+        if self.generated_at.tzinfo is None:
+            raise ValueError(
+                "集計日時にはタイムゾーンが必要です。"
+            )
+
+        object.__setattr__(
+            self,
+            "currency",
+            normalized_currency,
+        )
+
+    @property
+    def position_count(self) -> int:
+        """現在ポジション件数を返す。"""
+
+        return len(self.positions)
+
+    @property
+    def total_acquisition_value(self) -> float:
+        """取得金額合計を返す。"""
+
+        return sum(
+            position.acquisition_value
+            for position in self.positions
+        )
+
+    @property
+    def total_market_value(self) -> float:
+        """現在評価額合計を返す。"""
+
+        return sum(
+            position.market_value
+            for position in self.positions
+        )
+
+    @property
+    def total_unrealized_profit_loss(self) -> float:
+        """含み損益合計を返す。"""
+
+        return sum(
+            position.unrealized_profit_loss
+            for position in self.positions
+        )
+
+    @property
+    def total_realized_profit_loss(self) -> float:
+        """実現損益合計を返す。"""
+
+        return sum(
+            position.realized_profit_loss
+            for position in self.positions
+        )
+
+    @property
+    def calculated_equity(self) -> float:
+        """ローカル評価額を使った純資産額を返す。"""
+
+        return self.cash_balance + self.total_market_value
+
+
+================================================================================
+FILE: app\trading\portfolio_repository.py
+================================================================================
+"""ポートフォリオ履歴をSQLiteへ追加専用で保存する。"""
+
+import sqlite3
+from collections.abc import Callable
+from datetime import datetime, timezone
+from pathlib import Path
+
+from app.trading.broker_adapter import BrokerPositionSide
+from app.trading.portfolio_models import (
+    PortfolioPositionSnapshot,
+    PortfolioSnapshot,
+)
+
+
+class PortfolioRepositoryError(RuntimeError):
+    """ポートフォリオRepositoryの基底例外。"""
+
+
+class PortfolioSnapshotNotFoundError(PortfolioRepositoryError):
+    """指定されたポートフォリオ履歴が存在しない。"""
+
+
+class DuplicatePortfolioSnapshotError(PortfolioRepositoryError):
+    """同じ集計日時の履歴が既に存在する。"""
+
+
+class PortfolioRepository:
+    """ポートフォリオ履歴を追加専用で管理する。"""
+
+    def __init__(
+        self,
+        database_path: Path,
+        *,
+        now_provider: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.database_path = database_path
+        self.now_provider = (
+            now_provider
+            if now_provider is not None
+            else lambda: datetime.now(timezone.utc)
+        )
+
+    def save(
+        self,
+        snapshot: PortfolioSnapshot,
+    ) -> PortfolioSnapshot:
+        """ポートフォリオSnapshotを保存する。"""
+
+        generated_at = snapshot.generated_at.astimezone(
+            timezone.utc
+        )
+        created_at = self._current_time()
+
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO portfolio_snapshots (
+                        generated_at,
+                        currency,
+                        cash_balance,
+                        buying_power,
+                        broker_market_value,
+                        broker_equity,
+                        total_acquisition_value,
+                        total_market_value,
+                        total_unrealized_profit_loss,
+                        total_realized_profit_loss,
+                        calculated_equity,
+                        position_count,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        generated_at.isoformat(),
+                        snapshot.currency,
+                        snapshot.cash_balance,
+                        snapshot.buying_power,
+                        snapshot.broker_market_value,
+                        snapshot.broker_equity,
+                        snapshot.total_acquisition_value,
+                        snapshot.total_market_value,
+                        snapshot.total_unrealized_profit_loss,
+                        snapshot.total_realized_profit_loss,
+                        snapshot.calculated_equity,
+                        snapshot.position_count,
+                        created_at.isoformat(),
+                    ),
+                )
+                snapshot_id = int(cursor.lastrowid)
+
+                for position in snapshot.positions:
+                    connection.execute(
+                        """
+                        INSERT INTO portfolio_snapshot_positions (
+                            snapshot_id,
+                            position_id,
+                            code,
+                            side,
+                            quantity,
+                            average_cost,
+                            market_price,
+                            realized_profit_loss,
+                            acquisition_value,
+                            market_value,
+                            unrealized_profit_loss
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            snapshot_id,
+                            position.position_id,
+                            position.code,
+                            position.side.value,
+                            position.quantity,
+                            position.average_cost,
+                            position.market_price,
+                            position.realized_profit_loss,
+                            position.acquisition_value,
+                            position.market_value,
+                            position.unrealized_profit_loss,
+                        ),
+                    )
+
+                connection.commit()
+
+        except sqlite3.IntegrityError as error:
+            raise DuplicatePortfolioSnapshotError(
+                "同じ集計日時のポートフォリオ履歴が"
+                "既に存在します。 "
+                f"generated_at={generated_at.isoformat()}"
+            ) from error
+        except sqlite3.Error as error:
+            raise PortfolioRepositoryError(
+                "ポートフォリオ履歴を保存できませんでした。 "
+                f"generated_at={generated_at.isoformat()}"
+            ) from error
+
+        return self.get(generated_at)
+
+    def get(
+        self,
+        generated_at: datetime,
+    ) -> PortfolioSnapshot:
+        """集計日時に一致するSnapshotを返す。"""
+
+        normalized = self._normalize_datetime(
+            generated_at,
+            "集計日時",
+        )
+
+        try:
+            with self._connect() as connection:
+                header = connection.execute(
+                    self._select_header_sql()
+                    + """
+                    WHERE generated_at = ?
+                    """,
+                    (normalized.isoformat(),),
+                ).fetchone()
+
+                if header is None:
+                    raise PortfolioSnapshotNotFoundError(
+                        "指定されたポートフォリオ履歴が"
+                        "存在しません。 "
+                        f"generated_at={normalized.isoformat()}"
+                    )
+
+                positions = connection.execute(
+                    self._select_positions_sql()
+                    + """
+                    WHERE snapshot_id = ?
+                    ORDER BY code, side, position_id
+                    """,
+                    (int(header[0]),),
+                ).fetchall()
+
+        except PortfolioSnapshotNotFoundError:
+            raise
+        except sqlite3.Error as error:
+            raise PortfolioRepositoryError(
+                "ポートフォリオ履歴を読み込めませんでした。 "
+                f"generated_at={normalized.isoformat()}"
+            ) from error
+
+        return self._rows_to_snapshot(
+            header=header,
+            position_rows=positions,
+        )
+
+    def latest(self) -> PortfolioSnapshot | None:
+        """最新のポートフォリオ履歴を返す。"""
+
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT generated_at
+                    FROM portfolio_snapshots
+                    ORDER BY generated_at DESC, id DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise PortfolioRepositoryError(
+                "最新ポートフォリオ履歴を取得できませんでした。"
+            ) from error
+
+        if row is None:
+            return None
+
+        return self.get(self._parse_datetime(str(row[0])))
+
+    def list_recent(
+        self,
+        *,
+        limit: int = 100,
+    ) -> list[PortfolioSnapshot]:
+        """ポートフォリオ履歴を新しい順に返す。"""
+
+        if limit <= 0:
+            raise ValueError(
+                "取得件数は0より大きい必要があります。"
+            )
+
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT generated_at
+                    FROM portfolio_snapshots
+                    ORDER BY generated_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise PortfolioRepositoryError(
+                "ポートフォリオ履歴一覧を取得できませんでした。"
+            ) from error
+
+        return [
+            self.get(self._parse_datetime(str(row[0])))
+            for row in rows
+        ]
+
+    def count(self) -> int:
+        """保存済みポートフォリオ履歴件数を返す。"""
+
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT COUNT(*) FROM portfolio_snapshots"
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise PortfolioRepositoryError(
+                "ポートフォリオ履歴件数を取得できませんでした。"
+            ) from error
+
+        return int(row[0]) if row is not None else 0
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.database_path)
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
+
+    def _current_time(self) -> datetime:
+        current = self.now_provider()
+
+        if current.tzinfo is None:
+            raise ValueError(
+                "現在日時にはタイムゾーンが必要です。"
+            )
+
+        return current.astimezone(timezone.utc)
+
+    @staticmethod
+    def _normalize_datetime(
+        value: datetime,
+        name: str,
+    ) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError(
+                f"{name}にはタイムゾーンが必要です。"
+            )
+
+        return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _select_header_sql() -> str:
+        return """
+            SELECT
+                id,
+                generated_at,
+                currency,
+                cash_balance,
+                buying_power,
+                broker_market_value,
+                broker_equity
+            FROM portfolio_snapshots
+        """
+
+    @staticmethod
+    def _select_positions_sql() -> str:
+        return """
+            SELECT
+                position_id,
+                code,
+                side,
+                quantity,
+                average_cost,
+                market_price,
+                realized_profit_loss
+            FROM portfolio_snapshot_positions
+        """
+
+    @classmethod
+    def _rows_to_snapshot(
+        cls,
+        *,
+        header: tuple[object, ...],
+        position_rows: list[tuple[object, ...]],
+    ) -> PortfolioSnapshot:
+        positions = tuple(
+            PortfolioPositionSnapshot(
+                position_id=str(row[0]),
+                code=str(row[1]),
+                side=BrokerPositionSide(str(row[2])),
+                quantity=int(row[3]),
+                average_cost=float(row[4]),
+                market_price=float(row[5]),
+                realized_profit_loss=float(row[6]),
+            )
+            for row in position_rows
+        )
+
+        return PortfolioSnapshot(
+            currency=str(header[2]),
+            cash_balance=float(header[3]),
+            buying_power=float(header[4]),
+            broker_market_value=float(header[5]),
+            broker_equity=float(header[6]),
+            positions=positions,
+            generated_at=cls._parse_datetime(str(header[1])),
+        )
+
+    @staticmethod
+    def _parse_datetime(value: str) -> datetime:
+        parsed = datetime.fromisoformat(value)
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+
+        return parsed.astimezone(timezone.utc)
+
+
+================================================================================
+FILE: app\trading\trade_execution_models.py
+================================================================================
+"""約定履歴の共通データモデル。"""
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any
+
+from app.trading.order_models import OrderSide
+
+
+@dataclass(frozen=True, slots=True)
+class TradeExecution:
+    """Brokerで成立した1件の約定事実。"""
+
+    execution_id: str
+    signal_id: str
+    order_id: str
+    broker_order_id: str
+    code: str
+    side: OrderSide
+    quantity: int
+    execution_price: float
+    executed_at: datetime
+    broker_name: str
+    commission: float = 0.0
+    slippage: float = 0.0
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """約定内容を検証して文字列を正規化する。"""
+
+        values = {
+            "約定ID": self.execution_id.strip(),
+            "シグナルID": self.signal_id.strip(),
+            "注文ID": self.order_id.strip(),
+            "Broker注文ID": self.broker_order_id.strip(),
+            "銘柄コード": self.code.strip(),
+            "Broker名": self.broker_name.strip(),
+        }
+
+        for name, value in values.items():
+            if not value:
+                raise ValueError(f"{name}を指定してください。")
+
+        code = values["銘柄コード"]
+
+        if not code.isdigit():
+            raise ValueError("銘柄コードは数字で指定してください。")
+
+        if len(code) not in {4, 5}:
+            raise ValueError(
+                "銘柄コードは4桁または5桁で指定してください。"
+            )
+
+        if self.quantity <= 0:
+            raise ValueError("約定数量は0より大きい必要があります。")
+
+        if self.execution_price <= 0:
+            raise ValueError("約定価格は0より大きい必要があります。")
+
+        if self.executed_at.tzinfo is None:
+            raise ValueError("約定日時にはタイムゾーンが必要です。")
+
+        if self.commission < 0:
+            raise ValueError("手数料は0以上である必要があります。")
+
+        if self.slippage < 0:
+            raise ValueError("スリッページは0以上である必要があります。")
+
+        if not isinstance(self.metadata, dict):
+            raise TypeError("メタデータは辞書形式で指定してください。")
+
+        object.__setattr__(self, "execution_id", values["約定ID"])
+        object.__setattr__(self, "signal_id", values["シグナルID"])
+        object.__setattr__(self, "order_id", values["注文ID"])
+        object.__setattr__(
+            self,
+            "broker_order_id",
+            values["Broker注文ID"],
+        )
+        object.__setattr__(self, "code", code)
+        object.__setattr__(self, "broker_name", values["Broker名"])
+        object.__setattr__(self, "metadata", dict(self.metadata))
+
+    @property
+    def gross_value(self) -> float:
+        """手数料等を含まない約定金額を返す。"""
+
+        return self.execution_price * self.quantity
+
+    @property
+    def total_cost(self) -> float:
+        """手数料・スリッページ合計を返す。"""
+
+        return self.commission + self.slippage
+
+
+@dataclass(frozen=True, slots=True)
+class TradeExecutionRecord:
+    """SQLiteへ保存された約定履歴。"""
+
+    id: int
+    execution: TradeExecution
+    created_at: datetime
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        """保存済み約定履歴の整合性を検証する。"""
+
+        if self.id <= 0:
+            raise ValueError("保存IDは0より大きい必要があります。")
+
+        if self.created_at.tzinfo is None:
+            raise ValueError("作成日時にはタイムゾーンが必要です。")
+
+        if self.updated_at.tzinfo is None:
+            raise ValueError("更新日時にはタイムゾーンが必要です。")
+
+        if self.updated_at < self.created_at:
+            raise ValueError(
+                "更新日時は作成日時以後である必要があります。"
+            )
+
+    @property
+    def execution_id(self) -> str:
+        return self.execution.execution_id
+
+    @property
+    def signal_id(self) -> str:
+        return self.execution.signal_id
+
+    @property
+    def order_id(self) -> str:
+        return self.execution.order_id
+
+    @property
+    def code(self) -> str:
+        return self.execution.code
+
+
+================================================================================
+FILE: app\trading\trade_execution_repository.py
+================================================================================
+"""約定履歴をSQLiteへ追加専用で永続化する。"""
+
+import json
+import sqlite3
+from collections.abc import Callable
+from datetime import datetime, timezone
+from pathlib import Path
+
+from app.trading.order_models import OrderSide
+from app.trading.trade_execution_models import (
+    TradeExecution,
+    TradeExecutionRecord,
+)
+
+
+class TradeExecutionRepositoryError(RuntimeError):
+    """約定履歴Repositoryの基底例外。"""
+
+
+class TradeExecutionNotFoundError(TradeExecutionRepositoryError):
+    """指定した約定履歴が存在しないことを表す。"""
+
+
+class DuplicateTradeExecutionError(TradeExecutionRepositoryError):
+    """約定IDが重複したことを表す。"""
+
+
+class TradeExecutionRepository:
+    """約定履歴を追加専用で管理する。"""
+
+    def __init__(
+        self,
+        database_path: Path,
+        *,
+        now_provider: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.database_path = database_path
+        self.now_provider = (
+            now_provider
+            if now_provider is not None
+            else lambda: datetime.now(timezone.utc)
+        )
+
+    def save(
+        self,
+        execution: TradeExecution,
+    ) -> TradeExecutionRecord:
+        current_time = self._current_time()
+        normalized = TradeExecution(
+            execution_id=execution.execution_id,
+            signal_id=execution.signal_id,
+            order_id=execution.order_id,
+            broker_order_id=execution.broker_order_id,
+            code=execution.code,
+            side=execution.side,
+            quantity=execution.quantity,
+            execution_price=execution.execution_price,
+            executed_at=execution.executed_at.astimezone(timezone.utc),
+            broker_name=execution.broker_name,
+            commission=execution.commission,
+            slippage=execution.slippage,
+            metadata=execution.metadata,
+        )
+
+        try:
+            metadata_json = json.dumps(
+                normalized.metadata,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "メタデータをJSONへ変換できません。"
+            ) from error
+
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO trade_executions (
+                        execution_id,
+                        signal_id,
+                        order_id,
+                        broker_order_id,
+                        code,
+                        side,
+                        quantity,
+                        execution_price,
+                        executed_at,
+                        broker_name,
+                        commission,
+                        slippage,
+                        metadata_json,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized.execution_id,
+                        normalized.signal_id,
+                        normalized.order_id,
+                        normalized.broker_order_id,
+                        normalized.code,
+                        normalized.side.value,
+                        normalized.quantity,
+                        normalized.execution_price,
+                        normalized.executed_at.isoformat(),
+                        normalized.broker_name,
+                        normalized.commission,
+                        normalized.slippage,
+                        metadata_json,
+                        current_time.isoformat(),
+                        current_time.isoformat(),
+                    ),
+                )
+                connection.commit()
+                record_id = int(cursor.lastrowid)
+        except sqlite3.IntegrityError as error:
+            raise DuplicateTradeExecutionError(
+                "約定IDが既に使用されているか、"
+                "関連するシグナル・注文が存在しません。 "
+                f"execution_id={normalized.execution_id}"
+            ) from error
+        except sqlite3.Error as error:
+            raise TradeExecutionRepositoryError(
+                "約定履歴を保存できませんでした。 "
+                f"execution_id={normalized.execution_id}"
+            ) from error
+
+        return TradeExecutionRecord(
+            id=record_id,
+            execution=normalized,
+            created_at=current_time,
+            updated_at=current_time,
+        )
+
+    def get(
+        self,
+        execution_id: str,
+    ) -> TradeExecutionRecord:
+        normalized = self._normalize_required(
+            execution_id,
+            "約定ID",
+        )
+
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    self._select_sql()
+                    + """
+                    WHERE execution_id = ?
+                    """,
+                    (normalized,),
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise TradeExecutionRepositoryError(
+                "約定履歴を読み込めませんでした。 "
+                f"execution_id={normalized}"
+            ) from error
+
+        if row is None:
+            raise TradeExecutionNotFoundError(
+                "指定された約定履歴が存在しません。 "
+                f"execution_id={normalized}"
+            )
+
+        return self._row_to_record(row)
+
+    def latest(
+        self,
+        *,
+        code: str | None = None,
+    ) -> TradeExecutionRecord | None:
+        records = self.list_recent(limit=1, code=code)
+        return records[0] if records else None
+
+    def list_recent(
+        self,
+        *,
+        limit: int = 100,
+        code: str | None = None,
+        side: OrderSide | None = None,
+        order_id: str | None = None,
+        signal_id: str | None = None,
+    ) -> list[TradeExecutionRecord]:
+        if limit <= 0:
+            raise ValueError(
+                "取得件数は0より大きい必要があります。"
+            )
+
+        conditions: list[str] = []
+        parameters: list[object] = []
+
+        if code is not None:
+            conditions.append("code = ?")
+            parameters.append(self._normalize_code(code))
+        if side is not None:
+            conditions.append("side = ?")
+            parameters.append(side.value)
+        if order_id is not None:
+            conditions.append("order_id = ?")
+            parameters.append(
+                self._normalize_required(order_id, "注文ID")
+            )
+        if signal_id is not None:
+            conditions.append("signal_id = ?")
+            parameters.append(
+                self._normalize_required(signal_id, "シグナルID")
+            )
+
+        where_clause = (
+            "WHERE " + " AND ".join(conditions)
+            if conditions
+            else ""
+        )
+        parameters.append(limit)
+
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    self._select_sql()
+                    + f"""
+                    {where_clause}
+                    ORDER BY executed_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    parameters,
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise TradeExecutionRepositoryError(
+                "約定履歴一覧を読み込めませんでした。"
+            ) from error
+
+        return [self._row_to_record(row) for row in rows]
+
+    def find_by_order(
+        self,
+        order_id: str,
+    ) -> list[TradeExecutionRecord]:
+        return self.list_recent(order_id=order_id)
+
+    def find_by_signal(
+        self,
+        signal_id: str,
+    ) -> list[TradeExecutionRecord]:
+        return self.list_recent(signal_id=signal_id)
+
+    def count(
+        self,
+        *,
+        code: str | None = None,
+        side: OrderSide | None = None,
+        order_id: str | None = None,
+        signal_id: str | None = None,
+    ) -> int:
+        conditions: list[str] = []
+        parameters: list[object] = []
+
+        if code is not None:
+            conditions.append("code = ?")
+            parameters.append(self._normalize_code(code))
+        if side is not None:
+            conditions.append("side = ?")
+            parameters.append(side.value)
+        if order_id is not None:
+            conditions.append("order_id = ?")
+            parameters.append(
+                self._normalize_required(order_id, "注文ID")
+            )
+        if signal_id is not None:
+            conditions.append("signal_id = ?")
+            parameters.append(
+                self._normalize_required(signal_id, "シグナルID")
+            )
+
+        where_clause = (
+            "WHERE " + " AND ".join(conditions)
+            if conditions
+            else ""
+        )
+
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM trade_executions
+                    {where_clause}
+                    """,
+                    parameters,
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise TradeExecutionRepositoryError(
+                "約定履歴件数を取得できませんでした。"
+            ) from error
+
+        return int(row[0]) if row is not None else 0
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.database_path)
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
+
+    def _current_time(self) -> datetime:
+        current_time = self.now_provider()
+
+        if current_time.tzinfo is None:
+            raise ValueError(
+                "現在日時にはタイムゾーンが必要です。"
+            )
+
+        return current_time.astimezone(timezone.utc)
+
+    @staticmethod
+    def _normalize_required(
+        value: str,
+        name: str,
+    ) -> str:
+        normalized = value.strip()
+
+        if not normalized:
+            raise ValueError(f"{name}を指定してください。")
+
+        return normalized
+
+    @classmethod
+    def _normalize_code(cls, code: str) -> str:
+        normalized = cls._normalize_required(code, "銘柄コード")
+
+        if not normalized.isdigit():
+            raise ValueError("銘柄コードは数字で指定してください。")
+
+        if len(normalized) not in {4, 5}:
+            raise ValueError(
+                "銘柄コードは4桁または5桁で指定してください。"
+            )
+
+        return normalized
+
+    @staticmethod
+    def _select_sql() -> str:
+        return """
+            SELECT
+                id,
+                execution_id,
+                signal_id,
+                order_id,
+                broker_order_id,
+                code,
+                side,
+                quantity,
+                execution_price,
+                executed_at,
+                broker_name,
+                commission,
+                slippage,
+                metadata_json,
+                created_at,
+                updated_at
+            FROM trade_executions
+        """
+
+    @classmethod
+    def _row_to_record(
+        cls,
+        row: tuple[object, ...],
+    ) -> TradeExecutionRecord:
+        try:
+            metadata = json.loads(str(row[13]))
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise TradeExecutionRepositoryError(
+                "保存済みメタデータを読み込めませんでした。"
+            ) from error
+
+        execution = TradeExecution(
+            execution_id=str(row[1]),
+            signal_id=str(row[2]),
+            order_id=str(row[3]),
+            broker_order_id=str(row[4]),
+            code=str(row[5]),
+            side=OrderSide(str(row[6])),
+            quantity=int(row[7]),
+            execution_price=float(row[8]),
+            executed_at=cls._parse_datetime(str(row[9])),
+            broker_name=str(row[10]),
+            commission=float(row[11]),
+            slippage=float(row[12]),
+            metadata=metadata,
+        )
+
+        return TradeExecutionRecord(
+            id=int(row[0]),
+            execution=execution,
+            created_at=cls._parse_datetime(str(row[14])),
+            updated_at=cls._parse_datetime(str(row[15])),
+        )
+
+    @staticmethod
+    def _parse_datetime(value: str) -> datetime:
+        parsed = datetime.fromisoformat(value)
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+
+        return parsed.astimezone(timezone.utc)
+
+
+================================================================================
+FILE: tests\test_paper_broker.py
+================================================================================
+"""Paper Brokerの注文・約定・資金・ポジション管理テスト。"""
+
+from datetime import datetime, timezone
+
+import pytest
+
+from app.trading.broker_adapter import (
+    BrokerAdapter,
+    BrokerOrderNotFoundError,
+    BrokerOrderRejectedError,
+    BrokerPositionSide,
+    BrokerRequestError,
+)
+from app.trading.order_models import (
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    TradeOrder,
+)
+from app.trading.paper_broker import (
+    PaperBroker,
+    PaperBrokerSettings,
+)
+
+
+CURRENT_TIME = datetime(
+    2026,
+    7,
+    16,
+    0,
+    30,
+    tzinfo=timezone.utc,
+)
+
+
+def create_order(
+    *,
+    order_id: str = "order-001",
+    signal_id: str = "signal-001",
+    code: str = "7203",
+    side: OrderSide = OrderSide.BUY,
+    order_type: OrderType = OrderType.MARKET,
+    quantity: int = 100,
+    limit_price: float | None = None,
+    stop_price: float | None = None,
+) -> TradeOrder:
+    """標準的なテスト注文を作成する。"""
+
+    return TradeOrder(
+        order_id=order_id,
+        signal_id=signal_id,
+        code=code,
+        side=side,
+        order_type=order_type,
+        quantity=quantity,
+        limit_price=limit_price,
+        stop_price=stop_price,
+    )
+
+
+def create_broker(
+    *,
+    initial_cash: float = 1_000_000.0,
+    commission_per_order: float = 0.0,
+    slippage_rate: float = 0.0,
+    price: float = 2500.0,
+) -> PaperBroker:
+    """固定価格を返すPaper Brokerを作成する。"""
+
+    return PaperBroker(
+        settings=PaperBrokerSettings(
+            initial_cash=initial_cash,
+            commission_per_order=(
+                commission_per_order
+            ),
+            slippage_rate=slippage_rate,
+        ),
+        price_provider=lambda _code: price,
+        now_provider=lambda: CURRENT_TIME,
+    )
+
+
+def test_paper_broker_implements_protocol() -> None:
+    """PaperBrokerがBrokerAdapterを実装する。"""
+
+    broker = create_broker()
+
+    assert isinstance(
+        broker,
+        BrokerAdapter,
+    )
+    assert broker.broker_name == "paper"
+
+
+def test_market_buy_order_is_filled_immediately() -> None:
+    """成行買い注文を即時全約定する。"""
+
+    broker = create_broker()
+
+    snapshot = broker.submit_order(
+        create_order(),
+    )
+
+    assert snapshot.broker_order_id == (
+        "paper-order-00000001"
+    )
+    assert snapshot.client_order_id == (
+        "order-001"
+    )
+    assert snapshot.status is OrderStatus.FILLED
+    assert snapshot.filled_quantity == 100
+    assert snapshot.remaining_quantity == 0
+    assert snapshot.average_fill_price == pytest.approx(
+        2500.0
+    )
+
+
+def test_market_buy_reduces_cash_and_creates_position() -> None:
+    """買い約定で現金を減らしポジションを作成する。"""
+
+    broker = create_broker()
+
+    broker.submit_order(
+        create_order(),
+    )
+
+    account = broker.get_account()
+    positions = broker.list_positions()
+
+    assert account.cash_balance == pytest.approx(
+        750_000.0
+    )
+    assert account.market_value == pytest.approx(
+        250_000.0
+    )
+    assert account.equity == pytest.approx(
+        1_000_000.0
+    )
+
+    assert len(positions) == 1
+    assert positions[0].quantity == 100
+    assert positions[0].side is (
+        BrokerPositionSide.LONG
+    )
+
+
+def test_multiple_buys_use_weighted_average_price() -> None:
+    """買い増し時に平均取得価格を加重平均する。"""
+
+    prices = iter(
+        [
+            2500.0,
+            2600.0,
+        ]
+    )
+
+    broker = PaperBroker(
+        settings=PaperBrokerSettings(
+            initial_cash=2_000_000.0,
+        ),
+        price_provider=lambda _code: next(
+            prices
+        ),
+        now_provider=lambda: CURRENT_TIME,
+    )
+
+    broker.submit_order(
+        create_order(
+            order_id="order-001",
+            signal_id="signal-001",
+        )
+    )
+    broker.submit_order(
+        create_order(
+            order_id="order-002",
+            signal_id="signal-002",
+        )
+    )
+
+    position = broker.list_positions()[0]
+
+    assert position.quantity == 200
+    assert position.average_price == pytest.approx(
+        2550.0
+    )
+
+
+def test_market_sell_reduces_position_and_adds_cash() -> None:
+    """売り注文で買いポジションを減らす。"""
+
+    prices = iter(
+        [
+            2500.0,
+            2600.0,
+        ]
+    )
+
+    broker = PaperBroker(
+        settings=PaperBrokerSettings(
+            initial_cash=1_000_000.0,
+        ),
+        price_provider=lambda _code: next(
+            prices
+        ),
+        now_provider=lambda: CURRENT_TIME,
+    )
+
+    broker.submit_order(
+        create_order(
+            order_id="buy-order",
+            signal_id="buy-signal",
+        )
+    )
+
+    broker.submit_order(
+        create_order(
+            order_id="sell-order",
+            signal_id="sell-signal",
+            side=OrderSide.SELL,
+            quantity=40,
+        )
+    )
+
+    position = broker.list_positions()[0]
+
+    assert position.quantity == 60
+    assert broker.get_account().cash_balance == pytest.approx(
+        854_000.0
+    )
+
+
+def test_full_sell_closes_position() -> None:
+    """全数量の売却でポジションを削除する。"""
+
+    broker = create_broker()
+
+    broker.submit_order(
+        create_order(
+            order_id="buy-order",
+            signal_id="buy-signal",
+        )
+    )
+
+    broker.submit_order(
+        create_order(
+            order_id="sell-order",
+            signal_id="sell-signal",
+            side=OrderSide.SELL,
+        )
+    )
+
+    assert broker.list_positions() == []
+
+
+def test_sell_without_position_is_rejected() -> None:
+    """保有数量がない売り注文を拒否する。"""
+
+    broker = create_broker()
+
+    with pytest.raises(
+        BrokerOrderRejectedError,
+        match="売却可能数量",
+    ):
+        broker.submit_order(
+            create_order(
+                side=OrderSide.SELL,
+            )
+        )
+
+    assert broker.list_orders() == []
+
+
+def test_buy_without_buying_power_is_rejected() -> None:
+    """買付余力を超える成行注文を拒否する。"""
+
+    broker = create_broker(
+        initial_cash=100_000.0,
+    )
+
+    with pytest.raises(
+        BrokerOrderRejectedError,
+        match="買付余力",
+    ):
+        broker.submit_order(
+            create_order(),
+        )
+
+    assert broker.list_orders() == []
+
+
+def test_commission_is_applied_to_cash() -> None:
+    """注文手数料を現金残高へ反映する。"""
+
+    broker = create_broker(
+        commission_per_order=500.0,
+    )
+
+    broker.submit_order(
+        create_order(),
+    )
+
+    assert broker.get_account().cash_balance == pytest.approx(
+        749_500.0
+    )
+
+
+def test_buy_slippage_increases_fill_price() -> None:
+    """買い注文ではスリッページ分だけ約定価格を上げる。"""
+
+    broker = create_broker(
+        slippage_rate=0.001,
+    )
+
+    snapshot = broker.submit_order(
+        create_order(),
+    )
+
+    assert snapshot.average_fill_price == pytest.approx(
+        2502.5
+    )
+
+
+def test_duplicate_client_order_returns_existing_order() -> None:
+    """同じクライアント注文IDを冪等に処理する。"""
+
+    broker = create_broker()
+    order = create_order()
+
+    first = broker.submit_order(order)
+    second = broker.submit_order(order)
+
+    assert first == second
+    assert len(broker.list_orders()) == 1
+    assert broker.list_positions()[0].quantity == 100
+
+
+def test_get_order_rejects_missing_order() -> None:
+    """存在しないBroker注文IDを拒否する。"""
+
+    broker = create_broker()
+
+    with pytest.raises(
+        BrokerOrderNotFoundError,
+        match="存在しません",
+    ):
+        broker.get_order(
+            "missing-order"
+        )
+
+
+def test_completed_order_cannot_be_cancelled() -> None:
+    """約定済み注文の取消を拒否する。"""
+
+    broker = create_broker()
+
+    snapshot = broker.submit_order(
+        create_order()
+    )
+
+    with pytest.raises(
+        BrokerRequestError,
+        match="終了済み",
+    ):
+        broker.cancel_order(
+            snapshot.broker_order_id
+        )
+
+
+def test_buy_limit_waits_above_limit_price() -> None:
+    """買い指値より市場価格が高ければ待機する。"""
+
+    broker = create_broker(
+        price=2500.0,
+    )
+
+    snapshot = broker.submit_order(
+        create_order(
+            order_type=OrderType.LIMIT,
+            limit_price=2490.0,
+        )
+    )
+
+    assert snapshot.status is OrderStatus.SENT
+    assert snapshot.filled_quantity == 0
+    assert broker.list_positions() == []
+    assert len(
+        broker.list_orders(
+            active_only=True
+        )
+    ) == 1
+
+
+def test_buy_limit_fills_when_price_falls() -> None:
+    """市場価格が買い指値以下になると約定する。"""
+
+    broker = create_broker(
+        price=2500.0,
+    )
+
+    submitted = broker.submit_order(
+        create_order(
+            order_type=OrderType.LIMIT,
+            limit_price=2490.0,
+        )
+    )
+
+    changed = broker.update_market_price(
+        "7203",
+        2485.0,
+    )
+
+    loaded = broker.get_order(
+        submitted.broker_order_id
+    )
+
+    assert len(changed) == 1
+    assert loaded.status is OrderStatus.FILLED
+    assert loaded.average_fill_price == pytest.approx(
+        2485.0
+    )
+    assert broker.list_positions()[0].quantity == 100
+
+
+def test_buy_limit_does_not_fill_above_limit_after_slippage() -> None:
+    """買い指値はスリッページ後も指値を超えない。"""
+
+    broker = create_broker(
+        price=2500.0,
+        slippage_rate=0.01,
+    )
+
+    snapshot = broker.submit_order(
+        create_order(
+            order_type=OrderType.LIMIT,
+            limit_price=2500.0,
+        )
+    )
+
+    assert snapshot.status is OrderStatus.FILLED
+    assert snapshot.average_fill_price == pytest.approx(
+        2500.0
+    )
+
+
+def test_sell_limit_fills_when_price_rises() -> None:
+    """市場価格が売り指値以上になると約定する。"""
+
+    prices = iter(
+        [
+            2500.0,
+            2500.0,
+        ]
+    )
+
+    broker = PaperBroker(
+        settings=PaperBrokerSettings(
+            initial_cash=1_000_000.0,
+        ),
+        price_provider=lambda _code: next(
+            prices
+        ),
+        now_provider=lambda: CURRENT_TIME,
+    )
+
+    broker.submit_order(
+        create_order(
+            order_id="buy-order",
+            signal_id="buy-signal",
+        )
+    )
+
+    sell = broker.submit_order(
+        create_order(
+            order_id="sell-order",
+            signal_id="sell-signal",
+            side=OrderSide.SELL,
+            order_type=OrderType.LIMIT,
+            limit_price=2550.0,
+        )
+    )
+
+    assert sell.status is OrderStatus.SENT
+
+    broker.update_market_price(
+        "7203",
+        2560.0,
+    )
+
+    loaded = broker.get_order(
+        sell.broker_order_id
+    )
+
+    assert loaded.status is OrderStatus.FILLED
+    assert loaded.average_fill_price == pytest.approx(
+        2560.0
+    )
+
+
+def test_buy_stop_fills_when_price_rises_to_trigger() -> None:
+    """買い逆指値は価格上昇で発動する。"""
+
+    broker = create_broker(
+        price=2500.0,
+    )
+
+    order = broker.submit_order(
+        create_order(
+            order_type=OrderType.STOP,
+            stop_price=2510.0,
+        )
+    )
+
+    assert order.status is OrderStatus.SENT
+
+    broker.update_market_price(
+        "7203",
+        2510.0,
+    )
+
+    loaded = broker.get_order(
+        order.broker_order_id
+    )
+
+    assert loaded.status is OrderStatus.FILLED
+    assert loaded.average_fill_price == pytest.approx(
+        2510.0
+    )
+
+
+def test_sell_stop_fills_when_price_falls_to_trigger() -> None:
+    """売り逆指値は価格下落で発動する。"""
+
+    prices = iter(
+        [
+            2500.0,
+            2500.0,
+        ]
+    )
+
+    broker = PaperBroker(
+        settings=PaperBrokerSettings(
+            initial_cash=1_000_000.0,
+        ),
+        price_provider=lambda _code: next(
+            prices
+        ),
+        now_provider=lambda: CURRENT_TIME,
+    )
+
+    broker.submit_order(
+        create_order(
+            order_id="buy-order",
+            signal_id="buy-signal",
+        )
+    )
+
+    stop_order = broker.submit_order(
+        create_order(
+            order_id="stop-order",
+            signal_id="stop-signal",
+            side=OrderSide.SELL,
+            order_type=OrderType.STOP,
+            stop_price=2450.0,
+        )
+    )
+
+    assert stop_order.status is OrderStatus.SENT
+
+    broker.update_market_price(
+        "7203",
+        2440.0,
+    )
+
+    loaded = broker.get_order(
+        stop_order.broker_order_id
+    )
+
+    assert loaded.status is OrderStatus.FILLED
+    assert loaded.average_fill_price == pytest.approx(
+        2440.0
+    )
+
+
+def test_stop_limit_waits_for_trigger_then_limit() -> None:
+    """逆指値付き指値は発動後も指値条件まで待機する。"""
+
+    broker = create_broker(
+        price=2500.0,
+    )
+
+    order = broker.submit_order(
+        create_order(
+            order_type=OrderType.STOP_LIMIT,
+            stop_price=2510.0,
+            limit_price=2505.0,
+        )
+    )
+
+    assert order.status is OrderStatus.SENT
+
+    first_change = broker.update_market_price(
+        "7203",
+        2515.0,
+    )
+
+    triggered = broker.get_order(
+        order.broker_order_id
+    )
+
+    assert len(first_change) == 1
+    assert triggered.status is OrderStatus.SENT
+    assert "stop triggered" in (
+        triggered.status_reason or ""
+    )
+
+    second_change = broker.update_market_price(
+        "7203",
+        2505.0,
+    )
+
+    filled = broker.get_order(
+        order.broker_order_id
+    )
+
+    assert len(second_change) == 1
+    assert filled.status is OrderStatus.FILLED
+    assert filled.average_fill_price == pytest.approx(
+        2505.0
+    )
+
+
+def test_stop_limit_can_fill_on_trigger_tick() -> None:
+    """発動時点で指値条件も満たせば即時約定する。"""
+
+    broker = create_broker(
+        price=2500.0,
+    )
+
+    order = broker.submit_order(
+        create_order(
+            order_type=OrderType.STOP_LIMIT,
+            stop_price=2510.0,
+            limit_price=2520.0,
+        )
+    )
+
+    broker.update_market_price(
+        "7203",
+        2510.0,
+    )
+
+    loaded = broker.get_order(
+        order.broker_order_id
+    )
+
+    assert loaded.status is OrderStatus.FILLED
+    assert loaded.average_fill_price == pytest.approx(
+        2510.0
+    )
+
+
+def test_waiting_order_can_be_cancelled() -> None:
+    """未約定の待機注文を取り消せる。"""
+
+    broker = create_broker(
+        price=2500.0,
+    )
+
+    submitted = broker.submit_order(
+        create_order(
+            order_type=OrderType.LIMIT,
+            limit_price=2400.0,
+        )
+    )
+
+    cancelled = broker.cancel_order(
+        submitted.broker_order_id
+    )
+
+    assert cancelled.status is OrderStatus.CANCELLED
+    assert broker.list_orders(
+        active_only=True
+    ) == []
+
+    broker.update_market_price(
+        "7203",
+        2300.0,
+    )
+
+    loaded = broker.get_order(
+        submitted.broker_order_id
+    )
+
+    assert loaded.status is OrderStatus.CANCELLED
+    assert broker.list_positions() == []
+
+
+def test_price_update_only_processes_matching_code() -> None:
+    """価格更新した銘柄の注文だけを処理する。"""
+
+    broker = create_broker(
+        price=2500.0,
+    )
+
+    first = broker.submit_order(
+        create_order(
+            order_id="order-7203",
+            signal_id="signal-7203",
+            code="7203",
+            order_type=OrderType.LIMIT,
+            limit_price=2400.0,
+        )
+    )
+
+    second = broker.submit_order(
+        create_order(
+            order_id="order-8306",
+            signal_id="signal-8306",
+            code="8306",
+            order_type=OrderType.LIMIT,
+            limit_price=2400.0,
+        )
+    )
+
+    broker.update_market_price(
+        "7203",
+        2350.0,
+    )
+
+    assert broker.get_order(
+        first.broker_order_id
+    ).status is OrderStatus.FILLED
+
+    assert broker.get_order(
+        second.broker_order_id
+    ).status is OrderStatus.SENT
+
+
+def test_update_market_price_updates_unrealized_profit() -> None:
+    """現在価格更新を口座評価額と含み損益へ反映する。"""
+
+    broker = create_broker()
+
+    broker.submit_order(
+        create_order()
+    )
+
+    broker.update_market_price(
+        "7203",
+        2600.0,
+    )
+
+    position = broker.list_positions()[0]
+    account = broker.get_account()
+
+    assert position.unrealized_profit_loss == pytest.approx(
+        10_000.0
+    )
+    assert account.market_value == pytest.approx(
+        260_000.0
+    )
+    assert account.equity == pytest.approx(
+        1_010_000.0
+    )
+
+
+def test_get_market_price_returns_latest_price() -> None:
+    """Brokerが保持する最新価格を返す。"""
+
+    broker = create_broker(
+        price=2500.0,
+    )
+
+    broker.submit_order(
+        create_order(
+            order_type=OrderType.LIMIT,
+            limit_price=2400.0,
+        )
+    )
+
+    assert broker.get_market_price(
+        "7203"
+    ) == pytest.approx(
+        2500.0
+    )
+
+    broker.update_market_price(
+        "7203",
+        2450.0,
+    )
+
+    assert broker.get_market_price(
+        "7203"
+    ) == pytest.approx(
+        2450.0
+    )
+
+
+def test_price_provider_failure_is_wrapped() -> None:
+    """価格取得失敗をBrokerRequestErrorへ変換する。"""
+
+    broker = PaperBroker(
+        price_provider=lambda _code: (
+            (_ for _ in ()).throw(
+                RuntimeError(
+                    "price unavailable"
+                )
+            )
+        ),
+        now_provider=lambda: CURRENT_TIME,
+    )
+
+    with pytest.raises(
+        BrokerRequestError,
+        match="現在価格",
+    ):
+        broker.submit_order(
+            create_order()
+        )
+
+
+@pytest.mark.parametrize(
+    (
+        "arguments",
+        "message",
+    ),
+    [
+        (
+            {
+                "initial_cash": -1,
+            },
+            "初期資金",
+        ),
+        (
+            {
+                "commission_per_order": -1,
+            },
+            "注文手数料",
+        ),
+        (
+            {
+                "slippage_rate": -0.1,
+            },
+            "スリッページ率",
+        ),
+        (
+            {
+                "currency": "JP",
+            },
+            "英字3文字",
+        ),
+        (
+            {
+                "broker_name": " ",
+            },
+            "Broker名",
+        ),
+    ],
+)
+def test_settings_reject_invalid_values(
+    arguments: dict[str, object],
+    message: str,
+) -> None:
+    """不正なPaper Broker設定を拒否する。"""
+
+    with pytest.raises(
+        ValueError,
+        match=message,
+    ):
+        PaperBrokerSettings(
+            **arguments
+        )
+
+
+def test_naive_current_time_is_rejected() -> None:
+    """タイムゾーンなし現在日時を拒否する。"""
+
+    broker = PaperBroker(
+        price_provider=lambda _code: 2500.0,
+        now_provider=lambda: datetime(
+            2026,
+            7,
+            16,
+            9,
+            30,
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="タイムゾーン",
+    ):
+        broker.submit_order(
+            create_order()
+        )
+
+================================================================================
+FILE: tests\test_order_repository.py
+================================================================================
+"""売買注文モデルとRepositoryのテスト。"""
+
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from app.database import (
+    SCHEMA_VERSION,
+    initialize_database,
+)
+from app.trading.order_models import (
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    TradeOrder,
+)
+from app.trading.order_repository import (
+    DuplicateOrderError,
+    OrderNotFoundError,
+    OrderRepository,
+    OrderStateTransitionError,
+)
+from app.trading.signal_models import (
+    SignalAction,
+    TradeSignal,
+)
+from app.trading.signal_repository import (
+    SignalRepository,
+)
+
+
+CREATED_AT = datetime(
+    2026,
+    7,
+    16,
+    0,
+    20,
+    tzinfo=timezone.utc,
+)
+
+QUEUED_AT = CREATED_AT + timedelta(
+    seconds=1
+)
+
+SENT_AT = CREATED_AT + timedelta(
+    seconds=2
+)
+
+PARTIAL_AT = CREATED_AT + timedelta(
+    seconds=3
+)
+
+FILLED_AT = CREATED_AT + timedelta(
+    seconds=4
+)
+
+
+class SequentialClock:
+    """指定日時を順番に返す時計。"""
+
+    def __init__(
+        self,
+        times: list[datetime],
+    ) -> None:
+        """返却日時を設定する。"""
+
+        self.times = iter(times)
+
+    def now(self) -> datetime:
+        """次の日時を返す。"""
+
+        return next(self.times)
+
+
+def create_signal() -> TradeSignal:
+    """注文元となる売買シグナルを作成する。"""
+
+    return TradeSignal(
+        signal_id="signal-001",
+        code="7203",
+        strategy_name="orb",
+        action=SignalAction.BUY,
+        generated_at=CREATED_AT,
+        signal_price=2500.0,
+        quantity=100,
+        reason="opening_range_breakout",
+    )
+
+
+def create_order(
+    *,
+    order_id: str = "order-001",
+    signal_id: str = "signal-001",
+    code: str = "7203",
+    side: OrderSide = OrderSide.BUY,
+    order_type: OrderType = OrderType.MARKET,
+    quantity: int = 100,
+    limit_price: float | None = None,
+    stop_price: float | None = None,
+) -> TradeOrder:
+    """標準的な注文を作成する。"""
+
+    return TradeOrder(
+        order_id=order_id,
+        signal_id=signal_id,
+        code=code,
+        side=side,
+        order_type=order_type,
+        quantity=quantity,
+        limit_price=limit_price,
+        stop_price=stop_price,
+    )
+
+
+def create_repository(
+    tmp_path: Path,
+    *,
+    times: list[datetime] | None = None,
+) -> tuple[
+    Path,
+    OrderRepository,
+]:
+    """シグナル登録済みDBと注文Repositoryを作成する。"""
+
+    database_path = tmp_path / "katana.db"
+    initialize_database(database_path)
+
+    SignalRepository(
+        database_path,
+        now_provider=lambda: CREATED_AT,
+    ).save(
+        create_signal()
+    )
+
+    repository = OrderRepository(
+        database_path,
+        now_provider=SequentialClock(
+            times or [CREATED_AT]
+        ).now,
+    )
+
+    return database_path, repository
+
+
+def test_initialize_database_creates_trade_orders_table(
+    tmp_path: Path,
+) -> None:
+    """DB初期化でtrade_ordersを作成する。"""
+
+    database_path = tmp_path / "katana.db"
+    initialize_database(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        table_row = connection.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name = 'trade_orders'
+            """
+        ).fetchone()
+
+        version_row = connection.execute(
+            """
+            SELECT version
+            FROM schema_version
+            WHERE id = 1
+            """
+        ).fetchone()
+
+    assert table_row == (
+        "trade_orders",
+    )
+    assert version_row == (
+        SCHEMA_VERSION,
+    )
+def test_repository_creates_new_order(
+    tmp_path: Path,
+) -> None:
+    """注文をNEW状態で保存する。"""
+
+    _database_path, repository = create_repository(
+        tmp_path
+    )
+
+    order = create_order()
+    record = repository.create(order)
+
+    assert record.id > 0
+    assert record.order == order
+    assert record.status is OrderStatus.NEW
+    assert record.filled_quantity == 0
+    assert record.remaining_quantity == 100
+    assert record.average_fill_price is None
+    assert record.broker_order_id is None
+    assert record.created_at == CREATED_AT
+    assert record.updated_at == CREATED_AT
+    assert record.submitted_at is None
+    assert record.completed_at is None
+
+    assert repository.get(
+        "order-001"
+    ) == record
+
+    assert repository.get_by_signal_id(
+        "signal-001"
+    ) == record
+
+
+def test_repository_rejects_duplicate_order_id(
+    tmp_path: Path,
+) -> None:
+    """同一注文IDの重複を拒否する。"""
+
+    _database_path, repository = create_repository(
+        tmp_path,
+        times=[
+            CREATED_AT,
+            QUEUED_AT,
+        ],
+    )
+
+    repository.create(
+        create_order()
+    )
+
+    with pytest.raises(
+        DuplicateOrderError,
+        match="既に使用",
+    ):
+        repository.create(
+            create_order(
+                signal_id="signal-001",
+            )
+        )
+
+
+def test_repository_rejects_second_order_for_signal(
+    tmp_path: Path,
+) -> None:
+    """1つのシグナルから複数注文を作成できない。"""
+
+    _database_path, repository = create_repository(
+        tmp_path,
+        times=[
+            CREATED_AT,
+            QUEUED_AT,
+        ],
+    )
+
+    repository.create(
+        create_order(
+            order_id="order-001",
+        )
+    )
+
+    with pytest.raises(
+        DuplicateOrderError,
+        match="シグナルID",
+    ):
+        repository.create(
+            create_order(
+                order_id="order-002",
+            )
+        )
+
+
+def test_repository_rejects_unknown_signal(
+    tmp_path: Path,
+) -> None:
+    """存在しないシグナルからの注文作成を拒否する。"""
+
+    database_path = tmp_path / "katana.db"
+    initialize_database(database_path)
+
+    repository = OrderRepository(
+        database_path,
+        now_provider=lambda: CREATED_AT,
+    )
+
+    with pytest.raises(
+        DuplicateOrderError,
+    ):
+        repository.create(
+            create_order(
+                signal_id="missing-signal",
+            )
+        )
+
+
+def test_repository_transitions_to_queued_and_sent(
+    tmp_path: Path,
+) -> None:
+    """NEWからQUEUED、SENTへ遷移する。"""
+
+    _database_path, repository = create_repository(
+        tmp_path,
+        times=[
+            CREATED_AT,
+            QUEUED_AT,
+            SENT_AT,
+        ],
+    )
+
+    repository.create(
+        create_order()
+    )
+
+    queued = repository.transition(
+        "order-001",
+        target_status=OrderStatus.QUEUED,
+        status_reason="risk approved",
+    )
+
+    assert queued.status is OrderStatus.QUEUED
+    assert queued.status_reason == "risk approved"
+    assert queued.submitted_at is None
+
+    sent = repository.transition(
+        "order-001",
+        target_status=OrderStatus.SENT,
+        broker_order_id="broker-001",
+        status_reason="broker accepted",
+    )
+
+    assert sent.status is OrderStatus.SENT
+    assert sent.broker_order_id == "broker-001"
+    assert sent.submitted_at == SENT_AT
+    assert sent.completed_at is None
+
+
+def test_repository_records_partial_and_full_fill(
+    tmp_path: Path,
+) -> None:
+    """部分約定後に全約定へ遷移する。"""
+
+    _database_path, repository = create_repository(
+        tmp_path,
+        times=[
+            CREATED_AT,
+            QUEUED_AT,
+            SENT_AT,
+            PARTIAL_AT,
+            FILLED_AT,
+        ],
+    )
+
+    repository.create(
+        create_order()
+    )
+
+    repository.transition(
+        "order-001",
+        target_status=OrderStatus.QUEUED,
+    )
+    repository.transition(
+        "order-001",
+        target_status=OrderStatus.SENT,
+        broker_order_id="broker-001",
+    )
+
+    partial = repository.transition(
+        "order-001",
+        target_status=OrderStatus.PARTIALLY_FILLED,
+        filled_quantity=40,
+        average_fill_price=2501.0,
+    )
+
+    assert partial.filled_quantity == 40
+    assert partial.remaining_quantity == 60
+    assert partial.average_fill_price == pytest.approx(
+        2501.0
+    )
+
+    filled = repository.transition(
+        "order-001",
+        target_status=OrderStatus.FILLED,
+        filled_quantity=100,
+        average_fill_price=2502.5,
+    )
+
+    assert filled.status is OrderStatus.FILLED
+    assert filled.filled_quantity == 100
+    assert filled.remaining_quantity == 0
+    assert filled.average_fill_price == pytest.approx(
+        2502.5
+    )
+    assert filled.completed_at == FILLED_AT
+
+
+def test_repository_cancels_sent_order(
+    tmp_path: Path,
+) -> None:
+    """送信済み注文を取消済みにする。"""
+
+    _database_path, repository = create_repository(
+        tmp_path,
+        times=[
+            CREATED_AT,
+            QUEUED_AT,
+            SENT_AT,
+            FILLED_AT,
+        ],
+    )
+
+    repository.create(
+        create_order()
+    )
+    repository.transition(
+        "order-001",
+        target_status=OrderStatus.QUEUED,
+    )
+    repository.transition(
+        "order-001",
+        target_status=OrderStatus.SENT,
+    )
+
+    cancelled = repository.transition(
+        "order-001",
+        target_status=OrderStatus.CANCELLED,
+        status_reason="user cancelled",
+    )
+
+    assert cancelled.status is OrderStatus.CANCELLED
+    assert cancelled.status_reason == "user cancelled"
+    assert cancelled.completed_at == FILLED_AT
+
+
+def test_repository_records_rejection(
+    tmp_path: Path,
+) -> None:
+    """証券会社の注文拒否を保存する。"""
+
+    _database_path, repository = create_repository(
+        tmp_path,
+        times=[
+            CREATED_AT,
+            QUEUED_AT,
+            SENT_AT,
+        ],
+    )
+
+    repository.create(
+        create_order()
+    )
+    repository.transition(
+        "order-001",
+        target_status=OrderStatus.QUEUED,
+    )
+
+    rejected = repository.transition(
+        "order-001",
+        target_status=OrderStatus.REJECTED,
+        error_message="insufficient buying power",
+    )
+
+    assert rejected.status is OrderStatus.REJECTED
+    assert rejected.error_message == (
+        "insufficient buying power"
+    )
+    assert rejected.completed_at == SENT_AT
+
+
+def test_repository_rejects_invalid_transition(
+    tmp_path: Path,
+) -> None:
+    """NEWからFILLEDへの直接遷移を拒否する。"""
+
+    _database_path, repository = create_repository(
+        tmp_path
+    )
+
+    repository.create(
+        create_order()
+    )
+
+    with pytest.raises(
+        OrderStateTransitionError,
+        match="許可されていない",
+    ):
+        repository.transition(
+            "order-001",
+            target_status=OrderStatus.FILLED,
+            filled_quantity=100,
+            average_fill_price=2500.0,
+        )
+
+
+def test_repository_rejects_transition_from_terminal_status(
+    tmp_path: Path,
+) -> None:
+    """終了状態からの再遷移を拒否する。"""
+
+    _database_path, repository = create_repository(
+        tmp_path,
+        times=[
+            CREATED_AT,
+            QUEUED_AT,
+        ],
+    )
+
+    repository.create(
+        create_order()
+    )
+    repository.transition(
+        "order-001",
+        target_status=OrderStatus.CANCELLED,
+    )
+
+    with pytest.raises(
+        OrderStateTransitionError,
+        match="許可されていない",
+    ):
+        repository.transition(
+            "order-001",
+            target_status=OrderStatus.QUEUED,
+        )
+
+
+def test_repository_filters_orders(
+    tmp_path: Path,
+) -> None:
+    """状態・銘柄・売買方向で注文を絞り込む。"""
+
+    _database_path, repository = create_repository(
+        tmp_path
+    )
+
+    repository.create(
+        create_order()
+    )
+
+    records = repository.list_recent(
+        code="7203",
+        status=OrderStatus.NEW,
+        side=OrderSide.BUY,
+    )
+
+    assert [
+        record.order_id
+        for record in records
+    ] == [
+        "order-001",
+    ]
+
+    assert repository.count(
+        status=OrderStatus.NEW,
+    ) == 1
+
+
+def test_repository_returns_none_without_signal_order(
+    tmp_path: Path,
+) -> None:
+    """注文がないシグナルにはNoneを返す。"""
+
+    _database_path, repository = create_repository(
+        tmp_path
+    )
+
+    assert repository.get_by_signal_id(
+        "signal-001"
+    ) is None
+    assert repository.count() == 0
+
+
+def test_repository_rejects_missing_order(
+    tmp_path: Path,
+) -> None:
+    """存在しない注文IDを拒否する。"""
+
+    _database_path, repository = create_repository(
+        tmp_path
+    )
+
+    with pytest.raises(
+        OrderNotFoundError,
+        match="存在しません",
+    ):
+        repository.get(
+            "missing-order"
+        )
+
+
+@pytest.mark.parametrize(
+    (
+        "arguments",
+        "message",
+    ),
+    [
+        (
+            {
+                "order_id": " ",
+            },
+            "注文ID",
+        ),
+        (
+            {
+                "signal_id": " ",
+            },
+            "シグナルID",
+        ),
+        (
+            {
+                "code": "ABC",
+            },
+            "数字",
+        ),
+        (
+            {
+                "quantity": 0,
+            },
+            "注文数量",
+        ),
+        (
+            {
+                "order_type": OrderType.LIMIT,
+                "limit_price": None,
+            },
+            "指値価格",
+        ),
+        (
+            {
+                "order_type": OrderType.STOP,
+                "stop_price": None,
+            },
+            "逆指値価格",
+        ),
+        (
+            {
+                "order_type": OrderType.MARKET,
+                "limit_price": 2500.0,
+            },
+            "成行注文",
+        ),
+    ],
+)
+def test_trade_order_rejects_invalid_values(
+    arguments: dict[str, object],
+    message: str,
+) -> None:
+    """不正な注文内容を拒否する。"""
+
+    base_arguments: dict[str, object] = {
+        "order_id": "order-001",
+        "signal_id": "signal-001",
+        "code": "7203",
+        "side": OrderSide.BUY,
+        "order_type": OrderType.MARKET,
+        "quantity": 100,
+    }
+
+    base_arguments.update(arguments)
+
+    with pytest.raises(
+        (
+            TypeError,
+            ValueError,
+        ),
+        match=message,
+    ):
+        TradeOrder(
+            **base_arguments
+        )
+
+================================================================================
+FILE: tests\test_position_repository.py
+================================================================================
+"""現在ポジションモデルとRepositoryのテスト。"""
+
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from app.database import SCHEMA_VERSION, initialize_database
+from app.trading.broker_adapter import BrokerPositionSide
+from app.trading.position_models import TradingPosition
+from app.trading.position_repository import (
+    DuplicatePositionError,
+    PositionNotFoundError,
+    PositionRepository,
+)
+
+
+CREATED_AT = datetime(
+    2026,
+    7,
+    20,
+    0,
+    30,
+    tzinfo=timezone.utc,
+)
+UPDATED_AT = CREATED_AT + timedelta(minutes=5)
+
+
+class SequentialClock:
+    """指定日時を順番に返す時計。"""
+
+    def __init__(self, values: list[datetime]) -> None:
+        self.values = iter(values)
+
+    def now(self) -> datetime:
+        return next(self.values)
+
+
+def create_position(
+    *,
+    position_id: str = "position-7203-long",
+    code: str = "7203",
+    side: BrokerPositionSide = BrokerPositionSide.LONG,
+    quantity: int = 100,
+    average_cost: float = 2500.0,
+    realized_profit_loss: float = 0.0,
+    opened_at: datetime = CREATED_AT,
+) -> TradingPosition:
+    """標準的な現在ポジションを作成する。"""
+
+    return TradingPosition(
+        position_id=position_id,
+        code=code,
+        side=side,
+        quantity=quantity,
+        average_cost=average_cost,
+        realized_profit_loss=realized_profit_loss,
+        opened_at=opened_at,
+    )
+
+
+def create_repository(
+    tmp_path: Path,
+    *,
+    times: list[datetime] | None = None,
+) -> tuple[Path, PositionRepository]:
+    """初期化済みDBとRepositoryを作成する。"""
+
+    database_path = tmp_path / "katana.db"
+    initialize_database(database_path)
+
+    return (
+        database_path,
+        PositionRepository(
+            database_path,
+            now_provider=SequentialClock(
+                times or [CREATED_AT]
+            ).now,
+        ),
+    )
+
+
+def test_initialize_database_creates_positions_table(
+    tmp_path: Path,
+) -> None:
+    """DB初期化でpositionsテーブルを作成する。"""
+
+    database_path = tmp_path / "katana.db"
+    initialize_database(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        table_row = connection.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name = 'positions'
+            """
+        ).fetchone()
+        version_row = connection.execute(
+            """
+            SELECT version
+            FROM schema_version
+            WHERE id = 1
+            """
+        ).fetchone()
+
+    assert table_row == ("positions",)
+    assert version_row == (SCHEMA_VERSION,)
+def test_repository_creates_and_reads_position(
+    tmp_path: Path,
+) -> None:
+    """現在ポジションを保存して読み込む。"""
+
+    _database_path, repository = create_repository(tmp_path)
+
+    position = create_position()
+    record = repository.create(position)
+
+    assert record.id > 0
+    assert record.position == position
+    assert record.created_at == CREATED_AT
+    assert record.updated_at == CREATED_AT
+    assert record.position.acquisition_value == pytest.approx(
+        250_000.0
+    )
+    assert repository.get(position.position_id) == record
+    assert repository.get_by_identity(
+        code="7203",
+        side=BrokerPositionSide.LONG,
+    ) == record
+
+
+def test_repository_rejects_duplicate_position_id(
+    tmp_path: Path,
+) -> None:
+    """同じポジションIDを拒否する。"""
+
+    _database_path, repository = create_repository(
+        tmp_path,
+        times=[CREATED_AT, UPDATED_AT],
+    )
+    repository.create(create_position())
+
+    with pytest.raises(
+        DuplicatePositionError,
+        match="ポジションID",
+    ):
+        repository.create(create_position())
+
+
+def test_repository_rejects_duplicate_code_and_side(
+    tmp_path: Path,
+) -> None:
+    """同じ銘柄・方向の2件目を拒否する。"""
+
+    _database_path, repository = create_repository(
+        tmp_path,
+        times=[CREATED_AT, UPDATED_AT],
+    )
+    repository.create(create_position())
+
+    with pytest.raises(DuplicatePositionError):
+        repository.create(
+            create_position(
+                position_id="position-other",
+            )
+        )
+
+
+def test_repository_updates_position(
+    tmp_path: Path,
+) -> None:
+    """数量・平均取得価格・実現損益を更新する。"""
+
+    _database_path, repository = create_repository(
+        tmp_path,
+        times=[CREATED_AT, UPDATED_AT],
+    )
+    repository.create(create_position())
+
+    updated = repository.update(
+        create_position(
+            quantity=150,
+            average_cost=2520.0,
+            realized_profit_loss=500.0,
+        )
+    )
+
+    assert updated.quantity == 150
+    assert updated.position.average_cost == pytest.approx(2520.0)
+    assert updated.position.realized_profit_loss == pytest.approx(
+        500.0
+    )
+    assert updated.created_at == CREATED_AT
+    assert updated.updated_at == UPDATED_AT
+
+
+def test_repository_rejects_identity_change_on_update(
+    tmp_path: Path,
+) -> None:
+    """更新時の銘柄または方向変更を拒否する。"""
+
+    _database_path, repository = create_repository(
+        tmp_path,
+        times=[CREATED_AT],
+    )
+    repository.create(create_position())
+
+    with pytest.raises(ValueError, match="変更できません"):
+        repository.update(
+            create_position(code="8306")
+        )
+
+
+def test_repository_lists_and_filters_positions(
+    tmp_path: Path,
+) -> None:
+    """銘柄と方向で現在ポジションを絞り込む。"""
+
+    _database_path, repository = create_repository(tmp_path)
+    repository.create(create_position())
+
+    assert len(repository.list_recent(code="7203")) == 1
+    assert len(
+        repository.list_recent(
+            side=BrokerPositionSide.LONG
+        )
+    ) == 1
+    assert repository.count(code="7203") == 1
+    assert repository.count(
+        side=BrokerPositionSide.LONG
+    ) == 1
+
+
+def test_repository_returns_none_without_identity(
+    tmp_path: Path,
+) -> None:
+    """存在しない銘柄・方向にはNoneを返す。"""
+
+    _database_path, repository = create_repository(tmp_path)
+
+    assert repository.get_by_identity(
+        code="7203",
+        side=BrokerPositionSide.LONG,
+    ) is None
+    assert repository.count() == 0
+
+
+def test_repository_rejects_missing_position(
+    tmp_path: Path,
+) -> None:
+    """存在しないポジションIDを拒否する。"""
+
+    _database_path, repository = create_repository(tmp_path)
+
+    with pytest.raises(
+        PositionNotFoundError,
+        match="存在しません",
+    ):
+        repository.get("missing-position")
+
+
+def test_repository_rejects_invalid_limit(
+    tmp_path: Path,
+) -> None:
+    """0以下の取得件数を拒否する。"""
+
+    _database_path, repository = create_repository(tmp_path)
+
+    with pytest.raises(ValueError, match="取得件数"):
+        repository.list_recent(limit=0)
+
+
+def test_repository_normalizes_opened_at_to_utc(
+    tmp_path: Path,
+) -> None:
+    """ポジション開始日時をUTCへ正規化する。"""
+
+    _database_path, repository = create_repository(tmp_path)
+    jst = timezone(timedelta(hours=9))
+
+    record = repository.create(
+        create_position(
+            opened_at=datetime(
+                2026,
+                7,
+                20,
+                9,
+                30,
+                tzinfo=jst,
+            )
+        )
+    )
+
+    assert record.position.opened_at == CREATED_AT
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"position_id": " "}, "ポジションID"),
+        ({"code": "ABC"}, "数字"),
+        ({"quantity": 0}, "保有数量"),
+        ({"average_cost": 0.0}, "平均取得価格"),
+    ],
+)
+def test_position_rejects_invalid_values(
+    arguments: dict[str, object],
+    message: str,
+) -> None:
+    """不正な現在ポジションを拒否する。"""
+
+    base_arguments: dict[str, object] = {
+        "position_id": "position-7203-long",
+        "code": "7203",
+        "side": BrokerPositionSide.LONG,
+        "quantity": 100,
+        "average_cost": 2500.0,
+        "realized_profit_loss": 0.0,
+        "opened_at": CREATED_AT,
+    }
+    base_arguments.update(arguments)
+
+    with pytest.raises((TypeError, ValueError), match=message):
+        TradingPosition(**base_arguments)
+
+
+def test_position_rejects_naive_opened_at() -> None:
+    """タイムゾーンなし開始日時を拒否する。"""
+
+    with pytest.raises(ValueError, match="タイムゾーン"):
+        create_position(
+            opened_at=datetime(
+                2026,
+                7,
+                20,
+                9,
+                30,
+            )
+        )
+
+
+================================================================================
+FILE: tests\test_portfolio_repository.py
+================================================================================
+"""PortfolioRepositoryの統合テスト。"""
+
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from app.database import SCHEMA_VERSION, initialize_database
+from app.trading.broker_adapter import BrokerPositionSide
+from app.trading.portfolio_models import (
+    PortfolioPositionSnapshot,
+    PortfolioSnapshot,
+)
+from app.trading.portfolio_repository import (
+    DuplicatePortfolioSnapshotError,
+    PortfolioRepository,
+    PortfolioSnapshotNotFoundError,
+)
+
+
+GENERATED_AT = datetime(
+    2026,
+    7,
+    20,
+    1,
+    0,
+    tzinfo=timezone.utc,
+)
+CREATED_AT = GENERATED_AT + timedelta(seconds=1)
+
+
+def create_snapshot(
+    *,
+    generated_at: datetime = GENERATED_AT,
+    with_position: bool = True,
+) -> PortfolioSnapshot:
+    positions = (
+        (
+            PortfolioPositionSnapshot(
+                position_id="position-7203-long",
+                code="7203",
+                side=BrokerPositionSide.LONG,
+                quantity=100,
+                average_cost=2500.0,
+                market_price=2600.0,
+                realized_profit_loss=5000.0,
+            ),
+        )
+        if with_position
+        else ()
+    )
+
+    return PortfolioSnapshot(
+        currency="JPY",
+        cash_balance=750_000.0,
+        buying_power=750_000.0,
+        broker_market_value=260_000.0 if with_position else 0.0,
+        broker_equity=1_010_000.0 if with_position else 750_000.0,
+        positions=positions,
+        generated_at=generated_at,
+    )
+
+
+def create_repository(
+    tmp_path: Path,
+) -> tuple[Path, PortfolioRepository]:
+    database_path = tmp_path / "katana.db"
+    initialize_database(database_path)
+
+    return (
+        database_path,
+        PortfolioRepository(
+            database_path,
+            now_provider=lambda: CREATED_AT,
+        ),
+    )
+
+
+def test_initialize_database_creates_portfolio_tables(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "katana.db"
+    initialize_database(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name IN (
+                  'portfolio_snapshots',
+                  'portfolio_snapshot_positions'
+              )
+            ORDER BY name
+            """
+        ).fetchall()
+        version_row = connection.execute(
+            """
+            SELECT version
+            FROM schema_version
+            WHERE id = 1
+            """
+        ).fetchone()
+
+    assert rows == [
+        ("portfolio_snapshot_positions",),
+        ("portfolio_snapshots",),
+    ]
+    assert version_row == (SCHEMA_VERSION,)
+def test_repository_saves_and_reads_snapshot(
+    tmp_path: Path,
+) -> None:
+    _database_path, repository = create_repository(tmp_path)
+    snapshot = create_snapshot()
+
+    saved = repository.save(snapshot)
+
+    assert saved == snapshot
+    assert repository.get(GENERATED_AT) == snapshot
+    assert repository.count() == 1
+
+
+def test_repository_saves_empty_snapshot(
+    tmp_path: Path,
+) -> None:
+    _database_path, repository = create_repository(tmp_path)
+    snapshot = create_snapshot(with_position=False)
+
+    saved = repository.save(snapshot)
+
+    assert saved.position_count == 0
+    assert saved.positions == ()
+    assert repository.count() == 1
+
+
+def test_repository_rejects_duplicate_generated_at(
+    tmp_path: Path,
+) -> None:
+    _database_path, repository = create_repository(tmp_path)
+    repository.save(create_snapshot())
+
+    with pytest.raises(
+        DuplicatePortfolioSnapshotError,
+        match="同じ集計日時",
+    ):
+        repository.save(create_snapshot())
+
+
+def test_repository_returns_latest_snapshot(
+    tmp_path: Path,
+) -> None:
+    _database_path, repository = create_repository(tmp_path)
+    earlier = create_snapshot()
+    later = create_snapshot(
+        generated_at=GENERATED_AT + timedelta(minutes=1),
+        with_position=False,
+    )
+
+    repository.save(earlier)
+    repository.save(later)
+
+    assert repository.latest() == later
+    assert repository.count() == 2
+
+
+def test_repository_returns_none_when_empty(
+    tmp_path: Path,
+) -> None:
+    _database_path, repository = create_repository(tmp_path)
+
+    assert repository.latest() is None
+    assert repository.list_recent() == []
+    assert repository.count() == 0
+
+
+def test_repository_lists_recent_snapshots(
+    tmp_path: Path,
+) -> None:
+    _database_path, repository = create_repository(tmp_path)
+    earlier = create_snapshot()
+    later = create_snapshot(
+        generated_at=GENERATED_AT + timedelta(minutes=1),
+        with_position=False,
+    )
+
+    repository.save(earlier)
+    repository.save(later)
+
+    assert repository.list_recent() == [later, earlier]
+    assert repository.list_recent(limit=1) == [later]
+
+
+def test_repository_rejects_missing_snapshot(
+    tmp_path: Path,
+) -> None:
+    _database_path, repository = create_repository(tmp_path)
+
+    with pytest.raises(
+        PortfolioSnapshotNotFoundError,
+        match="存在しません",
+    ):
+        repository.get(GENERATED_AT)
+
+
+def test_repository_rejects_invalid_limit(
+    tmp_path: Path,
+) -> None:
+    _database_path, repository = create_repository(tmp_path)
+
+    with pytest.raises(ValueError, match="取得件数"):
+        repository.list_recent(limit=0)
+
+
+def test_repository_normalizes_generated_at_to_utc(
+    tmp_path: Path,
+) -> None:
+    _database_path, repository = create_repository(tmp_path)
+    jst = timezone(timedelta(hours=9))
+    jst_generated_at = datetime(
+        2026,
+        7,
+        20,
+        10,
+        0,
+        tzinfo=jst,
+    )
+
+    saved = repository.save(
+        create_snapshot(
+            generated_at=jst_generated_at
+        )
+    )
+
+    assert saved.generated_at == GENERATED_AT
+

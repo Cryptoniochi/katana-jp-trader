@@ -1,0 +1,5117 @@
+================================================================================
+FILE: app\application\trading_loop_component.py
+================================================================================
+"""Trading LoopをApplication Componentとして提供する。"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import Protocol
+
+from app.application.trading_loop_models import (
+    TradingLoopCycleResult,
+)
+from app.application.trading_loop_service import (
+    TradingLoopService,
+)
+from app.runtime.session_models import (
+    RuntimeSessionReport,
+    RuntimeSessionStopReason,
+)
+
+
+class TradingLoopRuntimeLifecycle(Protocol):
+    """Trading Loop Componentが利用するSession Lifecycle。"""
+
+    def start(self):
+        """Runtime Sessionを開始する。"""
+
+    def stop(
+        self,
+        *,
+        reason: RuntimeSessionStopReason,
+        message: str | None = None,
+    ) -> RuntimeSessionReport:
+        """Runtime Sessionを終了する。"""
+
+
+class TradingLoopComponent:
+    """Application Orchestratorへ登録できるTrading Loop。"""
+
+    def __init__(
+        self,
+        *,
+        service: TradingLoopService,
+        runtime_session: TradingLoopRuntimeLifecycle,
+        codes: Iterable[str],
+        continue_on_error: bool = True,
+        continue_on_notification_error: bool = True,
+    ) -> None:
+        """Service・Session・監視対象銘柄を設定する。"""
+
+        normalized_codes = tuple(
+            dict.fromkeys(
+                code.strip()
+                for code in codes
+                if code.strip()
+            )
+        )
+
+        if not normalized_codes:
+            raise ValueError(
+                "監視対象銘柄を1件以上指定してください。"
+            )
+
+        self.service = service
+        self.runtime_session = runtime_session
+        self.codes = normalized_codes
+        self.continue_on_error = continue_on_error
+        self.continue_on_notification_error = (
+            continue_on_notification_error
+        )
+        self._running = False
+        self._next_cycle_number = 1
+        self._last_session_report: (
+            RuntimeSessionReport | None
+        ) = None
+
+    @property
+    def component_name(self) -> str:
+        """Application Component名を返す。"""
+
+        return "trading-loop"
+
+    @property
+    def is_running(self) -> bool:
+        """Componentが稼働中か返す。"""
+
+        return self._running
+
+    @property
+    def last_session_report(
+        self,
+    ) -> RuntimeSessionReport | None:
+        """直近のSession終了レポートを返す。"""
+
+        return self._last_session_report
+
+    def start(self) -> None:
+        """Runtime Sessionを開始する。"""
+
+        if self._running:
+            raise RuntimeError(
+                "Trading Loopはすでに稼働中です。"
+            )
+
+        self.runtime_session.start()
+        self._running = True
+        self._next_cycle_number = 1
+        self._last_session_report = None
+
+    def run_cycle(self) -> TradingLoopCycleResult:
+        """次のTrading Cycleを1回実行する。"""
+
+        if not self._running:
+            raise RuntimeError(
+                "Trading Loopが開始されていません。"
+            )
+
+        result = self.service.run_cycle(
+            cycle_number=self._next_cycle_number,
+            codes=self.codes,
+            continue_on_error=self.continue_on_error,
+            continue_on_notification_error=(
+                self.continue_on_notification_error
+            ),
+        )
+        self._next_cycle_number += 1
+
+        return result
+
+    def stop(self) -> None:
+        """Runtime Sessionを正常終了する。"""
+
+        if not self._running:
+            raise RuntimeError(
+                "Trading Loopが開始されていません。"
+            )
+
+        self._last_session_report = (
+            self.runtime_session.stop(
+                reason=RuntimeSessionStopReason.NORMAL,
+                message="Trading Loop stopped.",
+            )
+        )
+        self._running = False
+
+
+================================================================================
+FILE: app\application\trading_loop_service.py
+================================================================================
+"""既存Live TradingをRuntime Session・Resource監視へ接続する。"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable
+from datetime import datetime, timezone
+from typing import Protocol
+
+from app.application.trading_loop_models import (
+    TradingLoopCycleResult,
+    TradingLoopCycleStatus,
+)
+from app.live.live_orchestrator_models import LiveCycleResult
+from app.runtime.resource_integration import (
+    RuntimeResourceIntegrationResult,
+)
+from app.runtime.resource_models import RuntimeResourceStatus
+from app.runtime.session_models import RuntimeSessionSnapshot
+
+
+class TradingLoopLiveOrchestrator(Protocol):
+    """Trading Loopが利用する既存Live Orchestrator。"""
+
+    def run_cycle(
+        self,
+        *,
+        cycle_number: int,
+        codes: Iterable[str],
+        continue_on_error: bool = True,
+    ) -> LiveCycleResult:
+        """市場監視とPaper Tradingを1回実行する。"""
+
+
+class TradingLoopRuntimeSession(Protocol):
+    """Trading Loopが利用するRuntime Session。"""
+
+    def record_cycle(
+        self,
+        *,
+        successful: bool,
+    ) -> RuntimeSessionSnapshot:
+        """サイクル成否を記録する。"""
+
+    def record_heartbeat(self) -> RuntimeSessionSnapshot:
+        """Heartbeatを記録する。"""
+
+
+class TradingLoopResourceIntegration(Protocol):
+    """Trading Loopが利用するResource統合処理。"""
+
+    def sample_once(
+        self,
+        *,
+        continue_on_notification_error: bool = True,
+    ) -> RuntimeResourceIntegrationResult:
+        """Resource監視を1回実行する。"""
+
+
+class TradingLoopService:
+    """既存Live Cycleを運用基盤へ統合する。"""
+
+    def __init__(
+        self,
+        *,
+        live_orchestrator: TradingLoopLiveOrchestrator,
+        runtime_session: TradingLoopRuntimeSession,
+        resource_integration: (
+            TradingLoopResourceIntegration | None
+        ) = None,
+        now_provider: Callable[[], datetime] | None = None,
+    ) -> None:
+        """依存関係と時計を設定する。"""
+
+        self.live_orchestrator = live_orchestrator
+        self.runtime_session = runtime_session
+        self.resource_integration = resource_integration
+        self.now_provider = (
+            now_provider
+            if now_provider is not None
+            else lambda: datetime.now(timezone.utc)
+        )
+
+    def run_cycle(
+        self,
+        *,
+        cycle_number: int,
+        codes: Iterable[str],
+        continue_on_error: bool = True,
+        continue_on_notification_error: bool = True,
+    ) -> TradingLoopCycleResult:
+        """1回のLive Cycleと運用記録を実行する。"""
+
+        if cycle_number <= 0:
+            raise ValueError(
+                "サイクル番号は0より大きい必要があります。"
+            )
+
+        normalized_codes = tuple(
+            dict.fromkeys(
+                code.strip()
+                for code in codes
+                if code.strip()
+            )
+        )
+
+        if not normalized_codes:
+            raise ValueError(
+                "監視対象銘柄を1件以上指定してください。"
+            )
+
+        started_at = self._current_time()
+        live_result: LiveCycleResult | None = None
+        resource_result: (
+            RuntimeResourceIntegrationResult | None
+        ) = None
+
+        try:
+            live_result = self.live_orchestrator.run_cycle(
+                cycle_number=cycle_number,
+                codes=normalized_codes,
+                continue_on_error=continue_on_error,
+            )
+
+            if self.resource_integration is not None:
+                resource_result = (
+                    self.resource_integration.sample_once(
+                        continue_on_notification_error=(
+                            continue_on_notification_error
+                        ),
+                    )
+                )
+
+            resource_is_critical = (
+                resource_result is not None
+                and resource_result.evaluation.status
+                is RuntimeResourceStatus.CRITICAL
+            )
+            successful = (
+                live_result.is_completed
+                and not resource_is_critical
+            )
+
+            self.runtime_session.record_cycle(
+                successful=successful
+            )
+            runtime_snapshot = (
+                self.runtime_session.record_heartbeat()
+            )
+
+            if live_result.is_failed:
+                status = TradingLoopCycleStatus.FAILED
+                error_message = (
+                    live_result.error_message
+                    or "Live Cycleに失敗しました。"
+                )
+            elif resource_is_critical:
+                status = (
+                    TradingLoopCycleStatus
+                    .RESOURCE_CRITICAL
+                )
+                error_message = None
+            else:
+                status = TradingLoopCycleStatus.COMPLETED
+                error_message = None
+
+            return TradingLoopCycleResult(
+                cycle_number=cycle_number,
+                started_at=started_at,
+                completed_at=self._current_time(),
+                status=status,
+                live_cycle_result=live_result,
+                runtime_session_snapshot=runtime_snapshot,
+                resource_result=resource_result,
+                error_message=error_message,
+            )
+
+        except Exception as error:
+            if not continue_on_error:
+                raise
+
+            self.runtime_session.record_cycle(
+                successful=False
+            )
+            runtime_snapshot = (
+                self.runtime_session.record_heartbeat()
+            )
+
+            return TradingLoopCycleResult(
+                cycle_number=cycle_number,
+                started_at=started_at,
+                completed_at=self._current_time(),
+                status=TradingLoopCycleStatus.FAILED,
+                live_cycle_result=live_result,
+                runtime_session_snapshot=runtime_snapshot,
+                resource_result=resource_result,
+                error_message=(
+                    str(error).strip()
+                    or type(error).__name__
+                ),
+            )
+
+    def _current_time(self) -> datetime:
+        """UTCへ正規化した現在日時を返す。"""
+
+        current = self.now_provider()
+
+        if current.tzinfo is None:
+            raise ValueError(
+                "現在日時にはタイムゾーンが必要です。"
+            )
+
+        return current.astimezone(timezone.utc)
+
+
+================================================================================
+FILE: app\live\live_orchestrator.py
+================================================================================
+"""リアルタイム市場監視とPaper Tradingを継続実行する。"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable
+from datetime import datetime, timezone
+from time import sleep
+from typing import Protocol
+
+from app.live.live_orchestrator_models import (
+    LiveCycleResult,
+    LiveCycleStatus,
+    LiveRunResult,
+    LiveRunStopReason,
+)
+from app.market.realtime_models import (
+    RealtimeMarketPollResult,
+    RealtimePollDecision,
+)
+from app.market.realtime_paper_trading_service import (
+    RealtimePaperTradingResult,
+)
+
+
+class LiveMarketMonitor(Protocol):
+    """リアルタイム市場監視処理。"""
+
+    def poll(
+        self,
+        *,
+        codes: Iterable[str],
+        observed_at: datetime,
+    ) -> RealtimeMarketPollResult:
+        """市場監視を1サイクル実行する。"""
+
+
+class LivePaperTradingService(Protocol):
+    """リアルタイムPaper Trading処理。"""
+
+    def process(
+        self,
+        prices,
+        *,
+        continue_on_error: bool = False,
+    ) -> RealtimePaperTradingResult:
+        """新規足をPaper Tradingへ流す。"""
+
+
+NowProvider = Callable[[], datetime]
+Sleeper = Callable[[float], None]
+StopPredicate = Callable[[], bool]
+
+
+class LiveTradingOrchestrator:
+    """市場監視とPaper Tradingを一定間隔で継続実行する。"""
+
+    def __init__(
+        self,
+        *,
+        market_monitor: LiveMarketMonitor,
+        paper_trading_service: LivePaperTradingService,
+        now_provider: NowProvider | None = None,
+        sleeper: Sleeper = sleep,
+        stop_requested: StopPredicate | None = None,
+    ) -> None:
+        """依存関係と実行制御処理を設定する。"""
+
+        self.market_monitor = market_monitor
+        self.paper_trading_service = paper_trading_service
+        self.now_provider = (
+            now_provider
+            if now_provider is not None
+            else lambda: datetime.now(timezone.utc)
+        )
+        self.sleeper = sleeper
+        self.stop_requested = (
+            stop_requested
+            if stop_requested is not None
+            else lambda: False
+        )
+
+    def run(
+        self,
+        *,
+        codes: Iterable[str],
+        poll_interval_seconds: float = 30.0,
+        max_cycles: int | None = None,
+        continue_on_error: bool = True,
+    ) -> LiveRunResult:
+        """停止条件成立までリアルタイム処理を繰り返す。"""
+
+        if poll_interval_seconds < 0:
+            raise ValueError(
+                "ポーリング間隔は0秒以上である必要があります。"
+            )
+
+        if max_cycles is not None and max_cycles <= 0:
+            raise ValueError(
+                "最大サイクル数は0より大きい必要があります。"
+            )
+
+        normalized_codes = tuple(codes)
+
+        if not normalized_codes:
+            raise ValueError(
+                "監視対象銘柄を1件以上指定してください。"
+            )
+
+        started_at = self._current_time()
+        cycles: list[LiveCycleResult] = []
+        stop_reason = LiveRunStopReason.STOP_REQUESTED
+
+        while True:
+            if self.stop_requested():
+                stop_reason = LiveRunStopReason.STOP_REQUESTED
+                break
+
+            if (
+                max_cycles is not None
+                and len(cycles) >= max_cycles
+            ):
+                stop_reason = (
+                    LiveRunStopReason.MAX_CYCLES_REACHED
+                )
+                break
+
+            cycle_number = len(cycles) + 1
+
+            try:
+                cycle = self.run_cycle(
+                    cycle_number=cycle_number,
+                    codes=normalized_codes,
+                    continue_on_error=continue_on_error,
+                )
+            except Exception:
+                if continue_on_error:
+                    raise
+
+                stop_reason = LiveRunStopReason.ERROR
+                raise
+
+            cycles.append(cycle)
+
+            if cycle.is_failed and not continue_on_error:
+                stop_reason = LiveRunStopReason.ERROR
+                break
+
+            if (
+                max_cycles is not None
+                and len(cycles) >= max_cycles
+            ):
+                stop_reason = (
+                    LiveRunStopReason.MAX_CYCLES_REACHED
+                )
+                break
+
+            if self.stop_requested():
+                stop_reason = LiveRunStopReason.STOP_REQUESTED
+                break
+
+            self.sleeper(poll_interval_seconds)
+
+        return LiveRunResult(
+            started_at=started_at,
+            completed_at=self._current_time(),
+            stop_reason=stop_reason,
+            cycles=tuple(cycles),
+        )
+
+    def run_cycle(
+        self,
+        *,
+        cycle_number: int,
+        codes: Iterable[str],
+        continue_on_error: bool = True,
+    ) -> LiveCycleResult:
+        """市場監視とPaper Tradingを1回だけ実行する。"""
+
+        started_at = self._current_time()
+
+        try:
+            market_result = self.market_monitor.poll(
+                codes=codes,
+                observed_at=started_at,
+            )
+            paper_result = None
+
+            if (
+                market_result.decision
+                is RealtimePollDecision.NEW_BARS_SAVED
+            ):
+                paper_result = (
+                    self.paper_trading_service.process(
+                        market_result.new_bars,
+                        continue_on_error=continue_on_error,
+                    )
+                )
+
+            return LiveCycleResult(
+                cycle_number=cycle_number,
+                started_at=started_at,
+                completed_at=self._current_time(),
+                status=LiveCycleStatus.COMPLETED,
+                market_result=market_result,
+                paper_trading_result=paper_result,
+                error_message=None,
+            )
+
+        except Exception as error:
+            if not continue_on_error:
+                raise
+
+            return LiveCycleResult(
+                cycle_number=cycle_number,
+                started_at=started_at,
+                completed_at=self._current_time(),
+                status=LiveCycleStatus.FAILED,
+                market_result=None,
+                paper_trading_result=None,
+                error_message=str(error),
+            )
+
+    def _current_time(self) -> datetime:
+        """タイムゾーン付き現在日時を返す。"""
+
+        current = self.now_provider()
+
+        if current.tzinfo is None:
+            raise ValueError(
+                "現在日時にはタイムゾーンが必要です。"
+            )
+
+        return current
+
+
+================================================================================
+FILE: app\market\realtime_market_monitor.py
+================================================================================
+[FILE NOT FOUND]
+
+================================================================================
+FILE: app\market\realtime_monitor.py
+================================================================================
+[FILE NOT FOUND]
+
+================================================================================
+FILE: app\market\realtime_paper_trading_service.py
+================================================================================
+"""リアルタイム足からPaper Tradingまでを統括する。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+from typing import Callable
+
+from app.backtest.backtest_portfolio_update_service import (
+    BacktestPortfolioBatchUpdateResult,
+    BacktestPortfolioUpdateService,
+)
+from app.backtest.order_queue_service import (
+    BacktestOrderQueueResult,
+    BacktestOrderQueueService,
+)
+from app.backtest.queue_execution_service import (
+    BacktestQueueExecutionBatchResult,
+    BacktestQueueExecutionItemResult,
+    BacktestQueueExecutionService,
+)
+from app.market.models import StockPrice
+from app.market.realtime_signal_engine import (
+    RealtimeSignalEngine,
+)
+from app.market.realtime_signal_models import (
+    RealtimeSignalDecision,
+    RealtimeSignalProcessResult,
+)
+from app.trading.order_models import OrderType
+from app.trading.signal_models import TradeSignal
+
+
+class RealtimePaperTradingStatus(StrEnum):
+    """リアルタイムPaper Trading処理の終了状態。"""
+
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimePaperTradingResult:
+    """リアルタイムPaper Tradingの1サイクル結果。"""
+
+    status: RealtimePaperTradingStatus
+    signal_result: RealtimeSignalProcessResult | None
+    queue_results: tuple[BacktestOrderQueueResult, ...]
+    execution_result: BacktestQueueExecutionBatchResult | None
+    portfolio_result: BacktestPortfolioBatchUpdateResult | None
+    error_message: str | None = None
+
+    def __post_init__(self) -> None:
+        """状態と保持データの整合性を検証する。"""
+
+        if self.status is RealtimePaperTradingStatus.COMPLETED:
+            if self.signal_result is None:
+                raise ValueError(
+                    "完了結果にはシグナル処理結果が必要です。"
+                )
+
+            if self.execution_result is None:
+                raise ValueError(
+                    "完了結果には注文執行結果が必要です。"
+                )
+
+            if self.portfolio_result is None:
+                raise ValueError(
+                    "完了結果にはポートフォリオ結果が必要です。"
+                )
+
+            if self.error_message is not None:
+                raise ValueError(
+                    "完了結果にはエラーメッセージを"
+                    "設定できません。"
+                )
+
+        if self.status is RealtimePaperTradingStatus.FAILED:
+            if not (self.error_message or "").strip():
+                raise ValueError(
+                    "失敗結果にはエラーメッセージが必要です。"
+                )
+
+    @property
+    def signal_count(self) -> int:
+        """生成シグナル件数を返す。"""
+
+        if self.signal_result is None:
+            return 0
+
+        return self.signal_result.signal_count
+
+    @property
+    def queued_count(self) -> int:
+        """新規キュー登録件数を返す。"""
+
+        return sum(
+            result.was_enqueued
+            for result in self.queue_results
+        )
+
+    @property
+    def execution_count(self) -> int:
+        """保存済み約定件数を返す。"""
+
+        if self.execution_result is None:
+            return 0
+
+        return self.execution_result.saved_execution_count
+
+    @property
+    def portfolio_update_count(self) -> int:
+        """ポートフォリオ反映件数を返す。"""
+
+        if self.portfolio_result is None:
+            return 0
+
+        return self.portfolio_result.applied_count
+
+    @property
+    def is_completed(self) -> bool:
+        """正常完了したか返す。"""
+
+        return self.status is RealtimePaperTradingStatus.COMPLETED
+
+    @property
+    def is_failed(self) -> bool:
+        """失敗したか返す。"""
+
+        return self.status is RealtimePaperTradingStatus.FAILED
+
+
+class RealtimePaperTradingService:
+    """足更新・シグナル・注文・約定・資産更新を順番に実行する。"""
+
+    def __init__(
+        self,
+        *,
+        signal_engine: RealtimeSignalEngine,
+        order_queue_service: BacktestOrderQueueService,
+        queue_execution_service: BacktestQueueExecutionService,
+        portfolio_update_service: BacktestPortfolioUpdateService,
+        market_price_updater: Callable[[str, float], object],
+        clock_updater: Callable[[datetime], None] | None = None,
+    ) -> None:
+        """Paper Tradingパイプラインの依存関係を設定する。"""
+
+        self.signal_engine = signal_engine
+        self.order_queue_service = order_queue_service
+        self.queue_execution_service = queue_execution_service
+        self.portfolio_update_service = portfolio_update_service
+        self.market_price_updater = market_price_updater
+        self.clock_updater = clock_updater
+
+    def process(
+        self,
+        prices: tuple[StockPrice, ...],
+        *,
+        order_type: OrderType = OrderType.MARKET,
+        equity_curve_limit: int = 10_000,
+        continue_on_error: bool = False,
+    ) -> RealtimePaperTradingResult:
+        """新しい足を時系列順にPaper Tradingへ流す。"""
+
+        if equity_curve_limit <= 0:
+            raise ValueError(
+                "取得件数は0より大きい必要があります。"
+            )
+
+        try:
+            ordered_prices = tuple(
+                sorted(
+                    prices,
+                    key=lambda price: (
+                        self._normalize_datetime(price.datetime),
+                        price.code,
+                    ),
+                )
+            )
+            signal_results: list[
+                RealtimeSignalProcessResult
+            ] = []
+            queue_results: list[
+                BacktestOrderQueueResult
+            ] = []
+            execution_items: list[
+                BacktestQueueExecutionItemResult
+            ] = []
+            portfolio_items = []
+
+            for price in ordered_prices:
+                observed_at = self._normalize_datetime(
+                    price.datetime
+                )
+
+                if self.clock_updater is not None:
+                    self.clock_updater(observed_at)
+
+                self.market_price_updater(
+                    price.code,
+                    float(price.close),
+                )
+
+                single_signal_result = (
+                    self.signal_engine.process((price,))
+                )
+                signal_results.append(
+                    single_signal_result
+                )
+
+                for signal in single_signal_result.signals:
+                    queue_result = (
+                        self.order_queue_service.enqueue_signal(
+                            signal,
+                            order_type=order_type,
+                            continue_on_error=continue_on_error,
+                        )
+                    )
+                    queue_results.append(queue_result)
+
+                    if queue_result.is_failed:
+                        if continue_on_error:
+                            continue
+
+                        raise RuntimeError(
+                            queue_result.message
+                            or "注文キュー登録に失敗しました。"
+                        )
+
+                    execution_result = (
+                        self.queue_execution_service.execute_all(
+                            continue_on_error=continue_on_error,
+                        )
+                    )
+                    execution_items.extend(
+                        execution_result.items
+                    )
+
+                    if (
+                        execution_result.failed_count > 0
+                        and not continue_on_error
+                    ):
+                        failed = next(
+                            item
+                            for item in execution_result.items
+                            if item.is_failed
+                        )
+                        raise RuntimeError(
+                            failed.message
+                            or "注文執行に失敗しました。"
+                        )
+
+                    records = tuple(
+                        item.execution_record
+                        for item in execution_result.items
+                        if item.execution_record is not None
+                    )
+                    portfolio_result = (
+                        self.portfolio_update_service
+                        .apply_executions(
+                            records,
+                            equity_curve_limit=(
+                                equity_curve_limit
+                            ),
+                        )
+                    )
+                    portfolio_items.extend(
+                        portfolio_result.items
+                    )
+
+            combined_signal_result = (
+                self._combine_signal_results(
+                    signal_results
+                )
+            )
+
+            return RealtimePaperTradingResult(
+                status=RealtimePaperTradingStatus.COMPLETED,
+                signal_result=combined_signal_result,
+                queue_results=tuple(queue_results),
+                execution_result=(
+                    BacktestQueueExecutionBatchResult(
+                        items=tuple(execution_items)
+                    )
+                ),
+                portfolio_result=(
+                    BacktestPortfolioBatchUpdateResult(
+                        items=tuple(portfolio_items)
+                    )
+                ),
+                error_message=None,
+            )
+
+        except Exception as error:
+            if not continue_on_error:
+                raise
+
+            return RealtimePaperTradingResult(
+                status=RealtimePaperTradingStatus.FAILED,
+                signal_result=None,
+                queue_results=(),
+                execution_result=None,
+                portfolio_result=None,
+                error_message=str(error),
+            )
+
+    @staticmethod
+    def _combine_signal_results(
+        results: list[RealtimeSignalProcessResult],
+    ) -> RealtimeSignalProcessResult:
+        """足単位のシグナル結果を1サイクル分へ統合する。"""
+
+        if not results:
+            return RealtimeSignalProcessResult(
+                decision=RealtimeSignalDecision.NO_NEW_BAR,
+                input_bar_count=0,
+                processed_bar_count=0,
+                skipped_duplicate_count=0,
+                signal_count=0,
+                signals=(),
+            )
+
+        signals: tuple[TradeSignal, ...] = tuple(
+            signal
+            for result in results
+            for signal in result.signals
+        )
+        processed_count = sum(
+            result.processed_bar_count
+            for result in results
+        )
+        skipped_count = sum(
+            result.skipped_duplicate_count
+            for result in results
+        )
+
+        if signals:
+            decision = (
+                RealtimeSignalDecision.SIGNALS_GENERATED
+            )
+        elif processed_count > 0:
+            decision = (
+                RealtimeSignalDecision.BAR_PROCESSED
+            )
+        else:
+            decision = RealtimeSignalDecision.NO_NEW_BAR
+
+        return RealtimeSignalProcessResult(
+            decision=decision,
+            input_bar_count=sum(
+                result.input_bar_count
+                for result in results
+            ),
+            processed_bar_count=processed_count,
+            skipped_duplicate_count=skipped_count,
+            signal_count=len(signals),
+            signals=signals,
+        )
+
+    @staticmethod
+    def _normalize_datetime(
+        value: datetime,
+    ) -> datetime:
+        """時計更新に使用できる日時へ正規化する。"""
+
+        if value.tzinfo is None:
+            from zoneinfo import ZoneInfo
+
+            return value.replace(
+                tzinfo=ZoneInfo("Asia/Tokyo")
+            )
+
+        return value
+
+
+================================================================================
+FILE: app\market\realtime_signal_engine.py
+================================================================================
+"""リアルタイム5分足を売買戦略へ適用する。"""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from collections.abc import Callable, Iterable
+from datetime import datetime
+from typing import Protocol
+from zoneinfo import ZoneInfo
+
+from app.backtest.historical_models import (
+    HistoricalBar,
+    MarketTimeframe,
+)
+from app.backtest.market_replay import MarketReplayFrame
+from app.backtest.orb_signal_strategy import (
+    OrbSignalStrategy,
+    OrbSignalStrategySettings,
+)
+from app.market.models import StockPrice
+from app.market.realtime_signal_models import (
+    RealtimeSignalDecision,
+    RealtimeSignalProcessResult,
+)
+from app.trading.signal_models import TradeSignal
+
+
+JST = ZoneInfo("Asia/Tokyo")
+
+
+class RealtimeStrategy(Protocol):
+    """リアルタイム戦略が満たすインターフェース。"""
+
+    def evaluate(
+        self,
+        frame: MarketReplayFrame,
+    ) -> tuple[TradeSignal, ...]:
+        """現在Frameを評価してシグナルを返す。"""
+
+    def reset(self) -> None:
+        """内部状態を初期化する。"""
+
+
+StrategyFactory = Callable[[str], RealtimeStrategy]
+
+
+class RealtimeSignalEngine:
+    """新しい5分足だけを順番に戦略へ適用する。"""
+
+    def __init__(
+        self,
+        *,
+        strategy_factory: StrategyFactory | None = None,
+    ) -> None:
+        """銘柄別戦略生成処理を設定する。"""
+
+        self.strategy_factory = (
+            strategy_factory
+            if strategy_factory is not None
+            else self._default_strategy_factory
+        )
+        self._strategies: dict[str, RealtimeStrategy] = {}
+        self._bars_by_code: dict[
+            str,
+            list[HistoricalBar],
+        ] = defaultdict(list)
+        self._last_processed_at: dict[
+            str,
+            datetime,
+        ] = {}
+
+    def process(
+        self,
+        prices: Iterable[StockPrice],
+    ) -> RealtimeSignalProcessResult:
+        """未処理の5分足だけを時系列順に評価する。"""
+
+        materialized = tuple(prices)
+
+        if not materialized:
+            return RealtimeSignalProcessResult(
+                decision=RealtimeSignalDecision.NO_NEW_BAR,
+                input_bar_count=0,
+                processed_bar_count=0,
+                skipped_duplicate_count=0,
+                signal_count=0,
+                signals=(),
+            )
+
+        ordered = sorted(
+            materialized,
+            key=lambda price: (
+                self._normalize_datetime(price.datetime),
+                price.code,
+            ),
+        )
+        processed_count = 0
+        skipped_count = 0
+        generated_signals: list[TradeSignal] = []
+
+        for price in ordered:
+            code = self._normalize_code(price.code)
+            opened_at = self._normalize_datetime(
+                price.datetime
+            )
+            last_processed = self._last_processed_at.get(code)
+
+            if (
+                last_processed is not None
+                and opened_at <= last_processed
+            ):
+                skipped_count += 1
+                continue
+
+            bar = self._to_historical_bar(
+                price,
+                code=code,
+                opened_at=opened_at,
+            )
+            visible_bars = self._bars_by_code[code]
+            visible_bars.append(bar)
+
+            strategy = self._strategies.get(code)
+
+            if strategy is None:
+                strategy = self.strategy_factory(code)
+                self._strategies[code] = strategy
+
+            frame = MarketReplayFrame(
+                current_bar=bar,
+                visible_bars=tuple(visible_bars),
+                index=len(visible_bars) - 1,
+                total_count=len(visible_bars),
+            )
+            signals = strategy.evaluate(frame)
+            generated_signals.extend(signals)
+            self._last_processed_at[code] = opened_at
+            processed_count += 1
+
+        if processed_count == 0:
+            decision = RealtimeSignalDecision.NO_NEW_BAR
+        elif generated_signals:
+            decision = RealtimeSignalDecision.SIGNALS_GENERATED
+        else:
+            decision = RealtimeSignalDecision.BAR_PROCESSED
+
+        return RealtimeSignalProcessResult(
+            decision=decision,
+            input_bar_count=len(materialized),
+            processed_bar_count=processed_count,
+            skipped_duplicate_count=skipped_count,
+            signal_count=len(generated_signals),
+            signals=tuple(generated_signals),
+        )
+
+    def reset(
+        self,
+        code: str | None = None,
+    ) -> None:
+        """全銘柄または指定銘柄の状態を初期化する。"""
+
+        if code is None:
+            for strategy in self._strategies.values():
+                strategy.reset()
+
+            self._strategies.clear()
+            self._bars_by_code.clear()
+            self._last_processed_at.clear()
+            return
+
+        normalized_code = self._normalize_code(code)
+        strategy = self._strategies.pop(
+            normalized_code,
+            None,
+        )
+
+        if strategy is not None:
+            strategy.reset()
+
+        self._bars_by_code.pop(normalized_code, None)
+        self._last_processed_at.pop(normalized_code, None)
+
+    def last_processed_at(
+        self,
+        code: str,
+    ) -> datetime | None:
+        """指定銘柄の最終処理日時を返す。"""
+
+        return self._last_processed_at.get(
+            self._normalize_code(code)
+        )
+
+    @staticmethod
+    def _default_strategy_factory(
+        _code: str,
+    ) -> RealtimeStrategy:
+        """既定のORB戦略を作成する。"""
+
+        return OrbSignalStrategy(
+            settings=OrbSignalStrategySettings()
+        )
+
+    @staticmethod
+    def _to_historical_bar(
+        price: StockPrice,
+        *,
+        code: str,
+        opened_at: datetime,
+    ) -> HistoricalBar:
+        """StockPriceを5分足モデルへ変換する。"""
+
+        return HistoricalBar(
+            code=code,
+            timeframe=MarketTimeframe.MINUTE_5,
+            opened_at=opened_at,
+            open_price=float(price.open),
+            high_price=float(price.high),
+            low_price=float(price.low),
+            close_price=float(price.close),
+            volume=float(price.volume),
+        )
+
+    @staticmethod
+    def _normalize_code(
+        code: str,
+    ) -> str:
+        """銘柄コードを検証する。"""
+
+        normalized = code.strip()
+
+        if not normalized.isdigit():
+            raise ValueError(
+                "銘柄コードは数字で指定してください。"
+            )
+
+        if len(normalized) not in {4, 5}:
+            raise ValueError(
+                "銘柄コードは4桁または5桁で指定してください。"
+            )
+
+        return normalized
+
+    @staticmethod
+    def _normalize_datetime(
+        value: datetime,
+    ) -> datetime:
+        """市場日時を日本時間へ正規化する。"""
+
+        if value.tzinfo is None:
+            return value.replace(tzinfo=JST)
+
+        return value.astimezone(JST)
+
+
+================================================================================
+FILE: app\runtime\paper_trading_application_runner.py
+================================================================================
+"""終日Paper Tradingの開始・実行・停止・保存を統括する。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+from app.application.trading_loop_runner_models import (
+    TradingLoopRunnerResult,
+    TradingLoopRunnerStopReason,
+)
+from app.runtime.paper_trading_runtime_models import (
+    PaperTradingDailySummary,
+)
+
+
+class PaperTradingLifecycleComponent(Protocol):
+    """終日実行で開始・停止するTrading Loop Component。"""
+
+    def start(self) -> None:
+        """Componentを開始する。"""
+
+    def stop(self) -> None:
+        """Componentを停止する。"""
+
+
+class PaperTradingDailyRuntime(Protocol):
+    """終日集計を開始するPaper Trading Runtime。"""
+
+    def start(self) -> None:
+        """日次Runtimeを開始する。"""
+
+
+class PaperTradingMarketRunner(Protocol):
+    """市場時間に従ってTrading Cycleを実行するRunner。"""
+
+    def run(self) -> TradingLoopRunnerResult:
+        """Trading Loopを実行する。"""
+
+
+class PaperTradingRuntimePersistence(Protocol):
+    """Runtime終了と日次保存を行うService。"""
+
+    def complete_and_persist(self):
+        """正常終了して日次サマリーを保存する。"""
+
+    def fail_and_persist(
+        self,
+        *,
+        error_message: str,
+    ):
+        """異常終了して日次サマリーを保存する。"""
+
+
+@dataclass(frozen=True, slots=True)
+class PaperTradingApplicationResult:
+    """終日Paper Trading Applicationの実行結果。"""
+
+    runner_result: TradingLoopRunnerResult
+    daily_summary: PaperTradingDailySummary
+
+    @property
+    def is_successful(self) -> bool:
+        """正常終了として保存されたか返す。"""
+
+        return self.daily_summary.error_message is None
+
+
+class PaperTradingApplicationRunner:
+    """終日Paper Tradingのライフサイクルを統括する。"""
+
+    FAILURE_STOP_REASONS = frozenset(
+        {
+            TradingLoopRunnerStopReason.ERROR,
+            TradingLoopRunnerStopReason.CYCLE_FAILED,
+            TradingLoopRunnerStopReason.RESOURCE_CRITICAL,
+        }
+    )
+
+    def __init__(
+        self,
+        *,
+        component: PaperTradingLifecycleComponent,
+        runtime: PaperTradingDailyRuntime,
+        market_runner: PaperTradingMarketRunner,
+        persistence_service: PaperTradingRuntimePersistence,
+    ) -> None:
+        """実行に必要な依存関係を設定する。"""
+
+        self.component = component
+        self.runtime = runtime
+        self.market_runner = market_runner
+        self.persistence_service = persistence_service
+
+    def run(self) -> PaperTradingApplicationResult:
+        """開始から日次結果保存までを一括実行する。"""
+
+        component_started = False
+        runtime_started = False
+        runner_result: TradingLoopRunnerResult | None = None
+
+        try:
+            self.component.start()
+            component_started = True
+
+            self.runtime.start()
+            runtime_started = True
+
+            runner_result = self.market_runner.run()
+
+            stop_error = self._stop_component(
+                component_started=component_started
+            )
+            component_started = False
+
+            failure_message = self._resolve_failure_message(
+                runner_result=runner_result,
+                stop_error=stop_error,
+            )
+
+            if failure_message is not None:
+                persistence_result = (
+                    self.persistence_service.fail_and_persist(
+                        error_message=failure_message
+                    )
+                )
+            else:
+                persistence_result = (
+                    self.persistence_service.complete_and_persist()
+                )
+
+            return PaperTradingApplicationResult(
+                runner_result=runner_result,
+                daily_summary=persistence_result.summary,
+            )
+
+        except Exception as error:
+            primary_message = (
+                str(error).strip()
+                or type(error).__name__
+            )
+
+            stop_error = self._stop_component(
+                component_started=component_started
+            )
+            component_started = False
+
+            combined_message = self._combine_error_messages(
+                primary_message,
+                stop_error,
+            )
+
+            if runtime_started:
+                self.persistence_service.fail_and_persist(
+                    error_message=combined_message
+                )
+
+            raise
+
+        finally:
+            if component_started:
+                self._stop_component(
+                    component_started=True
+                )
+
+    def _stop_component(
+        self,
+        *,
+        component_started: bool,
+    ) -> str | None:
+        """開始済みComponentを停止してエラー文字列を返す。"""
+
+        if not component_started:
+            return None
+
+        try:
+            self.component.stop()
+        except Exception as error:
+            return (
+                str(error).strip()
+                or type(error).__name__
+            )
+
+        return None
+
+    def _resolve_failure_message(
+        self,
+        *,
+        runner_result: TradingLoopRunnerResult,
+        stop_error: str | None,
+    ) -> str | None:
+        """Runner終了理由と停止失敗から異常終了理由を返す。"""
+
+        messages: list[str] = []
+
+        if runner_result.stop_reason in self.FAILURE_STOP_REASONS:
+            messages.append(
+                runner_result.error_message
+                or (
+                    "Trading Loopが異常終了しました。 "
+                    f"reason={runner_result.stop_reason.value}"
+                )
+            )
+
+        if stop_error is not None:
+            messages.append(
+                "Trading Loop Componentの停止に失敗しました。 "
+                f"error={stop_error}"
+            )
+
+        if not messages:
+            return None
+
+        return " / ".join(messages)
+
+    @staticmethod
+    def _combine_error_messages(
+        primary_message: str,
+        stop_error: str | None,
+    ) -> str:
+        """実行例外と停止例外を一つの文字列へまとめる。"""
+
+        if stop_error is None:
+            return primary_message
+
+        return (
+            f"{primary_message} / "
+            "Trading Loop Componentの停止に失敗しました。 "
+            f"error={stop_error}"
+        )
+
+================================================================================
+FILE: app\runtime\paper_trading_day_models.py
+================================================================================
+"""終日Paper Trading運用の共通モデル。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, datetime
+from enum import StrEnum
+
+from app.runtime.paper_trading_daily_repository import (
+    PaperTradingDailyRecord,
+)
+from app.runtime.paper_trading_runtime_models import (
+    PaperTradingDailySummary,
+)
+
+
+class PaperTradingDayStopReason(StrEnum):
+    """終日Paper Trading運用の終了理由。"""
+
+    MARKET_CLOSED = "market_closed"
+    STOP_REQUESTED = "stop_requested"
+    MAX_CYCLES_REACHED = "max_cycles_reached"
+    RESOURCE_CRITICAL = "resource_critical"
+    CYCLE_FAILED = "cycle_failed"
+    ERROR = "error"
+
+
+@dataclass(frozen=True, slots=True)
+class PaperTradingDaySettings:
+    """終日Paper Trading運用の設定。"""
+
+    cycle_interval_seconds: float = 30.0
+    maximum_cycles: int | None = None
+    stop_on_cycle_failure: bool = False
+    stop_on_resource_critical: bool = True
+    continue_on_dashboard_error: bool = True
+    continue_on_post_run_hook_error: bool = True
+
+    def __post_init__(self) -> None:
+        """設定値を検証する。"""
+
+        if self.cycle_interval_seconds < 0:
+            raise ValueError(
+                "サイクル間隔は0秒以上である必要があります。"
+            )
+
+        if (
+            self.maximum_cycles is not None
+            and self.maximum_cycles <= 0
+        ):
+            raise ValueError(
+                "最大サイクル数は0より大きい必要があります。"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class PaperTradingDayResult:
+    """1営業日の運用・集計・永続化結果。"""
+
+    trading_date: date
+    started_at: datetime
+    completed_at: datetime
+    stop_reason: PaperTradingDayStopReason
+    summary: PaperTradingDailySummary
+    record: PaperTradingDailyRecord
+    error_message: str | None = None
+    dashboard_published: bool = False
+    dashboard_error_message: str | None = None
+    completed_post_run_hook_count: int = 0
+    post_run_hook_error_messages: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """日時・営業日・後処理結果を検証する。"""
+
+        for name, value in {
+            "開始日時": self.started_at,
+            "完了日時": self.completed_at,
+        }.items():
+            if value.tzinfo is None:
+                raise ValueError(
+                    f"{name}にはタイムゾーンが必要です。"
+                )
+
+        if self.completed_at < self.started_at:
+            raise ValueError(
+                "完了日時は開始日時以後である必要があります。"
+            )
+
+        if self.summary.trading_date != self.trading_date:
+            raise ValueError(
+                "Summaryの営業日が運用結果と一致しません。"
+            )
+
+        if self.record.trading_date != self.trading_date:
+            raise ValueError(
+                "保存レコードの営業日が運用結果と一致しません。"
+            )
+
+        if self.completed_post_run_hook_count < 0:
+            raise ValueError(
+                "完了Post-run Hook数は0以上である必要があります。"
+            )
+
+        error_message = (
+            None
+            if self.error_message is None
+            else self.error_message.strip() or None
+        )
+        dashboard_error_message = (
+            None
+            if self.dashboard_error_message is None
+            else self.dashboard_error_message.strip() or None
+        )
+        hook_errors = tuple(
+            message.strip()
+            for message in self.post_run_hook_error_messages
+            if message.strip()
+        )
+
+        if (
+            self.stop_reason is PaperTradingDayStopReason.ERROR
+            and error_message is None
+        ):
+            raise ValueError(
+                "ERROR終了にはエラーメッセージが必要です。"
+            )
+
+        if (
+            self.dashboard_published
+            and dashboard_error_message is not None
+        ):
+            raise ValueError(
+                "Dashboard公開成功時にエラーは設定できません。"
+            )
+
+        object.__setattr__(
+            self,
+            "error_message",
+            error_message,
+        )
+        object.__setattr__(
+            self,
+            "dashboard_error_message",
+            dashboard_error_message,
+        )
+        object.__setattr__(
+            self,
+            "post_run_hook_error_messages",
+            hook_errors,
+        )
+
+    @property
+    def cycle_count(self) -> int:
+        """総サイクル数を返す。"""
+
+        return self.summary.cycle_count
+
+    @property
+    def net_profit_loss(self) -> float | None:
+        """日次損益を返す。"""
+
+        return self.summary.net_profit_loss
+
+    @property
+    def return_rate(self) -> float | None:
+        """日次リターン率を返す。"""
+
+        return self.summary.return_rate
+
+    @property
+    def post_run_hook_failure_count(self) -> int:
+        """失敗したPost-run Hook数を返す。"""
+
+        return len(self.post_run_hook_error_messages)
+
+
+================================================================================
+FILE: app\runtime\paper_trading_day_service.py
+================================================================================
+"""Market-aware運転・永続化・Dashboard更新・後処理を統合する。"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import replace
+from datetime import datetime, timezone
+from time import sleep
+from typing import Protocol
+
+from app.application.trading_loop_models import (
+    TradingLoopCycleStatus,
+)
+from app.market.market_clock import (
+    TokyoMarketClock,
+)
+from app.market.market_session import (
+    TokyoMarketSession,
+)
+from app.runtime.paper_trading_day_models import (
+    PaperTradingDayResult,
+    PaperTradingDaySettings,
+    PaperTradingDayStopReason,
+)
+from app.runtime.paper_trading_persistence_service import (
+    PaperTradingPersistenceResult,
+)
+from app.runtime.paper_trading_runtime_models import (
+    PaperTradingDailySummary,
+)
+
+
+class PaperTradingDayRuntime(Protocol):
+    """終日運用Serviceが利用するPaper Trading Runtime。"""
+
+    def start(self) -> None:
+        """Runtimeを開始する。"""
+
+    def run_cycle(self):
+        """Trading Cycleを実行する。"""
+
+    def complete(self) -> PaperTradingDailySummary:
+        """正常終了の日次Summaryを返す。"""
+
+    def fail(
+        self,
+        *,
+        error_message: str,
+    ) -> PaperTradingDailySummary:
+        """異常終了の日次Summaryを返す。"""
+
+
+class PaperTradingDayPersister(Protocol):
+    """終日運用Serviceが利用する永続化処理。"""
+
+    def persist(
+        self,
+        summary: PaperTradingDailySummary,
+    ) -> PaperTradingPersistenceResult:
+        """日次Summaryを保存する。"""
+
+
+class PaperTradingDayDashboardPublisher(Protocol):
+    """終日運用後にDashboard Snapshotを公開する。"""
+
+    def publish(self):
+        """現在のDashboard Snapshotを生成して保存する。"""
+
+
+class PaperTradingDayPostRunHook(Protocol):
+    """終日運用結果を受け取る任意後処理。"""
+
+    def handle(
+        self,
+        result: PaperTradingDayResult,
+    ) -> None:
+        """運用結果を使って後処理する。"""
+
+
+NowProvider = Callable[[], datetime]
+Sleeper = Callable[[float], None]
+StopPredicate = Callable[[], bool]
+
+
+class PaperTradingDayService:
+    """市場時間に従って1営業日のPaper Tradingを実行する。"""
+
+    def __init__(
+        self,
+        *,
+        runtime: PaperTradingDayRuntime,
+        persistence_service: PaperTradingDayPersister,
+        market_clock: TokyoMarketClock,
+        dashboard_publisher: (
+            PaperTradingDayDashboardPublisher | None
+        ) = None,
+        post_run_hooks: tuple[
+            PaperTradingDayPostRunHook,
+            ...,
+        ] = (),
+        settings: PaperTradingDaySettings | None = None,
+        now_provider: NowProvider | None = None,
+        sleeper: Sleeper = sleep,
+        stop_requested: StopPredicate | None = None,
+    ) -> None:
+        """依存関係・運用設定・時計を設定する。"""
+
+        self.runtime = runtime
+        self.persistence_service = persistence_service
+        self.market_clock = market_clock
+        self.dashboard_publisher = dashboard_publisher
+        self.post_run_hooks = tuple(post_run_hooks)
+        self.settings = (
+            settings
+            if settings is not None
+            else PaperTradingDaySettings()
+        )
+        self.now_provider = (
+            now_provider
+            if now_provider is not None
+            else lambda: datetime.now(timezone.utc)
+        )
+        self.sleeper = sleeper
+        self.stop_requested = (
+            stop_requested
+            if stop_requested is not None
+            else lambda: False
+        )
+
+    def run(self) -> PaperTradingDayResult:
+        """市場終了または停止条件まで終日運用する。"""
+
+        started_at = self._current_time()
+        self.runtime.start()
+        cycle_count = 0
+        stop_reason = PaperTradingDayStopReason.MARKET_CLOSED
+        error_message: str | None = None
+
+        try:
+            while True:
+                if self.stop_requested():
+                    stop_reason = (
+                        PaperTradingDayStopReason.STOP_REQUESTED
+                    )
+                    break
+
+                if (
+                    self.settings.maximum_cycles is not None
+                    and cycle_count >= self.settings.maximum_cycles
+                ):
+                    stop_reason = (
+                        PaperTradingDayStopReason
+                        .MAX_CYCLES_REACHED
+                    )
+                    break
+
+                clock_snapshot = self.market_clock.snapshot(
+                    self._current_time()
+                )
+
+                if (
+                    clock_snapshot.session
+                    is TokyoMarketSession.AFTER_CLOSE
+                ):
+                    stop_reason = (
+                        PaperTradingDayStopReason.MARKET_CLOSED
+                    )
+                    break
+
+                if not clock_snapshot.is_open:
+                    self._sleep_closed_market(
+                        clock_snapshot.wait_seconds
+                    )
+                    continue
+
+                cycle_record = self.runtime.run_cycle()
+                cycle_count += 1
+                cycle_result = cycle_record.cycle_result
+
+                if (
+                    cycle_result.status
+                    is TradingLoopCycleStatus.RESOURCE_CRITICAL
+                    and self.settings.stop_on_resource_critical
+                ):
+                    stop_reason = (
+                        PaperTradingDayStopReason
+                        .RESOURCE_CRITICAL
+                    )
+                    break
+
+                if (
+                    cycle_result.status
+                    is TradingLoopCycleStatus.FAILED
+                    and self.settings.stop_on_cycle_failure
+                ):
+                    stop_reason = (
+                        PaperTradingDayStopReason.CYCLE_FAILED
+                    )
+                    break
+
+                if (
+                    self.settings.maximum_cycles is not None
+                    and cycle_count >= self.settings.maximum_cycles
+                ):
+                    stop_reason = (
+                        PaperTradingDayStopReason
+                        .MAX_CYCLES_REACHED
+                    )
+                    break
+
+                if self.stop_requested():
+                    stop_reason = (
+                        PaperTradingDayStopReason.STOP_REQUESTED
+                    )
+                    break
+
+                self.sleeper(
+                    self.settings.cycle_interval_seconds
+                )
+
+            summary = self.runtime.complete()
+
+        except Exception as error:
+            stop_reason = PaperTradingDayStopReason.ERROR
+            error_message = (
+                str(error).strip()
+                or type(error).__name__
+            )
+            summary = self.runtime.fail(
+                error_message=error_message
+            )
+
+        persistence = self.persistence_service.persist(
+            summary
+        )
+        (
+            dashboard_published,
+            dashboard_error_message,
+        ) = self._publish_dashboard()
+        completed_at = self._current_time()
+
+        result = PaperTradingDayResult(
+            trading_date=summary.trading_date,
+            started_at=started_at,
+            completed_at=completed_at,
+            stop_reason=stop_reason,
+            summary=summary,
+            record=persistence.record,
+            error_message=error_message,
+            dashboard_published=dashboard_published,
+            dashboard_error_message=dashboard_error_message,
+        )
+
+        return self._run_post_run_hooks(result)
+
+    def _run_post_run_hooks(
+        self,
+        result: PaperTradingDayResult,
+    ) -> PaperTradingDayResult:
+        """後処理Hookを順番に実行して結果へ反映する。"""
+
+        completed_count = 0
+        error_messages: list[str] = []
+
+        for hook in self.post_run_hooks:
+            try:
+                hook.handle(result)
+                completed_count += 1
+            except Exception as error:
+                if not self.settings.continue_on_post_run_hook_error:
+                    raise
+
+                error_messages.append(
+                    str(error).strip()
+                    or type(error).__name__
+                )
+
+        return replace(
+            result,
+            completed_post_run_hook_count=completed_count,
+            post_run_hook_error_messages=tuple(
+                error_messages
+            ),
+        )
+
+    def _publish_dashboard(
+        self,
+    ) -> tuple[bool, str | None]:
+        """日次保存後にDashboard Snapshotを公開する。"""
+
+        if self.dashboard_publisher is None:
+            return False, None
+
+        try:
+            self.dashboard_publisher.publish()
+        except Exception as error:
+            if not self.settings.continue_on_dashboard_error:
+                raise
+
+            return (
+                False,
+                str(error).strip()
+                or type(error).__name__,
+            )
+
+        return True, None
+
+    def _sleep_closed_market(
+        self,
+        wait_seconds: float,
+    ) -> None:
+        """市場再確認までの待機時間を最大5分へ制限する。"""
+
+        self.sleeper(
+            max(
+                1.0,
+                min(wait_seconds, 300.0),
+            )
+        )
+
+    def _current_time(self) -> datetime:
+        """UTCへ正規化した現在日時を返す。"""
+
+        current = self.now_provider()
+
+        if current.tzinfo is None:
+            raise ValueError(
+                "現在日時にはタイムゾーンが必要です。"
+            )
+
+        return current.astimezone(timezone.utc)
+
+
+================================================================================
+FILE: app\runtime\paper_trading_persistence_service.py
+================================================================================
+"""Paper Trading Runtime終了結果を永続化する。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+from app.runtime.paper_trading_daily_repository import (
+    PaperTradingDailyRecord,
+)
+from app.runtime.paper_trading_runtime_models import (
+    PaperTradingDailySummary,
+)
+
+
+class PaperTradingDailyWriter(Protocol):
+    """日次サマリー保存処理。"""
+
+    def save(
+        self,
+        summary: PaperTradingDailySummary,
+    ) -> PaperTradingDailyRecord:
+        """日次サマリーを保存する。"""
+
+
+@dataclass(frozen=True, slots=True)
+class PaperTradingPersistenceResult:
+    """Paper Trading日次保存結果。"""
+
+    summary: PaperTradingDailySummary
+    record: PaperTradingDailyRecord
+
+    @property
+    def trading_date(self):
+        """営業日を返す。"""
+
+        return self.record.trading_date
+
+
+class PaperTradingPersistenceService:
+    """Paper Trading日次結果をRepositoryへ保存する。"""
+
+    def __init__(
+        self,
+        *,
+        daily_repository: PaperTradingDailyWriter,
+    ) -> None:
+        """日次Repositoryを設定する。"""
+
+        self.daily_repository = daily_repository
+
+    def persist(
+        self,
+        summary: PaperTradingDailySummary,
+    ) -> PaperTradingPersistenceResult:
+        """日次サマリーを永続化する。"""
+
+        record = self.daily_repository.save(summary)
+
+        return PaperTradingPersistenceResult(
+            summary=summary,
+            record=record,
+        )
+
+
+================================================================================
+FILE: app\runtime\paper_trading_runtime.py
+================================================================================
+"""Trading LoopとPortfolioを終日Paper Tradingとして集約する。"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from datetime import datetime, timezone
+from typing import Protocol
+
+from app.runtime.paper_trading_runtime_models import (
+    PaperTradingCycleRecord,
+    PaperTradingDailySummary,
+    PaperTradingRuntimeStatus,
+)
+from app.trading.portfolio_models import PortfolioSnapshot
+
+
+class PaperTradingCycleRunner(Protocol):
+    """終日Runtimeが利用するTrading Loop。"""
+
+    def run_cycle(self):
+        """次のTrading Cycleを実行する。"""
+
+
+class PaperTradingPortfolioReader(Protocol):
+    """終日Runtimeが利用するPortfolio取得処理。"""
+
+    def create_snapshot(
+        self,
+        *,
+        generated_at: datetime | None = None,
+    ) -> PortfolioSnapshot:
+        """現在のPortfolio Snapshotを返す。"""
+
+
+class PaperTradingRuntime:
+    """1営業日のTrading Cycleと資産推移を集約する。"""
+
+    def __init__(
+        self,
+        *,
+        cycle_runner: PaperTradingCycleRunner,
+        portfolio_reader: PaperTradingPortfolioReader,
+        now_provider: Callable[[], datetime] | None = None,
+    ) -> None:
+        """Trading Loop・Portfolio・時計を設定する。"""
+
+        self.cycle_runner = cycle_runner
+        self.portfolio_reader = portfolio_reader
+        self.now_provider = (
+            now_provider
+            if now_provider is not None
+            else lambda: datetime.now(timezone.utc)
+        )
+
+        self._started_at: datetime | None = None
+        self._records: list[PaperTradingCycleRecord] = []
+        self._initial_equity: float | None = None
+        self._status: PaperTradingRuntimeStatus | None = None
+
+    def start(self) -> None:
+        """終日Runtimeを開始する。"""
+
+        if self._status is PaperTradingRuntimeStatus.RUNNING:
+            raise RuntimeError(
+                "Paper Trading Runtimeはすでに稼働中です。"
+            )
+
+        started_at = self._current_time()
+        initial_snapshot = (
+            self.portfolio_reader.create_snapshot(
+                generated_at=started_at
+            )
+        )
+
+        self._started_at = started_at
+        self._records.clear()
+        self._initial_equity = (
+            initial_snapshot.broker_equity
+        )
+        self._status = PaperTradingRuntimeStatus.RUNNING
+
+    def run_cycle(self) -> PaperTradingCycleRecord:
+        """Trading Cycleを実行してPortfolioを記録する。"""
+
+        self._require_running()
+        cycle_result = self.cycle_runner.run_cycle()
+        snapshot = self.portfolio_reader.create_snapshot(
+            generated_at=self._current_time()
+        )
+        record = PaperTradingCycleRecord(
+            cycle_result=cycle_result,
+            portfolio_snapshot=snapshot,
+        )
+        self._records.append(record)
+
+        return record
+
+    def complete(self) -> PaperTradingDailySummary:
+        """正常終了の日次サマリーを返す。"""
+
+        return self._finalize(
+            status=PaperTradingRuntimeStatus.COMPLETED,
+            error_message=None,
+        )
+
+    def fail(
+        self,
+        *,
+        error_message: str,
+    ) -> PaperTradingDailySummary:
+        """異常終了の日次サマリーを返す。"""
+
+        normalized = error_message.strip()
+
+        if not normalized:
+            raise ValueError(
+                "異常終了メッセージを指定してください。"
+            )
+
+        return self._finalize(
+            status=PaperTradingRuntimeStatus.FAILED,
+            error_message=normalized,
+        )
+
+    def records(
+        self,
+    ) -> tuple[PaperTradingCycleRecord, ...]:
+        """現在までのCycle Recordを返す。"""
+
+        return tuple(self._records)
+
+    def _finalize(
+        self,
+        *,
+        status: PaperTradingRuntimeStatus,
+        error_message: str | None,
+    ) -> PaperTradingDailySummary:
+        """Runtimeを終了して日次集計を返す。"""
+
+        self._require_running()
+        completed_at = self._current_time()
+        final_snapshot = (
+            self.portfolio_reader.create_snapshot(
+                generated_at=completed_at
+            )
+        )
+
+        if self._started_at is None:
+            raise RuntimeError(
+                "Paper Trading Runtimeが開始されていません。"
+            )
+
+        summary = PaperTradingDailySummary(
+            trading_date=self._started_at.date(),
+            started_at=self._started_at,
+            completed_at=completed_at,
+            status=status,
+            records=tuple(self._records),
+            initial_equity=self._initial_equity,
+            final_equity=final_snapshot.broker_equity,
+            error_message=error_message,
+        )
+
+        self._status = status
+
+        return summary
+
+    def _require_running(self) -> None:
+        """稼働中でなければ例外を送出する。"""
+
+        if self._status is not PaperTradingRuntimeStatus.RUNNING:
+            raise RuntimeError(
+                "Paper Trading Runtimeが稼働していません。"
+            )
+
+    def _current_time(self) -> datetime:
+        """UTCへ正規化した現在日時を返す。"""
+
+        current = self.now_provider()
+
+        if current.tzinfo is None:
+            raise ValueError(
+                "現在日時にはタイムゾーンが必要です。"
+            )
+
+        return current.astimezone(timezone.utc)
+
+
+================================================================================
+FILE: app\runtime\paper_trading_runtime_factory.py
+================================================================================
+"""??Paper Trading Runtime????????????"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Protocol
+
+from app.runtime.paper_trading_daily_repository import (
+    PaperTradingDailySummaryRepository,
+)
+from app.runtime.paper_trading_persistence_service import (
+    PaperTradingPersistenceService,
+)
+from app.runtime.paper_trading_runtime import (
+    PaperTradingRuntime,
+)
+from app.runtime.paper_trading_runtime_persistence import (
+    PaperTradingRuntimePersistenceService,
+)
+
+
+class PaperTradingRuntimeCycleRunner(Protocol):
+    """Factory?????Trading Cycle?????"""
+
+    def run_cycle(self):
+        """Trading Cycle?1??????"""
+
+
+class PaperTradingRuntimePortfolioReader(Protocol):
+    """Factory?????Portfolio?????"""
+
+    def create_snapshot(
+        self,
+        *,
+        generated_at: datetime | None = None,
+    ):
+        """???Portfolio Snapshot????"""
+
+
+@dataclass(frozen=True, slots=True)
+class PaperTradingRuntimeBundle:
+    """??????Paper Trading Runtime???"""
+
+    runtime: PaperTradingRuntime
+    daily_repository: PaperTradingDailySummaryRepository
+    persistence_service: PaperTradingPersistenceService
+    runtime_persistence_service: (
+        PaperTradingRuntimePersistenceService
+    )
+
+
+class PaperTradingRuntimeFactory:
+    """??Paper Trading Runtime????????"""
+
+    @staticmethod
+    def create(
+        *,
+        database_path: Path,
+        cycle_runner: PaperTradingRuntimeCycleRunner,
+        portfolio_reader: PaperTradingRuntimePortfolioReader,
+        now_provider: Callable[[], datetime] | None = None,
+    ) -> PaperTradingRuntimeBundle:
+        """??Component??Runtime????????????"""
+
+        resolved_database_path = Path(
+            database_path
+        )
+
+        runtime = PaperTradingRuntime(
+            cycle_runner=cycle_runner,
+            portfolio_reader=portfolio_reader,
+            now_provider=now_provider,
+        )
+
+        daily_repository = (
+            PaperTradingDailySummaryRepository(
+                resolved_database_path,
+                now_provider=now_provider,
+            )
+        )
+
+        persistence_service = (
+            PaperTradingPersistenceService(
+                daily_repository=daily_repository
+            )
+        )
+
+        runtime_persistence_service = (
+            PaperTradingRuntimePersistenceService(
+                runtime=runtime,
+                persistence_service=persistence_service,
+            )
+        )
+
+        return PaperTradingRuntimeBundle(
+            runtime=runtime,
+            daily_repository=daily_repository,
+            persistence_service=persistence_service,
+            runtime_persistence_service=(
+                runtime_persistence_service
+            ),
+        )
+
+
+================================================================================
+FILE: app\runtime\paper_trading_runtime_persistence.py
+================================================================================
+"""PaperTradingRuntimeの終了と日次保存を一体化する。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+from app.runtime.paper_trading_persistence_service import (
+    PaperTradingPersistenceResult,
+)
+from app.runtime.paper_trading_runtime_models import (
+    PaperTradingDailySummary,
+)
+
+
+class PaperTradingRuntimeFinalizer(Protocol):
+    """終了可能なPaper Trading Runtime。"""
+
+    def complete(self) -> PaperTradingDailySummary:
+        """正常終了する。"""
+
+    def fail(
+        self,
+        *,
+        error_message: str,
+    ) -> PaperTradingDailySummary:
+        """異常終了する。"""
+
+
+class PaperTradingSummaryPersister(Protocol):
+    """日次サマリー永続化処理。"""
+
+    def persist(
+        self,
+        summary: PaperTradingDailySummary,
+    ) -> PaperTradingPersistenceResult:
+        """日次サマリーを保存する。"""
+
+
+@dataclass(frozen=True, slots=True)
+class PaperTradingRuntimePersistenceResult:
+    """Runtime終了と永続化をまとめた結果。"""
+
+    persistence: PaperTradingPersistenceResult
+
+    @property
+    def summary(self) -> PaperTradingDailySummary:
+        """日次サマリーを返す。"""
+
+        return self.persistence.summary
+
+
+class PaperTradingRuntimePersistenceService:
+    """Runtime終了後に日次結果を必ず保存する。"""
+
+    def __init__(
+        self,
+        *,
+        runtime: PaperTradingRuntimeFinalizer,
+        persistence_service: PaperTradingSummaryPersister,
+    ) -> None:
+        """RuntimeとPersistence Serviceを設定する。"""
+
+        self.runtime = runtime
+        self.persistence_service = persistence_service
+
+    def complete_and_persist(
+        self,
+    ) -> PaperTradingRuntimePersistenceResult:
+        """正常終了して日次サマリーを保存する。"""
+
+        summary = self.runtime.complete()
+        persistence = self.persistence_service.persist(
+            summary
+        )
+
+        return PaperTradingRuntimePersistenceResult(
+            persistence=persistence
+        )
+
+    def fail_and_persist(
+        self,
+        *,
+        error_message: str,
+    ) -> PaperTradingRuntimePersistenceResult:
+        """異常終了して日次サマリーを保存する。"""
+
+        summary = self.runtime.fail(
+            error_message=error_message
+        )
+        persistence = self.persistence_service.persist(
+            summary
+        )
+
+        return PaperTradingRuntimePersistenceResult(
+            persistence=persistence
+        )
+
+
+================================================================================
+FILE: app\watchlist.py
+================================================================================
+"""更新・分析対象の銘柄リストを読み込む処理。"""
+
+from pathlib import Path
+
+
+class WatchlistError(ValueError):
+    """Watch Listの内容が不正であることを表す。"""
+
+
+def load_watchlist(file_path: Path) -> list[str]:
+    """Watch Listから銘柄コードを読み込む。"""
+
+    if not file_path.exists():
+        raise FileNotFoundError(f"Watch Listが見つかりません。path={file_path}")
+
+    if not file_path.is_file():
+        raise WatchlistError(
+            f"Watch Listのパスがファイルではありません。path={file_path}"
+        )
+
+    content = file_path.read_text(
+        encoding="utf-8-sig",
+    )
+
+    codes: list[str] = []
+
+    for line_number, raw_line in enumerate(
+        content.splitlines(),
+        start=1,
+    ):
+        line_without_comment = raw_line.split(
+            "#",
+            maxsplit=1,
+        )[0]
+
+        tokens = line_without_comment.replace(",", " ").split()
+
+        for token in tokens:
+            code = token.strip()
+
+            _validate_code(
+                code=code,
+                line_number=line_number,
+            )
+
+            if code not in codes:
+                codes.append(code)
+
+    if not codes:
+        raise WatchlistError("Watch Listに銘柄コードがありません。")
+
+    return codes
+
+
+def _validate_code(
+    code: str,
+    line_number: int,
+) -> None:
+    """Watch List内の銘柄コードを検証する。"""
+
+    if not code.isdigit():
+        raise WatchlistError(
+            f"銘柄コードは数字で指定してください。 line={line_number} value={code}"
+        )
+
+    if len(code) not in (4, 5):
+        raise WatchlistError(
+            "銘柄コードは4桁または5桁で指定してください。"
+            f" line={line_number} value={code}"
+        )
+
+
+================================================================================
+FILE: tests\test_live_orchestrator.py
+================================================================================
+"""LiveTradingOrchestratorのテスト。"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from app.live.live_orchestrator import (
+    LiveTradingOrchestrator,
+)
+from app.live.live_orchestrator_models import (
+    LiveRunStopReason,
+)
+from app.market.realtime_models import (
+    MarketSessionSnapshot,
+    MarketSessionState,
+    RealtimeMarketPollResult,
+    RealtimePollDecision,
+)
+from app.market.realtime_paper_trading_service import (
+    RealtimePaperTradingResult,
+    RealtimePaperTradingStatus,
+)
+from app.market.realtime_signal_models import (
+    RealtimeSignalDecision,
+    RealtimeSignalProcessResult,
+)
+from app.backtest.queue_execution_service import (
+    BacktestQueueExecutionBatchResult,
+)
+from app.backtest.backtest_portfolio_update_service import (
+    BacktestPortfolioBatchUpdateResult,
+)
+
+
+def session(
+    observed_at: datetime,
+) -> MarketSessionSnapshot:
+    """取引時間中の市場状態を作成する。"""
+
+    return MarketSessionSnapshot(
+        observed_at=observed_at,
+        trading_date=observed_at.date(),
+        is_trading_day=True,
+        state=MarketSessionState.MORNING,
+    )
+
+
+def market_result(
+    observed_at: datetime,
+    *,
+    decision: RealtimePollDecision,
+) -> RealtimeMarketPollResult:
+    """市場監視結果を作成する。"""
+
+    return RealtimeMarketPollResult(
+        session=session(observed_at),
+        decision=decision,
+        code_count=1,
+        fetched_bar_count=0,
+        new_bar_count=0,
+        saved_bar_count=0,
+        new_bars=(),
+    )
+
+
+def paper_result() -> RealtimePaperTradingResult:
+    """空の正常Paper Trading結果を作成する。"""
+
+    return RealtimePaperTradingResult(
+        status=RealtimePaperTradingStatus.COMPLETED,
+        signal_result=RealtimeSignalProcessResult(
+            decision=RealtimeSignalDecision.NO_NEW_BAR,
+            input_bar_count=0,
+            processed_bar_count=0,
+            skipped_duplicate_count=0,
+            signal_count=0,
+            signals=(),
+        ),
+        queue_results=(),
+        execution_result=BacktestQueueExecutionBatchResult(
+            items=()
+        ),
+        portfolio_result=BacktestPortfolioBatchUpdateResult(
+            items=()
+        ),
+        error_message=None,
+    )
+
+
+class FakeClock:
+    """呼出ごとに時刻を進める時計。"""
+
+    def __init__(self) -> None:
+        self.current = datetime(
+            2026,
+            7,
+            17,
+            0,
+            0,
+            tzinfo=timezone.utc,
+        )
+
+    def now(self) -> datetime:
+        value = self.current
+        self.current += timedelta(seconds=1)
+        return value
+
+
+class FakeMonitor:
+    """市場監視呼出を記録する。"""
+
+    def __init__(
+        self,
+        decision: RealtimePollDecision,
+    ) -> None:
+        self.decision = decision
+        self.calls = 0
+        self.raise_error = False
+
+    def poll(
+        self,
+        *,
+        codes,
+        observed_at: datetime,
+    ) -> RealtimeMarketPollResult:
+        self.calls += 1
+
+        if self.raise_error:
+            raise RuntimeError("monitor failed")
+
+        return market_result(
+            observed_at,
+            decision=self.decision,
+        )
+
+
+class FakePaperService:
+    """Paper Trading呼出を記録する。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.raise_error = False
+
+    def process(
+        self,
+        prices,
+        *,
+        continue_on_error: bool = False,
+    ) -> RealtimePaperTradingResult:
+        self.calls += 1
+
+        if self.raise_error:
+            raise RuntimeError("paper failed")
+
+        return paper_result()
+
+
+def test_run_stops_at_max_cycles() -> None:
+    """最大サイクル数で終了する。"""
+
+    clock = FakeClock()
+    monitor = FakeMonitor(
+        RealtimePollDecision.NO_NEW_BAR
+    )
+    paper = FakePaperService()
+    sleeps: list[float] = []
+
+    result = LiveTradingOrchestrator(
+        market_monitor=monitor,
+        paper_trading_service=paper,
+        now_provider=clock.now,
+        sleeper=sleeps.append,
+    ).run(
+        codes=("7203",),
+        poll_interval_seconds=5.0,
+        max_cycles=3,
+    )
+
+    assert result.stop_reason is (
+        LiveRunStopReason.MAX_CYCLES_REACHED
+    )
+    assert result.cycle_count == 3
+    assert result.completed_cycle_count == 3
+    assert monitor.calls == 3
+    assert paper.calls == 0
+    assert sleeps == [5.0, 5.0]
+
+
+def test_run_stops_when_requested() -> None:
+    """停止要求成立時に安全に終了する。"""
+
+    clock = FakeClock()
+    monitor = FakeMonitor(
+        RealtimePollDecision.NO_NEW_BAR
+    )
+    paper = FakePaperService()
+    checks = 0
+
+    def stop_requested() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks >= 3
+
+    result = LiveTradingOrchestrator(
+        market_monitor=monitor,
+        paper_trading_service=paper,
+        now_provider=clock.now,
+        sleeper=lambda _seconds: None,
+        stop_requested=stop_requested,
+    ).run(
+        codes=("7203",),
+    )
+
+    assert result.stop_reason is (
+        LiveRunStopReason.STOP_REQUESTED
+    )
+    assert result.cycle_count == 1
+    assert monitor.calls == 1
+
+
+def test_cycle_calls_paper_only_for_new_bars() -> None:
+    """新規保存足がある場合だけPaper Tradingを呼ぶ。"""
+
+    clock = FakeClock()
+    monitor = FakeMonitor(
+        RealtimePollDecision.NO_NEW_BAR
+    )
+    paper = FakePaperService()
+    orchestrator = LiveTradingOrchestrator(
+        market_monitor=monitor,
+        paper_trading_service=paper,
+        now_provider=clock.now,
+        sleeper=lambda _seconds: None,
+    )
+
+    first = orchestrator.run_cycle(
+        cycle_number=1,
+        codes=("7203",),
+    )
+
+    assert first.is_completed
+    assert paper.calls == 0
+
+    monitor.decision = (
+        RealtimePollDecision.NEW_BARS_SAVED
+    )
+    invalid_new_bar_result = market_result(
+        datetime.now(timezone.utc),
+        decision=RealtimePollDecision.NO_NEW_BAR,
+    )
+    monitor.poll = lambda **_kwargs: invalid_new_bar_result
+
+    second = orchestrator.run_cycle(
+        cycle_number=2,
+        codes=("7203",),
+    )
+
+    assert second.is_completed
+    assert paper.calls == 0
+
+
+def test_cycle_converts_error_to_failed_result() -> None:
+    """継続モードでは例外を失敗サイクルへ変換する。"""
+
+    clock = FakeClock()
+    monitor = FakeMonitor(
+        RealtimePollDecision.NO_NEW_BAR
+    )
+    monitor.raise_error = True
+
+    result = LiveTradingOrchestrator(
+        market_monitor=monitor,
+        paper_trading_service=FakePaperService(),
+        now_provider=clock.now,
+    ).run_cycle(
+        cycle_number=1,
+        codes=("7203",),
+        continue_on_error=True,
+    )
+
+    assert result.is_failed
+    assert result.error_message == "monitor failed"
+
+
+def test_cycle_raises_error_when_not_continuing() -> None:
+    """停止モードでは例外をそのまま送出する。"""
+
+    clock = FakeClock()
+    monitor = FakeMonitor(
+        RealtimePollDecision.NO_NEW_BAR
+    )
+    monitor.raise_error = True
+
+    with pytest.raises(RuntimeError, match="monitor failed"):
+        LiveTradingOrchestrator(
+            market_monitor=monitor,
+            paper_trading_service=FakePaperService(),
+            now_provider=clock.now,
+        ).run_cycle(
+            cycle_number=1,
+            codes=("7203",),
+            continue_on_error=False,
+        )
+
+
+def test_run_continues_after_failed_cycle() -> None:
+    """継続モードでは失敗後も次サイクルへ進む。"""
+
+    clock = FakeClock()
+    monitor = FakeMonitor(
+        RealtimePollDecision.NO_NEW_BAR
+    )
+
+    original_poll = monitor.poll
+
+    def flaky_poll(**kwargs):
+        if monitor.calls == 0:
+            monitor.calls += 1
+            raise RuntimeError("temporary failure")
+
+        return original_poll(**kwargs)
+
+    monitor.poll = flaky_poll
+
+    result = LiveTradingOrchestrator(
+        market_monitor=monitor,
+        paper_trading_service=FakePaperService(),
+        now_provider=clock.now,
+        sleeper=lambda _seconds: None,
+    ).run(
+        codes=("7203",),
+        max_cycles=2,
+        continue_on_error=True,
+    )
+
+    assert result.cycle_count == 2
+    assert result.failed_cycle_count == 1
+    assert result.completed_cycle_count == 1
+
+
+def test_run_rejects_invalid_settings() -> None:
+    """不正な運転設定を拒否する。"""
+
+    orchestrator = LiveTradingOrchestrator(
+        market_monitor=FakeMonitor(
+            RealtimePollDecision.NO_NEW_BAR
+        ),
+        paper_trading_service=FakePaperService(),
+    )
+
+    with pytest.raises(ValueError, match="ポーリング"):
+        orchestrator.run(
+            codes=("7203",),
+            poll_interval_seconds=-1,
+            max_cycles=1,
+        )
+
+    with pytest.raises(ValueError, match="最大サイクル"):
+        orchestrator.run(
+            codes=("7203",),
+            max_cycles=0,
+        )
+
+    with pytest.raises(ValueError, match="1件以上"):
+        orchestrator.run(
+            codes=(),
+            max_cycles=1,
+        )
+
+
+def test_run_rejects_naive_clock() -> None:
+    """タイムゾーンなし時計を拒否する。"""
+
+    orchestrator = LiveTradingOrchestrator(
+        market_monitor=FakeMonitor(
+            RealtimePollDecision.NO_NEW_BAR
+        ),
+        paper_trading_service=FakePaperService(),
+        now_provider=lambda: datetime(2026, 7, 17),
+    )
+
+    with pytest.raises(ValueError, match="タイムゾーン"):
+        orchestrator.run(
+            codes=("7203",),
+            max_cycles=1,
+        )
+
+
+================================================================================
+FILE: tests\test_paper_trading_day_dashboard_integration.py
+================================================================================
+"""PaperTradingDayServiceとDashboard公開の統合テスト。"""
+
+from datetime import datetime, timezone
+
+import pytest
+
+from app.market.market_clock import (
+    TokyoMarketClockSnapshot,
+)
+from app.market.market_session import (
+    TokyoMarketSession,
+)
+from app.runtime.paper_trading_day_models import (
+    PaperTradingDaySettings,
+)
+from app.runtime.paper_trading_day_service import (
+    PaperTradingDayService,
+)
+from app.runtime.paper_trading_runtime_models import (
+    PaperTradingDailySummary,
+    PaperTradingRuntimeStatus,
+)
+
+
+NOW = datetime(
+    2026,
+    7,
+    21,
+    0,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+class FakeRuntime:
+    """Dashboard統合テスト用Runtime。"""
+
+    def start(self) -> None:
+        pass
+
+    def run_cycle(self):
+        raise AssertionError(
+            "引け後テストではCycleは実行されません。"
+        )
+
+    def complete(self) -> PaperTradingDailySummary:
+        return self._summary(
+            status=PaperTradingRuntimeStatus.COMPLETED,
+        )
+
+    def fail(
+        self,
+        *,
+        error_message: str,
+    ) -> PaperTradingDailySummary:
+        return self._summary(
+            status=PaperTradingRuntimeStatus.FAILED,
+            error_message=error_message,
+        )
+
+    @staticmethod
+    def _summary(
+        *,
+        status: PaperTradingRuntimeStatus,
+        error_message: str | None = None,
+    ) -> PaperTradingDailySummary:
+        return PaperTradingDailySummary(
+            trading_date=NOW.date(),
+            started_at=NOW,
+            completed_at=NOW,
+            status=status,
+            records=(),
+            initial_equity=1_000_000.0,
+            final_equity=1_010_000.0,
+            error_message=error_message,
+        )
+
+
+class FakeRecord:
+    """保存済み日次レコード。"""
+
+    trading_date = NOW.date()
+    status = PaperTradingRuntimeStatus.COMPLETED
+    created_at = NOW
+    updated_at = NOW
+
+
+class FakePersistenceResult:
+    """日次永続化結果。"""
+
+    record = FakeRecord()
+
+
+class FakePersister:
+    """呼出順序を記録するPersister。"""
+
+    def __init__(self, log: list[str]) -> None:
+        self.log = log
+
+    def persist(self, summary):
+        self.log.append("persist")
+        return FakePersistenceResult()
+
+
+class FakeDashboardPublisher:
+    """呼出順序を記録するDashboard Publisher。"""
+
+    def __init__(
+        self,
+        log: list[str],
+        *,
+        raises: bool = False,
+    ) -> None:
+        self.log = log
+        self.raises = raises
+
+    def publish(self):
+        self.log.append("publish")
+
+        if self.raises:
+            raise RuntimeError("dashboard failed")
+
+        return object()
+
+
+class AfterCloseClock:
+    """常に引け後を返すMarket Clock。"""
+
+    def snapshot(
+        self,
+        observed_at: datetime,
+    ) -> TokyoMarketClockSnapshot:
+        return TokyoMarketClockSnapshot(
+            observed_at=observed_at,
+            local_at=observed_at,
+            business_day=True,
+            session=TokyoMarketSession.AFTER_CLOSE,
+            next_trading_at=observed_at,
+            wait_seconds=0.0,
+        )
+
+
+def create_service(
+    *,
+    log: list[str],
+    publisher,
+    continue_on_dashboard_error: bool = True,
+) -> PaperTradingDayService:
+    """テスト対象Serviceを作成する。"""
+
+    return PaperTradingDayService(
+        runtime=FakeRuntime(),
+        persistence_service=FakePersister(log),
+        market_clock=AfterCloseClock(),
+        dashboard_publisher=publisher,
+        settings=PaperTradingDaySettings(
+            continue_on_dashboard_error=(
+                continue_on_dashboard_error
+            )
+        ),
+        now_provider=lambda: NOW,
+        sleeper=lambda _seconds: None,
+    )
+
+
+def test_dashboard_is_published_after_persistence() -> None:
+    """日次保存後にDashboardを公開する。"""
+
+    log: list[str] = []
+    service = create_service(
+        log=log,
+        publisher=FakeDashboardPublisher(log),
+    )
+
+    result = service.run()
+
+    assert log == ["persist", "publish"]
+    assert result.dashboard_published is True
+    assert result.dashboard_error_message is None
+
+
+def test_dashboard_failure_does_not_lose_daily_result() -> None:
+    """既定ではDashboard失敗を日次運用失敗へ波及させない。"""
+
+    log: list[str] = []
+    service = create_service(
+        log=log,
+        publisher=FakeDashboardPublisher(
+            log,
+            raises=True,
+        ),
+    )
+
+    result = service.run()
+
+    assert log == ["persist", "publish"]
+    assert result.dashboard_published is False
+    assert result.dashboard_error_message == (
+        "dashboard failed"
+    )
+    assert result.record.trading_date == NOW.date()
+
+
+def test_dashboard_failure_can_be_raised_strictly() -> None:
+    """厳格設定ではDashboard公開失敗を送出する。"""
+
+    log: list[str] = []
+    service = create_service(
+        log=log,
+        publisher=FakeDashboardPublisher(
+            log,
+            raises=True,
+        ),
+        continue_on_dashboard_error=False,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="dashboard failed",
+    ):
+        service.run()
+
+    assert log == ["persist", "publish"]
+
+
+================================================================================
+FILE: tests\test_paper_trading_day_post_run_hooks.py
+================================================================================
+"""PaperTradingDayServiceのPost-run Hook統合テスト。"""
+
+from datetime import datetime, timezone
+
+import pytest
+
+from app.market.market_clock import (
+    TokyoMarketClockSnapshot,
+)
+from app.market.market_session import (
+    TokyoMarketSession,
+)
+from app.runtime.paper_trading_day_models import (
+    PaperTradingDaySettings,
+)
+from app.runtime.paper_trading_day_service import (
+    PaperTradingDayService,
+)
+from app.runtime.paper_trading_runtime_models import (
+    PaperTradingDailySummary,
+    PaperTradingRuntimeStatus,
+)
+
+
+NOW = datetime(
+    2026,
+    7,
+    18,
+    0,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+class FakeRuntime:
+    def start(self) -> None:
+        pass
+
+    def run_cycle(self):
+        raise AssertionError(
+            "引け後テストではCycleは実行されません。"
+        )
+
+    def complete(self) -> PaperTradingDailySummary:
+        return PaperTradingDailySummary(
+            trading_date=NOW.date(),
+            started_at=NOW,
+            completed_at=NOW,
+            status=PaperTradingRuntimeStatus.COMPLETED,
+            records=(),
+            initial_equity=1_000_000.0,
+            final_equity=1_010_000.0,
+        )
+
+    def fail(
+        self,
+        *,
+        error_message: str,
+    ) -> PaperTradingDailySummary:
+        raise AssertionError(error_message)
+
+
+class FakeRecord:
+    trading_date = NOW.date()
+    status = PaperTradingRuntimeStatus.COMPLETED
+    created_at = NOW
+    updated_at = NOW
+
+
+class FakePersistenceResult:
+    record = FakeRecord()
+
+
+class FakePersister:
+    def persist(self, summary):
+        return FakePersistenceResult()
+
+
+class AfterCloseClock:
+    def snapshot(
+        self,
+        observed_at: datetime,
+    ) -> TokyoMarketClockSnapshot:
+        return TokyoMarketClockSnapshot(
+            observed_at=observed_at,
+            local_at=observed_at,
+            business_day=True,
+            session=TokyoMarketSession.AFTER_CLOSE,
+            next_trading_at=observed_at,
+            wait_seconds=0.0,
+        )
+
+
+class FakeHook:
+    def __init__(
+        self,
+        name: str,
+        log: list[str],
+        *,
+        raises: bool = False,
+    ) -> None:
+        self.name = name
+        self.log = log
+        self.raises = raises
+
+    def handle(self, result) -> None:
+        self.log.append(self.name)
+
+        if self.raises:
+            raise RuntimeError(
+                f"{self.name} failed"
+            )
+
+
+def create_service(
+    *,
+    hooks=(),
+    continue_on_post_run_hook_error=True,
+) -> PaperTradingDayService:
+    return PaperTradingDayService(
+        runtime=FakeRuntime(),
+        persistence_service=FakePersister(),
+        market_clock=AfterCloseClock(),
+        post_run_hooks=hooks,
+        settings=PaperTradingDaySettings(
+            continue_on_post_run_hook_error=(
+                continue_on_post_run_hook_error
+            )
+        ),
+        now_provider=lambda: NOW,
+        sleeper=lambda _seconds: None,
+    )
+
+
+def test_post_run_hooks_execute_in_order() -> None:
+    log: list[str] = []
+    service = create_service(
+        hooks=(
+            FakeHook("hook-1", log),
+            FakeHook("hook-2", log),
+        )
+    )
+
+    result = service.run()
+
+    assert log == ["hook-1", "hook-2"]
+    assert result.completed_post_run_hook_count == 2
+    assert result.post_run_hook_failure_count == 0
+
+
+def test_post_run_hook_error_is_recorded() -> None:
+    log: list[str] = []
+    service = create_service(
+        hooks=(
+            FakeHook(
+                "hook-1",
+                log,
+                raises=True,
+            ),
+            FakeHook("hook-2", log),
+        )
+    )
+
+    result = service.run()
+
+    assert log == ["hook-1", "hook-2"]
+    assert result.completed_post_run_hook_count == 1
+    assert result.post_run_hook_error_messages == (
+        "hook-1 failed",
+    )
+
+
+def test_post_run_hook_error_can_be_raised() -> None:
+    log: list[str] = []
+    service = create_service(
+        hooks=(
+            FakeHook(
+                "hook-1",
+                log,
+                raises=True,
+            ),
+        ),
+        continue_on_post_run_hook_error=False,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="hook-1 failed",
+    ):
+        service.run()
+
+
+================================================================================
+FILE: tests\test_paper_trading_day_service.py
+================================================================================
+"""PaperTradingDayServiceのテスト。"""
+
+from datetime import datetime, timezone
+
+from app.application.trading_loop_models import (
+    TradingLoopCycleStatus,
+)
+from app.market.market_clock import (
+    TokyoMarketClockSnapshot,
+)
+from app.market.market_session import (
+    TokyoMarketSession,
+)
+from app.runtime.paper_trading_day_models import (
+    PaperTradingDaySettings,
+    PaperTradingDayStopReason,
+)
+from app.runtime.paper_trading_day_service import (
+    PaperTradingDayService,
+)
+from app.runtime.paper_trading_runtime_models import (
+    PaperTradingDailySummary,
+    PaperTradingRuntimeStatus,
+)
+
+
+NOW = datetime(
+    2026,
+    7,
+    21,
+    0,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+class FakeCycleResult:
+    def __init__(
+        self,
+        number: int,
+        status: TradingLoopCycleStatus,
+    ) -> None:
+        self.cycle_number = number
+        self.status = status
+        self.error_message = (
+            "failed"
+            if status is TradingLoopCycleStatus.FAILED
+            else None
+        )
+
+    @property
+    def is_successful(self) -> bool:
+        return self.status is TradingLoopCycleStatus.COMPLETED
+
+    @property
+    def signal_count(self) -> int:
+        return 0
+
+    @property
+    def execution_count(self) -> int:
+        return 0
+
+
+class FakeCycleRecord:
+    def __init__(
+        self,
+        cycle_result: FakeCycleResult,
+    ) -> None:
+        self.cycle_result = cycle_result
+
+
+class FakeRuntime:
+    def __init__(
+        self,
+        statuses=(
+            TradingLoopCycleStatus.COMPLETED,
+        ),
+        *,
+        raises: bool = False,
+    ) -> None:
+        self.statuses = list(statuses)
+        self.raises = raises
+        self.calls = 0
+        self.started = False
+        self.failed_message = None
+
+    def start(self) -> None:
+        self.started = True
+
+    def run_cycle(self):
+        self.calls += 1
+
+        if self.raises:
+            raise RuntimeError("runtime error")
+
+        return FakeCycleRecord(
+            FakeCycleResult(
+                self.calls,
+                self.statuses[self.calls - 1],
+            )
+        )
+
+    def complete(self) -> PaperTradingDailySummary:
+        return self._summary(
+            PaperTradingRuntimeStatus.COMPLETED
+        )
+
+    def fail(
+        self,
+        *,
+        error_message: str,
+    ) -> PaperTradingDailySummary:
+        self.failed_message = error_message
+        return self._summary(
+            PaperTradingRuntimeStatus.FAILED,
+            error_message=error_message,
+        )
+
+    def _summary(
+        self,
+        status,
+        *,
+        error_message=None,
+    ) -> PaperTradingDailySummary:
+        return PaperTradingDailySummary(
+            trading_date=NOW.date(),
+            started_at=NOW,
+            completed_at=NOW,
+            status=status,
+            records=(),
+            initial_equity=1_000_000.0,
+            final_equity=1_000_000.0,
+            error_message=error_message,
+        )
+
+
+class FakeRecord:
+    trading_date = NOW.date()
+    status = PaperTradingRuntimeStatus.COMPLETED
+    created_at = NOW
+    updated_at = NOW
+
+
+class FakePersistenceResult:
+    def __init__(self, summary) -> None:
+        self.summary = summary
+        self.record = FakeRecord()
+
+
+class FakePersister:
+    def __init__(self) -> None:
+        self.summaries = []
+
+    def persist(self, summary):
+        self.summaries.append(summary)
+        return FakePersistenceResult(summary)
+
+
+class SequenceClock:
+    def __init__(self, sessions) -> None:
+        self.sessions = list(sessions)
+        self.calls = 0
+
+    def snapshot(self, observed_at):
+        index = min(
+            self.calls,
+            len(self.sessions) - 1,
+        )
+        session = self.sessions[index]
+        self.calls += 1
+        return TokyoMarketClockSnapshot(
+            observed_at=observed_at,
+            local_at=observed_at,
+            business_day=True,
+            session=session,
+            next_trading_at=observed_at,
+            wait_seconds=60.0,
+        )
+
+
+def test_day_service_runs_until_market_close() -> None:
+    runtime = FakeRuntime()
+    persister = FakePersister()
+    sleeps = []
+    service = PaperTradingDayService(
+        runtime=runtime,
+        persistence_service=persister,
+        market_clock=SequenceClock(
+            (
+                TokyoMarketSession.MORNING,
+                TokyoMarketSession.AFTER_CLOSE,
+            )
+        ),
+        settings=PaperTradingDaySettings(
+            cycle_interval_seconds=5.0
+        ),
+        now_provider=lambda: NOW,
+        sleeper=sleeps.append,
+    )
+
+    result = service.run()
+
+    assert runtime.started
+    assert runtime.calls == 1
+    assert result.stop_reason is (
+        PaperTradingDayStopReason.MARKET_CLOSED
+    )
+    assert len(persister.summaries) == 1
+    assert sleeps == [5.0]
+
+
+def test_day_service_waits_during_lunch() -> None:
+    runtime = FakeRuntime()
+    sleeps = []
+    service = PaperTradingDayService(
+        runtime=runtime,
+        persistence_service=FakePersister(),
+        market_clock=SequenceClock(
+            (
+                TokyoMarketSession.LUNCH,
+                TokyoMarketSession.AFTER_CLOSE,
+            )
+        ),
+        now_provider=lambda: NOW,
+        sleeper=sleeps.append,
+    )
+
+    result = service.run()
+
+    assert result.stop_reason is (
+        PaperTradingDayStopReason.MARKET_CLOSED
+    )
+    assert runtime.calls == 0
+    assert sleeps == [60.0]
+
+
+def test_day_service_stops_on_resource_critical() -> None:
+    runtime = FakeRuntime(
+        statuses=(
+            TradingLoopCycleStatus.RESOURCE_CRITICAL,
+        )
+    )
+    service = PaperTradingDayService(
+        runtime=runtime,
+        persistence_service=FakePersister(),
+        market_clock=SequenceClock(
+            (TokyoMarketSession.MORNING,)
+        ),
+        settings=PaperTradingDaySettings(
+            stop_on_resource_critical=True
+        ),
+        now_provider=lambda: NOW,
+        sleeper=lambda _seconds: None,
+    )
+
+    result = service.run()
+
+    assert result.stop_reason is (
+        PaperTradingDayStopReason.RESOURCE_CRITICAL
+    )
+
+
+def test_day_service_persists_failed_summary_on_error() -> None:
+    runtime = FakeRuntime(raises=True)
+    persister = FakePersister()
+    service = PaperTradingDayService(
+        runtime=runtime,
+        persistence_service=persister,
+        market_clock=SequenceClock(
+            (TokyoMarketSession.MORNING,)
+        ),
+        now_provider=lambda: NOW,
+    )
+
+    result = service.run()
+
+    assert result.stop_reason is (
+        PaperTradingDayStopReason.ERROR
+    )
+    assert result.error_message == "runtime error"
+    assert runtime.failed_message == "runtime error"
+    assert persister.summaries[0].status is (
+        PaperTradingRuntimeStatus.FAILED
+    )
+
+
+================================================================================
+FILE: tests\test_paper_trading_runtime_factory.py
+================================================================================
+"""PaperTradingRuntimeFactory?????"""
+
+from datetime import datetime, timezone
+from pathlib import Path
+
+from app.application.trading_loop_models import (
+    TradingLoopCycleStatus,
+)
+from app.database import initialize_database
+from app.runtime.paper_trading_runtime_factory import (
+    PaperTradingRuntimeFactory,
+)
+from app.runtime.paper_trading_runtime_models import (
+    PaperTradingRuntimeStatus,
+)
+from app.trading.portfolio_models import (
+    PortfolioSnapshot,
+)
+
+
+NOW = datetime(
+    2026,
+    7,
+    21,
+    0,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+class FakeCycle:
+    """????Trading Cycle???"""
+
+    def __init__(
+        self,
+        cycle_number: int,
+    ) -> None:
+        """????????????"""
+
+        self.cycle_number = cycle_number
+        self.status = TradingLoopCycleStatus.COMPLETED
+        self.error_message = None
+
+    @property
+    def is_successful(self) -> bool:
+        """??????????"""
+
+        return True
+
+    @property
+    def signal_count(self) -> int:
+        """???????????"""
+
+        return 1
+
+    @property
+    def execution_count(self) -> int:
+        """???????"""
+
+        return 1
+
+
+class FakeCycleRunner:
+    """????Trading Cycle Runner?"""
+
+    def __init__(self) -> None:
+        """???????????"""
+
+        self.calls = 0
+
+    def run_cycle(self) -> FakeCycle:
+        """???Trading Cycle??????"""
+
+        self.calls += 1
+
+        return FakeCycle(
+            self.calls
+        )
+
+
+class FakePortfolioReader:
+    """????Portfolio Reader?"""
+
+    def __init__(
+        self,
+        equities: tuple[float, ...],
+    ) -> None:
+        """??????????????"""
+
+        self.equities = equities
+        self.calls = 0
+
+    def create_snapshot(
+        self,
+        *,
+        generated_at: datetime | None = None,
+    ) -> PortfolioSnapshot:
+        """????Portfolio Snapshot????"""
+
+        if generated_at is None:
+            raise ValueError(
+                "??????????"
+            )
+
+        equity = self.equities[
+            self.calls
+        ]
+        self.calls += 1
+
+        return PortfolioSnapshot(
+            currency="JPY",
+            cash_balance=equity,
+            buying_power=equity,
+            broker_market_value=0.0,
+            broker_equity=equity,
+            positions=(),
+            generated_at=generated_at,
+        )
+
+
+def create_bundle(
+    tmp_path: Path,
+):
+    """?????DB????Runtime Bundle??????"""
+
+    database_path = (
+        tmp_path / "katana.db"
+    )
+
+    initialize_database(
+        database_path
+    )
+
+    bundle = PaperTradingRuntimeFactory.create(
+        database_path=database_path,
+        cycle_runner=FakeCycleRunner(),
+        portfolio_reader=FakePortfolioReader(
+            (
+                1_000_000.0,
+                1_005_000.0,
+                1_005_000.0,
+            )
+        ),
+        now_provider=lambda: NOW,
+    )
+
+    return database_path, bundle
+
+
+def test_factory_creates_runtime_bundle(
+    tmp_path: Path,
+) -> None:
+    """Runtime????Service????????"""
+
+    database_path, bundle = create_bundle(
+        tmp_path
+    )
+
+    assert (
+        bundle.daily_repository.database_path
+        == database_path
+    )
+    assert (
+        bundle.runtime_persistence_service.runtime
+        is bundle.runtime
+    )
+    assert (
+        bundle.runtime_persistence_service
+        .persistence_service
+        is bundle.persistence_service
+    )
+
+
+def test_factory_bundle_runs_and_persists_summary(
+    tmp_path: Path,
+) -> None:
+    """?????Runtime???????????????"""
+
+    _database_path, bundle = create_bundle(
+        tmp_path
+    )
+
+    bundle.runtime.start()
+    record = bundle.runtime.run_cycle()
+
+    result = (
+        bundle.runtime_persistence_service
+        .complete_and_persist()
+    )
+
+    summary = result.summary
+
+    assert record.cycle_number == 1
+    assert summary.status is (
+        PaperTradingRuntimeStatus.COMPLETED
+    )
+    assert summary.cycle_count == 1
+    assert summary.signal_count == 1
+    assert summary.execution_count == 1
+    assert summary.initial_equity == 1_000_000.0
+    assert summary.final_equity == 1_005_000.0
+    assert summary.net_profit_loss == 5_000.0
+
+    assert bundle.daily_repository.count() == 1
+
+    loaded = bundle.daily_repository.get(
+        NOW.date()
+    )
+
+    assert loaded is not None
+    assert loaded.status is (
+        PaperTradingRuntimeStatus.COMPLETED
+    )
+    assert loaded.net_profit_loss == 5_000.0
+
+
+def test_factory_bundle_persists_failed_runtime(
+    tmp_path: Path,
+) -> None:
+    """?????????????????"""
+
+    _database_path, bundle = create_bundle(
+        tmp_path
+    )
+
+    bundle.runtime.start()
+
+    result = (
+        bundle.runtime_persistence_service
+        .fail_and_persist(
+            error_message="runtime failed"
+        )
+    )
+
+    assert result.summary.status is (
+        PaperTradingRuntimeStatus.FAILED
+    )
+    assert result.summary.error_message == (
+        "runtime failed"
+    )
+    assert bundle.daily_repository.count() == 1
+
+
+================================================================================
+FILE: tests\test_realtime_market_service.py
+================================================================================
+"""リアルタイム市場監視基盤のテスト。"""
+
+from __future__ import annotations
+
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
+import pytest
+
+from app.market.models import StockPrice
+from app.market.realtime_market_service import (
+    JST,
+    RealtimeMarketMonitor,
+    TokyoMarketSessionService,
+)
+from app.market.realtime_models import (
+    MarketSessionState,
+    RealtimePollDecision,
+)
+
+
+UTC = ZoneInfo("UTC")
+
+
+class FakeRepository:
+    """監視サービス用の簡易Repository。"""
+
+    def __init__(
+        self,
+        latest_by_code: dict[str, datetime | None] | None = None,
+    ) -> None:
+        self.latest_by_code = latest_by_code or {}
+        self.saved: list[StockPrice] = []
+
+    def latest_datetime(
+        self,
+        code: str,
+        interval_minutes: int,
+    ) -> datetime | None:
+        assert interval_minutes == 5
+        return self.latest_by_code.get(code)
+
+    def save_all(
+        self,
+        prices: list[StockPrice],
+        interval_minutes: int,
+        data_source: str,
+    ) -> int:
+        assert interval_minutes == 5
+        assert data_source == "realtime-test"
+        self.saved.extend(prices)
+        return len(prices)
+
+
+def price(
+    code: str,
+    hour: int,
+    minute: int,
+) -> StockPrice:
+    """テスト用5分足を作成する。"""
+
+    return StockPrice(
+        code=code,
+        datetime=datetime(
+            2026,
+            7,
+            17,
+            hour,
+            minute,
+            tzinfo=JST,
+        ),
+        open=1000.0,
+        high=1010.0,
+        low=990.0,
+        close=1005.0,
+        volume=1000,
+    )
+
+
+@pytest.mark.parametrize(
+    ("hour", "minute", "expected"),
+    [
+        (8, 59, MarketSessionState.PRE_OPEN),
+        (9, 0, MarketSessionState.MORNING),
+        (11, 29, MarketSessionState.MORNING),
+        (11, 30, MarketSessionState.LUNCH_BREAK),
+        (12, 29, MarketSessionState.LUNCH_BREAK),
+        (12, 30, MarketSessionState.AFTERNOON),
+        (15, 29, MarketSessionState.AFTERNOON),
+        (15, 30, MarketSessionState.POST_CLOSE),
+    ],
+)
+def test_session_service_resolves_market_state(
+    hour: int,
+    minute: int,
+    expected: MarketSessionState,
+) -> None:
+    """東京市場の時刻境界を判定する。"""
+
+    snapshot = TokyoMarketSessionService(
+        trading_day_predicate=lambda _date: True
+    ).create_snapshot(
+        datetime(
+            2026,
+            7,
+            17,
+            hour,
+            minute,
+            tzinfo=JST,
+        )
+    )
+
+    assert snapshot.state is expected
+    assert snapshot.is_trading is expected.is_trading
+
+
+def test_session_service_converts_utc_to_jst() -> None:
+    """監視時刻を日本時間へ変換する。"""
+
+    snapshot = TokyoMarketSessionService(
+        trading_day_predicate=lambda _date: True
+    ).create_snapshot(
+        datetime(
+            2026,
+            7,
+            17,
+            0,
+            0,
+            tzinfo=UTC,
+        )
+    )
+
+    assert snapshot.observed_at.hour == 9
+    assert snapshot.observed_at.tzinfo == JST
+    assert snapshot.state is MarketSessionState.MORNING
+
+
+def test_session_service_marks_non_trading_day_closed() -> None:
+    """休日は時刻に関係なくclosedにする。"""
+
+    snapshot = TokyoMarketSessionService(
+        trading_day_predicate=lambda _date: False
+    ).create_snapshot(
+        datetime(
+            2026,
+            7,
+            18,
+            10,
+            0,
+            tzinfo=JST,
+        )
+    )
+
+    assert snapshot.state is MarketSessionState.CLOSED
+    assert snapshot.is_trading_day is False
+    assert snapshot.is_trading is False
+
+
+def test_monitor_idles_on_non_trading_day() -> None:
+    """休日はProviderへアクセスせず待機する。"""
+
+    called = False
+
+    def provider(
+        _code: str,
+        _target_date: date,
+    ) -> list[StockPrice]:
+        nonlocal called
+        called = True
+        return []
+
+    result = RealtimeMarketMonitor(
+        repository=FakeRepository(),
+        bar_provider=provider,
+        session_service=TokyoMarketSessionService(
+            trading_day_predicate=lambda _date: False
+        ),
+        data_source="realtime-test",
+    ).poll(
+        codes=("7203",),
+        observed_at=datetime(
+            2026,
+            7,
+            18,
+            10,
+            0,
+            tzinfo=JST,
+        ),
+    )
+
+    assert result.decision is (
+        RealtimePollDecision.IDLE_NON_TRADING_DAY
+    )
+    assert called is False
+    assert result.fetched_bar_count == 0
+
+
+def test_monitor_idles_outside_market_hours() -> None:
+    """取引日の時間外はProviderへアクセスしない。"""
+
+    called = False
+
+    def provider(
+        _code: str,
+        _target_date: date,
+    ) -> list[StockPrice]:
+        nonlocal called
+        called = True
+        return []
+
+    result = RealtimeMarketMonitor(
+        repository=FakeRepository(),
+        bar_provider=provider,
+        session_service=TokyoMarketSessionService(
+            trading_day_predicate=lambda _date: True
+        ),
+        data_source="realtime-test",
+    ).poll(
+        codes=("7203",),
+        observed_at=datetime(
+            2026,
+            7,
+            17,
+            8,
+            30,
+            tzinfo=JST,
+        ),
+    )
+
+    assert result.decision is (
+        RealtimePollDecision.IDLE_OUTSIDE_MARKET_HOURS
+    )
+    assert called is False
+
+
+def test_monitor_saves_only_new_completed_bars() -> None:
+    """保存済みより新しく、確定済みの足だけ保存する。"""
+
+    repository = FakeRepository(
+        {
+            "7203": datetime(
+                2026,
+                7,
+                17,
+                9,
+                0,
+                tzinfo=JST,
+            )
+        }
+    )
+
+    result = RealtimeMarketMonitor(
+        repository=repository,
+        bar_provider=lambda _code, _date: [
+            price("7203", 9, 0),
+            price("7203", 9, 5),
+            price("7203", 9, 10),
+            price("7203", 9, 15),
+        ],
+        session_service=TokyoMarketSessionService(
+            trading_day_predicate=lambda _date: True
+        ),
+        data_source="realtime-test",
+    ).poll(
+        codes=("7203",),
+        observed_at=datetime(
+            2026,
+            7,
+            17,
+            9,
+            17,
+            tzinfo=JST,
+        ),
+    )
+
+    assert result.decision is (
+        RealtimePollDecision.NEW_BARS_SAVED
+    )
+    assert result.fetched_bar_count == 4
+    assert result.new_bar_count == 2
+    assert result.saved_bar_count == 2
+    assert [
+        item.datetime.minute
+        for item in repository.saved
+    ] == [5, 10]
+
+
+def test_monitor_prevents_duplicates_from_provider() -> None:
+    """Provider内の同一開始日時重複を除去する。"""
+
+    duplicate = price("7203", 9, 5)
+    repository = FakeRepository()
+
+    result = RealtimeMarketMonitor(
+        repository=repository,
+        bar_provider=lambda _code, _date: [
+            duplicate,
+            duplicate,
+        ],
+        session_service=TokyoMarketSessionService(
+            trading_day_predicate=lambda _date: True
+        ),
+        data_source="realtime-test",
+    ).poll(
+        codes=("7203",),
+        observed_at=datetime(
+            2026,
+            7,
+            17,
+            9,
+            11,
+            tzinfo=JST,
+        ),
+    )
+
+    assert result.new_bar_count == 1
+    assert result.saved_bar_count == 1
+    assert len(repository.saved) == 1
+
+
+def test_monitor_returns_no_new_bar() -> None:
+    """全足が保存済みなら保存処理を行わない。"""
+
+    repository = FakeRepository(
+        {
+            "7203": datetime(
+                2026,
+                7,
+                17,
+                9,
+                5,
+                tzinfo=JST,
+            )
+        }
+    )
+
+    result = RealtimeMarketMonitor(
+        repository=repository,
+        bar_provider=lambda _code, _date: [
+            price("7203", 9, 0),
+            price("7203", 9, 5),
+        ],
+        session_service=TokyoMarketSessionService(
+            trading_day_predicate=lambda _date: True
+        ),
+        data_source="realtime-test",
+    ).poll(
+        codes=("7203",),
+        observed_at=datetime(
+            2026,
+            7,
+            17,
+            9,
+            20,
+            tzinfo=JST,
+        ),
+    )
+
+    assert result.decision is RealtimePollDecision.NO_NEW_BAR
+    assert result.saved_bar_count == 0
+    assert repository.saved == []
+
+
+def test_monitor_supports_multiple_codes_and_removes_code_duplicates() -> None:
+    """複数銘柄を処理し、入力コード重複を除去する。"""
+
+    repository = FakeRepository()
+
+    def provider(
+        code: str,
+        _target_date: date,
+    ) -> list[StockPrice]:
+        return [price(code, 9, 0)]
+
+    result = RealtimeMarketMonitor(
+        repository=repository,
+        bar_provider=provider,
+        session_service=TokyoMarketSessionService(
+            trading_day_predicate=lambda _date: True
+        ),
+        data_source="realtime-test",
+    ).poll(
+        codes=("7203", "6758", "7203"),
+        observed_at=datetime(
+            2026,
+            7,
+            17,
+            9,
+            6,
+            tzinfo=JST,
+        ),
+    )
+
+    assert result.code_count == 2
+    assert result.new_bar_count == 2
+    assert {
+        item.code
+        for item in result.new_bars
+    } == {"7203", "6758"}
+
+
+def test_monitor_rejects_provider_code_mismatch() -> None:
+    """要求銘柄と異なるProvider応答を拒否する。"""
+
+    monitor = RealtimeMarketMonitor(
+        repository=FakeRepository(),
+        bar_provider=lambda _code, _date: [
+            price("6758", 9, 0)
+        ],
+        session_service=TokyoMarketSessionService(
+            trading_day_predicate=lambda _date: True
+        ),
+        data_source="realtime-test",
+    )
+
+    with pytest.raises(ValueError, match="異なる"):
+        monitor.poll(
+            codes=("7203",),
+            observed_at=datetime(
+                2026,
+                7,
+                17,
+                9,
+                6,
+                tzinfo=JST,
+            ),
+        )
+
+
+def test_monitor_rejects_empty_codes() -> None:
+    """空の監視対象を拒否する。"""
+
+    monitor = RealtimeMarketMonitor(
+        repository=FakeRepository(),
+        bar_provider=lambda _code, _date: [],
+        data_source="realtime-test",
+    )
+
+    with pytest.raises(ValueError, match="1件以上"):
+        monitor.poll(
+            codes=(),
+            observed_at=datetime.now(JST),
+        )
+
+
+def test_session_service_rejects_naive_datetime() -> None:
+    """タイムゾーンなし監視日時を拒否する。"""
+
+    with pytest.raises(ValueError, match="タイムゾーン"):
+        TokyoMarketSessionService().create_snapshot(
+            datetime(2026, 7, 17, 9, 0)
+        )
+
+
+================================================================================
+FILE: tests\test_realtime_paper_trading_service.py
+================================================================================
+"""RealtimePaperTradingServiceのテスト。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import pytest
+
+from app.backtest.backtest_portfolio_update_service import (
+    BacktestPortfolioBatchUpdateResult,
+)
+from app.backtest.order_queue_service import (
+    BacktestOrderQueueDecision,
+    BacktestOrderQueueResult,
+)
+from app.backtest.queue_execution_service import (
+    BacktestQueueExecutionBatchResult,
+)
+from app.market.models import StockPrice
+from app.market.realtime_paper_trading_service import (
+    RealtimePaperTradingService,
+    RealtimePaperTradingStatus,
+)
+from app.market.realtime_signal_engine import (
+    RealtimeSignalEngine,
+)
+from app.trading.order_models import OrderType
+from app.trading.signal_models import (
+    SignalAction,
+    TradeSignal,
+)
+
+
+JST = ZoneInfo("Asia/Tokyo")
+
+
+def price(
+    minute: int,
+    *,
+    high: float,
+    low: float,
+    close: float,
+) -> StockPrice:
+    """ORB用5分足を作成する。"""
+
+    return StockPrice(
+        code="7203",
+        datetime=datetime(
+            2026,
+            7,
+            17,
+            9,
+            minute,
+            tzinfo=JST,
+        ),
+        open=1000.0,
+        high=high,
+        low=low,
+        close=close,
+        volume=1000,
+    )
+
+
+def bars() -> tuple[StockPrice, ...]:
+    """BUYシグナルを生成する系列を返す。"""
+
+    return (
+        price(0, high=1000.0, low=990.0, close=995.0),
+        price(5, high=1000.0, low=990.0, close=998.0),
+        price(10, high=1000.0, low=995.0, close=999.0),
+        price(15, high=1000.0, low=995.0, close=999.0),
+        price(20, high=1010.0, low=999.0, close=1005.0),
+    )
+
+
+@dataclass
+class FakeExecutionItem:
+    """保存済み約定を持つ簡易執行結果。"""
+
+    execution_record: object | None = None
+    is_failed: bool = False
+    message: str | None = None
+
+
+class FakeExecutionBatch:
+    """実サービスが参照する執行結果プロパティを提供する。"""
+
+    def __init__(
+        self,
+        items: tuple[FakeExecutionItem, ...] = (),
+    ) -> None:
+        self.items = items
+
+    @property
+    def failed_count(self) -> int:
+        return sum(item.is_failed for item in self.items)
+
+
+class FakeQueueService:
+    """シグナルを受け取った順に記録する。"""
+
+    def __init__(self) -> None:
+        self.signals: list[TradeSignal] = []
+        self.order_types: list[OrderType] = []
+        self.fail = False
+
+    def enqueue_signal(
+        self,
+        signal: TradeSignal,
+        *,
+        order_type: OrderType,
+        continue_on_error: bool,
+    ) -> BacktestOrderQueueResult:
+        self.signals.append(signal)
+        self.order_types.append(order_type)
+
+        return BacktestOrderQueueResult(
+            decision=(
+                BacktestOrderQueueDecision.FAILED
+                if self.fail
+                else BacktestOrderQueueDecision.ENQUEUED
+            ),
+            signal=signal,
+            order_record=None,
+            queued_order=None,
+            message="queue failed" if self.fail else None,
+        )
+
+
+class FakeExecutionService:
+    """注文執行呼出回数を記録する。"""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+        self.fail = False
+
+    def execute_all(
+        self,
+        *,
+        continue_on_error: bool,
+    ) -> FakeExecutionBatch:
+        self.call_count += 1
+
+        if self.fail:
+            return FakeExecutionBatch(
+                (
+                    FakeExecutionItem(
+                        is_failed=True,
+                        message="execution failed",
+                    ),
+                )
+            )
+
+        return FakeExecutionBatch(())
+
+
+class FakePortfolioResult:
+    """空のポートフォリオ更新結果。"""
+
+    items: tuple[object, ...] = ()
+
+
+class FakePortfolioService:
+    """約定反映呼出回数を記録する。"""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+        self.limits: list[int] = []
+
+    def apply_executions(
+        self,
+        records: tuple[object, ...],
+        *,
+        equity_curve_limit: int,
+    ) -> FakePortfolioResult:
+        self.call_count += 1
+        self.limits.append(equity_curve_limit)
+        return FakePortfolioResult()
+
+
+def create_service():
+    """テスト対象と各Fakeを作成する。"""
+
+    queue = FakeQueueService()
+    execution = FakeExecutionService()
+    portfolio = FakePortfolioService()
+    prices: list[tuple[str, float]] = []
+    clocks: list[datetime] = []
+
+    service = RealtimePaperTradingService(
+        signal_engine=RealtimeSignalEngine(),
+        order_queue_service=queue,
+        queue_execution_service=execution,
+        portfolio_update_service=portfolio,
+        market_price_updater=lambda code, value: (
+            prices.append((code, value))
+        ),
+        clock_updater=clocks.append,
+    )
+
+    return (
+        service,
+        queue,
+        execution,
+        portfolio,
+        prices,
+        clocks,
+    )
+
+
+def test_service_runs_signal_to_order_pipeline() -> None:
+    """BUYシグナルを注文・執行・資産更新へ流す。"""
+
+    (
+        service,
+        queue,
+        execution,
+        portfolio,
+        updated_prices,
+        clocks,
+    ) = create_service()
+
+    result = service.process(bars())
+
+    assert result.is_completed
+    assert result.signal_count == 1
+    assert result.queued_count == 1
+    assert queue.signals[0].action is SignalAction.BUY
+    assert execution.call_count == 1
+    assert portfolio.call_count == 1
+    assert len(updated_prices) == 5
+    assert len(clocks) == 5
+
+
+def test_service_updates_market_price_before_order() -> None:
+    """各足の価格更新後にその足のシグナルを処理する。"""
+
+    (
+        service,
+        queue,
+        _execution,
+        _portfolio,
+        updated_prices,
+        _clocks,
+    ) = create_service()
+
+    service.process(bars())
+
+    assert queue.signals
+    assert updated_prices[-1] == ("7203", 1005.0)
+
+
+def test_service_skips_duplicate_cycle() -> None:
+    """同じ足を再投入しても注文を重複生成しない。"""
+
+    (
+        service,
+        queue,
+        execution,
+        portfolio,
+        _prices,
+        _clocks,
+    ) = create_service()
+
+    first = service.process(bars())
+    second = service.process(bars())
+
+    assert first.signal_count == 1
+    assert second.signal_count == 0
+    assert second.signal_result is not None
+    assert second.signal_result.skipped_duplicate_count == 5
+    assert len(queue.signals) == 1
+    assert execution.call_count == 1
+    assert portfolio.call_count == 1
+
+
+def test_service_processes_out_of_order_prices() -> None:
+    """順不同の足を時系列順に処理する。"""
+
+    (
+        service,
+        _queue,
+        _execution,
+        _portfolio,
+        updated_prices,
+        clocks,
+    ) = create_service()
+
+    result = service.process(
+        tuple(reversed(bars()))
+    )
+
+    assert result.signal_count == 1
+    assert updated_prices[-1] == ("7203", 1005.0)
+    assert clocks == sorted(clocks)
+
+
+def test_service_supports_custom_order_type() -> None:
+    """注文タイプをキュー処理へ引き渡す。"""
+
+    (
+        service,
+        queue,
+        _execution,
+        _portfolio,
+        _prices,
+        _clocks,
+    ) = create_service()
+
+    service.process(
+        bars(),
+        order_type=OrderType.MARKET,
+    )
+
+    assert queue.order_types == [OrderType.MARKET]
+
+
+def test_service_rejects_invalid_equity_limit() -> None:
+    """不正な資産曲線取得件数を拒否する。"""
+
+    service, *_ = create_service()
+
+    with pytest.raises(ValueError, match="取得件数"):
+        service.process(
+            bars(),
+            equity_curve_limit=0,
+        )
+
+
+def test_service_raises_queue_failure_by_default() -> None:
+    """既定ではキュー登録失敗を送出する。"""
+
+    service, queue, *_ = create_service()
+    queue.fail = True
+
+    with pytest.raises(RuntimeError, match="queue failed"):
+        service.process(bars())
+
+
+def test_service_returns_failed_result_when_continuing() -> None:
+    """継続モードでは例外を失敗結果へ変換する。"""
+
+    service, queue, *_ = create_service()
+    queue.fail = True
+
+    result = service.process(
+        bars(),
+        continue_on_error=True,
+    )
+
+    assert result.status is RealtimePaperTradingStatus.COMPLETED
+    assert result.signal_count == 1
+    assert result.queue_results[0].is_failed
+
+
+def test_service_returns_safe_empty_result() -> None:
+    """空入力では全工程が空の正常結果になる。"""
+
+    service, *_ = create_service()
+
+    result = service.process(())
+
+    assert result.is_completed
+    assert result.signal_count == 0
+    assert result.execution_count == 0
+    assert result.portfolio_update_count == 0
+    assert result.queue_results == ()
+
+
+================================================================================
+FILE: tests\test_realtime_signal_engine.py
+================================================================================
+"""RealtimeSignalEngineのテスト。"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from app.market.models import StockPrice
+from app.market.realtime_signal_engine import (
+    RealtimeSignalEngine,
+)
+from app.market.realtime_signal_models import (
+    RealtimeSignalDecision,
+)
+from app.trading.signal_models import SignalAction
+
+
+JST = ZoneInfo("Asia/Tokyo")
+
+
+def price(
+    minute: int,
+    *,
+    high: float,
+    low: float,
+    close: float,
+    code: str = "7203",
+) -> StockPrice:
+    """ORB評価用5分足を作成する。"""
+
+    return StockPrice(
+        code=code,
+        datetime=datetime(
+            2026,
+            7,
+            17,
+            9,
+            minute,
+            tzinfo=JST,
+        ),
+        open=1000.0,
+        high=high,
+        low=low,
+        close=close,
+        volume=1000,
+    )
+
+
+def opening_and_breakout_prices(
+    code: str = "7203",
+) -> list[StockPrice]:
+    """BUYシグナルが発生する系列を返す。"""
+
+    return [
+        price(0, high=1000.0, low=990.0, close=995.0, code=code),
+        price(5, high=1000.0, low=990.0, close=998.0, code=code),
+        price(10, high=1000.0, low=995.0, close=999.0, code=code),
+        price(15, high=1000.0, low=995.0, close=999.0, code=code),
+        price(20, high=1010.0, low=999.0, close=1005.0, code=code),
+    ]
+
+
+def test_engine_generates_orb_buy_signal() -> None:
+    """オープニングレンジ突破でBUYを生成する。"""
+
+    result = RealtimeSignalEngine().process(
+        opening_and_breakout_prices()
+    )
+
+    assert result.decision is (
+        RealtimeSignalDecision.SIGNALS_GENERATED
+    )
+    assert result.processed_bar_count == 5
+    assert result.signal_count == 1
+    assert result.signals[0].action is SignalAction.BUY
+    assert result.signals[0].code == "7203"
+
+
+def test_engine_skips_duplicate_bars() -> None:
+    """同じ開始日時の足を再処理しない。"""
+
+    engine = RealtimeSignalEngine()
+    first = engine.process(
+        opening_and_breakout_prices()
+    )
+    second = engine.process(
+        opening_and_breakout_prices()
+    )
+
+    assert first.signal_count == 1
+    assert second.decision is RealtimeSignalDecision.NO_NEW_BAR
+    assert second.processed_bar_count == 0
+    assert second.skipped_duplicate_count == 5
+    assert second.signal_count == 0
+
+
+def test_engine_processes_only_incremental_bars() -> None:
+    """2回目は新しく追加された足だけ処理する。"""
+
+    engine = RealtimeSignalEngine()
+    bars = opening_and_breakout_prices()
+
+    first = engine.process(bars[:4])
+    second = engine.process(bars)
+
+    assert first.decision is RealtimeSignalDecision.BAR_PROCESSED
+    assert first.signal_count == 0
+    assert second.processed_bar_count == 1
+    assert second.skipped_duplicate_count == 4
+    assert second.signal_count == 1
+
+
+def test_engine_keeps_state_separately_by_code() -> None:
+    """戦略状態と最終処理日時を銘柄別に保持する。"""
+
+    engine = RealtimeSignalEngine()
+    result = engine.process(
+        opening_and_breakout_prices("7203")
+        + opening_and_breakout_prices("6758")
+    )
+
+    assert result.signal_count == 2
+    assert {
+        signal.code
+        for signal in result.signals
+    } == {"7203", "6758"}
+    assert engine.last_processed_at("7203") is not None
+    assert engine.last_processed_at("6758") is not None
+
+
+def test_engine_generates_take_profit_exit() -> None:
+    """BUY後の利確条件でEXITを生成する。"""
+
+    from app.backtest.orb_signal_strategy import (
+        OrbSignalStrategy,
+        OrbSignalStrategySettings,
+    )
+
+    engine = RealtimeSignalEngine(
+        strategy_factory=lambda _code: OrbSignalStrategy(
+            settings=OrbSignalStrategySettings(
+                take_profit_rate=0.01,
+            )
+        )
+    )
+    entry = opening_and_breakout_prices()
+    exit_bar = price(
+        25,
+        high=1020.0,
+        low=1000.0,
+        close=1015.0,
+    )
+
+    result = engine.process(entry + [exit_bar])
+
+    assert result.signal_count == 2
+    assert [
+        signal.action
+        for signal in result.signals
+    ] == [SignalAction.BUY, SignalAction.EXIT]
+
+
+def test_engine_returns_empty_result_for_no_input() -> None:
+    """入力なしでは安全な空結果を返す。"""
+
+    result = RealtimeSignalEngine().process(())
+
+    assert result.decision is RealtimeSignalDecision.NO_NEW_BAR
+    assert result.input_bar_count == 0
+    assert result.processed_bar_count == 0
+    assert result.signal_count == 0
+
+
+def test_engine_sorts_out_of_order_bars() -> None:
+    """順不同入力を開始日時順に処理する。"""
+
+    engine = RealtimeSignalEngine()
+    bars = opening_and_breakout_prices()
+    result = engine.process(tuple(reversed(bars)))
+
+    assert result.processed_bar_count == 5
+    assert result.signal_count == 1
+    assert engine.last_processed_at("7203") == (
+        bars[-1].datetime
+    )
+
+
+def test_engine_reset_one_code_only() -> None:
+    """指定銘柄だけ状態を初期化できる。"""
+
+    engine = RealtimeSignalEngine()
+    engine.process(
+        opening_and_breakout_prices("7203")
+        + opening_and_breakout_prices("6758")
+    )
+
+    engine.reset("7203")
+
+    assert engine.last_processed_at("7203") is None
+    assert engine.last_processed_at("6758") is not None
+
+    result = engine.process(
+        opening_and_breakout_prices("7203")
+    )
+    assert result.signal_count == 1
+
+
+def test_engine_reset_all_codes() -> None:
+    """全銘柄状態を初期化できる。"""
+
+    engine = RealtimeSignalEngine()
+    engine.process(
+        opening_and_breakout_prices()
+    )
+
+    engine.reset()
+
+    assert engine.last_processed_at("7203") is None
+
+    result = engine.process(
+        opening_and_breakout_prices()
+    )
+    assert result.signal_count == 1
+
+
+def test_engine_accepts_naive_market_datetime_as_jst() -> None:
+    """タイムゾーンなし市場時刻をJSTとして扱う。"""
+
+    bar = StockPrice(
+        code="7203",
+        datetime=datetime(2026, 7, 17, 9, 0),
+        open=1000.0,
+        high=1010.0,
+        low=990.0,
+        close=1005.0,
+        volume=1000,
+    )
+
+    engine = RealtimeSignalEngine()
+    result = engine.process((bar,))
+
+    assert result.processed_bar_count == 1
+    assert engine.last_processed_at("7203").tzinfo == JST
+
+
+================================================================================
+FILE: tests\test_trading_loop_component.py
+================================================================================
+"""TradingLoopComponentのテスト。"""
+
+from datetime import datetime, timezone
+
+import pytest
+
+from app.application.application_component import (
+    ApplicationComponentRegistration,
+)
+from app.application.application_orchestrator import (
+    ApplicationOrchestrator,
+)
+from app.application.application_runner import (
+    ApplicationRunner,
+)
+from app.application.trading_loop_component import (
+    TradingLoopComponent,
+)
+from app.application.trading_loop_service import (
+    TradingLoopService,
+)
+from app.live.live_orchestrator_models import (
+    LiveCycleResult,
+    LiveCycleStatus,
+)
+from app.runtime.session_models import (
+    RuntimeSessionStatus,
+)
+from app.runtime.session_service import (
+    RuntimeSessionService,
+)
+
+
+NOW = datetime(
+    2026,
+    7,
+    18,
+    12,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+class FakeLiveOrchestrator:
+    def run_cycle(
+        self,
+        *,
+        cycle_number,
+        codes,
+        continue_on_error=True,
+    ):
+        return LiveCycleResult(
+            cycle_number=cycle_number,
+            started_at=NOW,
+            completed_at=NOW,
+            status=LiveCycleStatus.COMPLETED,
+            market_result=object(),
+            paper_trading_result=None,
+            error_message=None,
+        )
+
+
+def create_component():
+    session = RuntimeSessionService(
+        now_provider=lambda: NOW,
+        session_id_provider=lambda: "session-1",
+    )
+    service = TradingLoopService(
+        live_orchestrator=FakeLiveOrchestrator(),
+        runtime_session=session,
+        now_provider=lambda: NOW,
+    )
+    component = TradingLoopComponent(
+        service=service,
+        runtime_session=session,
+        codes=("7203", "6758"),
+    )
+    return component, session
+
+
+def test_component_starts_runs_cycles_and_stops() -> None:
+    component, session = create_component()
+
+    component.start()
+    first = component.run_cycle()
+    second = component.run_cycle()
+    component.stop()
+
+    assert component.component_name == "trading-loop"
+    assert first.cycle_number == 1
+    assert second.cycle_number == 2
+    assert component.is_running is False
+    assert component.last_session_report is not None
+    assert (
+        component.last_session_report
+        .snapshot
+        .status
+        is RuntimeSessionStatus.STOPPED
+    )
+    assert (
+        component.last_session_report
+        .total_cycle_count
+        == 2
+    )
+
+
+def test_component_rejects_cycle_before_start() -> None:
+    component, _session = create_component()
+
+    with pytest.raises(
+        RuntimeError,
+        match="開始されていません",
+    ):
+        component.run_cycle()
+
+
+def test_component_integrates_with_application_orchestrator() -> None:
+    component, _session = create_component()
+    orchestrator = ApplicationOrchestrator(
+        runner=ApplicationRunner(
+            now_provider=lambda: NOW,
+        ),
+        registrations=(
+            ApplicationComponentRegistration(
+                component=component,
+                start_order=10,
+            ),
+        ),
+    )
+
+    started = orchestrator.start()
+    cycle = component.run_cycle()
+    stopped = orchestrator.shutdown()
+
+    assert started.has_failures is False
+    assert cycle.is_successful
+    assert (
+        stopped.application_report
+        .graceful_shutdown
+    )
+    assert component.last_session_report is not None
+

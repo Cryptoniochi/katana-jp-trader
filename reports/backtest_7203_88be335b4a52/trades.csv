@@ -1,0 +1,2 @@
+﻿trade_id,code,quantity,entered_at,exited_at,holding_seconds,entry_price,exit_price,gross_profit_loss,total_cost,net_profit_loss,return_rate,exit_reason,entry_execution_id,exit_execution_id,entry_signal_id,exit_signal_id
+trade-paper-order-00000001:100-paper-order-00000002:100-1,7203,100,2026-07-01T00:25:00+00:00,2026-07-01T00:30:00+00:00,300.0,1005.0,1015.05,1004.9999999999955,0.0,1004.9999999999955,0.009999999999999955,take_profit,paper-order-00000001:100,paper-order-00000002:100,orb-v2-7203-buy-20260701T002500+0000,orb-v2-7203-exit-20260701T003000+0000

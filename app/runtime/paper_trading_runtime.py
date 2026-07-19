@@ -129,6 +129,15 @@ class PaperTradingRuntime:
 
         return tuple(self._records)
 
+
+    @property
+    def status(
+        self,
+    ) -> PaperTradingRuntimeStatus | None:
+        """現在のRuntime状態を返す。"""
+
+        return self._status
+
     def _finalize(
         self,
         *,
