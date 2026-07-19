@@ -11,6 +11,12 @@ from app.runtime.paper_trading_runtime_models import (
     PaperTradingDailySummary,
     PaperTradingRuntimeStatus,
 )
+from app.runtime.runtime_heartbeat_models import (
+    RuntimeHeartbeat,
+)
+from app.runtime.runtime_heartbeat_service import (
+    RuntimeHeartbeatService,
+)
 from app.trading.portfolio_models import PortfolioSnapshot
 
 
@@ -40,12 +46,14 @@ class PaperTradingRuntime:
         *,
         cycle_runner: PaperTradingCycleRunner,
         portfolio_reader: PaperTradingPortfolioReader,
+        heartbeat_service: RuntimeHeartbeatService | None = None,
         now_provider: Callable[[], datetime] | None = None,
     ) -> None:
-        """Trading Loop・Portfolio・時計を設定する。"""
+        """Trading Loop・Portfolio・Heartbeat・時計を設定する。"""
 
         self.cycle_runner = cycle_runner
         self.portfolio_reader = portfolio_reader
+        self.heartbeat_service = heartbeat_service
         self.now_provider = (
             now_provider
             if now_provider is not None
@@ -56,6 +64,25 @@ class PaperTradingRuntime:
         self._records: list[PaperTradingCycleRecord] = []
         self._initial_equity: float | None = None
         self._status: PaperTradingRuntimeStatus | None = None
+
+    @property
+    def status(
+        self,
+    ) -> PaperTradingRuntimeStatus | None:
+        """現在のRuntime状態を返す。"""
+
+        return self._status
+
+    @property
+    def last_heartbeat(
+        self,
+    ) -> RuntimeHeartbeat | None:
+        """最新Heartbeatを返す。"""
+
+        if self.heartbeat_service is None:
+            return None
+
+        return self.heartbeat_service.last_heartbeat
 
     def start(self) -> None:
         """終日Runtimeを開始する。"""
@@ -78,20 +105,39 @@ class PaperTradingRuntime:
             initial_snapshot.broker_equity
         )
         self._status = PaperTradingRuntimeStatus.RUNNING
+        self._record_heartbeat(
+            event="started",
+            recorded_at=started_at,
+            details={
+                "record_count": 0,
+                "broker_equity": (
+                    initial_snapshot.broker_equity
+                ),
+            },
+        )
 
     def run_cycle(self) -> PaperTradingCycleRecord:
         """Trading Cycleを実行してPortfolioを記録する。"""
 
         self._require_running()
         cycle_result = self.cycle_runner.run_cycle()
+        recorded_at = self._current_time()
         snapshot = self.portfolio_reader.create_snapshot(
-            generated_at=self._current_time()
+            generated_at=recorded_at
         )
         record = PaperTradingCycleRecord(
             cycle_result=cycle_result,
             portfolio_snapshot=snapshot,
         )
         self._records.append(record)
+        self._record_heartbeat(
+            event="cycle_completed",
+            recorded_at=recorded_at,
+            details={
+                "record_count": len(self._records),
+                "broker_equity": snapshot.broker_equity,
+            },
+        )
 
         return record
 
@@ -129,15 +175,6 @@ class PaperTradingRuntime:
 
         return tuple(self._records)
 
-
-    @property
-    def status(
-        self,
-    ) -> PaperTradingRuntimeStatus | None:
-        """現在のRuntime状態を返す。"""
-
-        return self._status
-
     def _finalize(
         self,
         *,
@@ -171,8 +208,50 @@ class PaperTradingRuntime:
         )
 
         self._status = status
+        heartbeat_details: dict[str, object] = {
+            "record_count": len(self._records),
+            "broker_equity": final_snapshot.broker_equity,
+        }
+
+        if error_message is not None:
+            heartbeat_details["error_message"] = error_message
+
+        self._record_heartbeat(
+            event=(
+                "completed"
+                if status is PaperTradingRuntimeStatus.COMPLETED
+                else "failed"
+            ),
+            recorded_at=completed_at,
+            details=heartbeat_details,
+        )
 
         return summary
+
+    def _record_heartbeat(
+        self,
+        *,
+        event: str,
+        recorded_at: datetime,
+        details: dict[str, object],
+    ) -> RuntimeHeartbeat | None:
+        """Heartbeat Serviceがあれば状態を記録する。"""
+
+        if self.heartbeat_service is None:
+            return None
+
+        return self.heartbeat_service.beat(
+            recorded_at=recorded_at,
+            details={
+                "event": event,
+                "runtime_status": (
+                    None
+                    if self._status is None
+                    else self._status.value
+                ),
+                **details,
+            },
+        )
 
     def _require_running(self) -> None:
         """稼働中でなければ例外を送出する。"""
