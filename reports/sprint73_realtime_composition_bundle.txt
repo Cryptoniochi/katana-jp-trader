@@ -1,0 +1,2702 @@
+================================================================================
+FILE: app\market\realtime_signal_engine.py
+================================================================================
+"""リアルタイム5分足を売買戦略へ適用する。"""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from collections.abc import Callable, Iterable
+from datetime import datetime
+from typing import Protocol
+from zoneinfo import ZoneInfo
+
+from app.backtest.historical_models import (
+    HistoricalBar,
+    MarketTimeframe,
+)
+from app.backtest.market_replay import MarketReplayFrame
+from app.backtest.orb_signal_strategy import (
+    OrbSignalStrategy,
+    OrbSignalStrategySettings,
+)
+from app.market.models import StockPrice
+from app.market.realtime_signal_models import (
+    RealtimeSignalDecision,
+    RealtimeSignalProcessResult,
+)
+from app.trading.signal_models import TradeSignal
+
+
+JST = ZoneInfo("Asia/Tokyo")
+
+
+class RealtimeStrategy(Protocol):
+    """リアルタイム戦略が満たすインターフェース。"""
+
+    def evaluate(
+        self,
+        frame: MarketReplayFrame,
+    ) -> tuple[TradeSignal, ...]:
+        """現在Frameを評価してシグナルを返す。"""
+
+    def reset(self) -> None:
+        """内部状態を初期化する。"""
+
+
+StrategyFactory = Callable[[str], RealtimeStrategy]
+
+
+class RealtimeSignalEngine:
+    """新しい5分足だけを順番に戦略へ適用する。"""
+
+    def __init__(
+        self,
+        *,
+        strategy_factory: StrategyFactory | None = None,
+    ) -> None:
+        """銘柄別戦略生成処理を設定する。"""
+
+        self.strategy_factory = (
+            strategy_factory
+            if strategy_factory is not None
+            else self._default_strategy_factory
+        )
+        self._strategies: dict[str, RealtimeStrategy] = {}
+        self._bars_by_code: dict[
+            str,
+            list[HistoricalBar],
+        ] = defaultdict(list)
+        self._last_processed_at: dict[
+            str,
+            datetime,
+        ] = {}
+
+    def process(
+        self,
+        prices: Iterable[StockPrice],
+    ) -> RealtimeSignalProcessResult:
+        """未処理の5分足だけを時系列順に評価する。"""
+
+        materialized = tuple(prices)
+
+        if not materialized:
+            return RealtimeSignalProcessResult(
+                decision=RealtimeSignalDecision.NO_NEW_BAR,
+                input_bar_count=0,
+                processed_bar_count=0,
+                skipped_duplicate_count=0,
+                signal_count=0,
+                signals=(),
+            )
+
+        ordered = sorted(
+            materialized,
+            key=lambda price: (
+                self._normalize_datetime(price.datetime),
+                price.code,
+            ),
+        )
+        processed_count = 0
+        skipped_count = 0
+        generated_signals: list[TradeSignal] = []
+
+        for price in ordered:
+            code = self._normalize_code(price.code)
+            opened_at = self._normalize_datetime(
+                price.datetime
+            )
+            last_processed = self._last_processed_at.get(code)
+
+            if (
+                last_processed is not None
+                and opened_at <= last_processed
+            ):
+                skipped_count += 1
+                continue
+
+            bar = self._to_historical_bar(
+                price,
+                code=code,
+                opened_at=opened_at,
+            )
+            visible_bars = self._bars_by_code[code]
+            visible_bars.append(bar)
+
+            strategy = self._strategies.get(code)
+
+            if strategy is None:
+                strategy = self.strategy_factory(code)
+                self._strategies[code] = strategy
+
+            frame = MarketReplayFrame(
+                current_bar=bar,
+                visible_bars=tuple(visible_bars),
+                index=len(visible_bars) - 1,
+                total_count=len(visible_bars),
+            )
+            signals = strategy.evaluate(frame)
+            generated_signals.extend(signals)
+            self._last_processed_at[code] = opened_at
+            processed_count += 1
+
+        if processed_count == 0:
+            decision = RealtimeSignalDecision.NO_NEW_BAR
+        elif generated_signals:
+            decision = RealtimeSignalDecision.SIGNALS_GENERATED
+        else:
+            decision = RealtimeSignalDecision.BAR_PROCESSED
+
+        return RealtimeSignalProcessResult(
+            decision=decision,
+            input_bar_count=len(materialized),
+            processed_bar_count=processed_count,
+            skipped_duplicate_count=skipped_count,
+            signal_count=len(generated_signals),
+            signals=tuple(generated_signals),
+        )
+
+    def reset(
+        self,
+        code: str | None = None,
+    ) -> None:
+        """全銘柄または指定銘柄の状態を初期化する。"""
+
+        if code is None:
+            for strategy in self._strategies.values():
+                strategy.reset()
+
+            self._strategies.clear()
+            self._bars_by_code.clear()
+            self._last_processed_at.clear()
+            return
+
+        normalized_code = self._normalize_code(code)
+        strategy = self._strategies.pop(
+            normalized_code,
+            None,
+        )
+
+        if strategy is not None:
+            strategy.reset()
+
+        self._bars_by_code.pop(normalized_code, None)
+        self._last_processed_at.pop(normalized_code, None)
+
+    def last_processed_at(
+        self,
+        code: str,
+    ) -> datetime | None:
+        """指定銘柄の最終処理日時を返す。"""
+
+        return self._last_processed_at.get(
+            self._normalize_code(code)
+        )
+
+    @staticmethod
+    def _default_strategy_factory(
+        _code: str,
+    ) -> RealtimeStrategy:
+        """既定のORB戦略を作成する。"""
+
+        return OrbSignalStrategy(
+            settings=OrbSignalStrategySettings()
+        )
+
+    @staticmethod
+    def _to_historical_bar(
+        price: StockPrice,
+        *,
+        code: str,
+        opened_at: datetime,
+    ) -> HistoricalBar:
+        """StockPriceを5分足モデルへ変換する。"""
+
+        return HistoricalBar(
+            code=code,
+            timeframe=MarketTimeframe.MINUTE_5,
+            opened_at=opened_at,
+            open_price=float(price.open),
+            high_price=float(price.high),
+            low_price=float(price.low),
+            close_price=float(price.close),
+            volume=float(price.volume),
+        )
+
+    @staticmethod
+    def _normalize_code(
+        code: str,
+    ) -> str:
+        """銘柄コードを検証する。"""
+
+        normalized = code.strip()
+
+        if not normalized.isdigit():
+            raise ValueError(
+                "銘柄コードは数字で指定してください。"
+            )
+
+        if len(normalized) not in {4, 5}:
+            raise ValueError(
+                "銘柄コードは4桁または5桁で指定してください。"
+            )
+
+        return normalized
+
+    @staticmethod
+    def _normalize_datetime(
+        value: datetime,
+    ) -> datetime:
+        """市場日時を日本時間へ正規化する。"""
+
+        if value.tzinfo is None:
+            return value.replace(tzinfo=JST)
+
+        return value.astimezone(JST)
+
+
+================================================================================
+FILE: app\market\realtime_signal_models.py
+================================================================================
+"""リアルタイム売買シグナル生成の共通モデル。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+
+from app.trading.signal_models import TradeSignal
+
+
+class RealtimeSignalDecision(StrEnum):
+    """1回のリアルタイムシグナル処理結果。"""
+
+    NO_NEW_BAR = "no_new_bar"
+    BAR_PROCESSED = "bar_processed"
+    SIGNALS_GENERATED = "signals_generated"
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeSignalProcessResult:
+    """リアルタイム5分足を戦略へ適用した結果。"""
+
+    decision: RealtimeSignalDecision
+    input_bar_count: int
+    processed_bar_count: int
+    skipped_duplicate_count: int
+    signal_count: int
+    signals: tuple[TradeSignal, ...]
+
+    def __post_init__(self) -> None:
+        """件数と判定結果の整合性を検証する。"""
+
+        for name, value in {
+            "入力足数": self.input_bar_count,
+            "処理足数": self.processed_bar_count,
+            "重複スキップ数": self.skipped_duplicate_count,
+            "シグナル数": self.signal_count,
+        }.items():
+            if value < 0:
+                raise ValueError(
+                    f"{name}は0以上である必要があります。"
+                )
+
+        if self.signal_count != len(self.signals):
+            raise ValueError(
+                "シグナル数とシグナル一覧の件数が一致しません。"
+            )
+
+        if (
+            self.processed_bar_count
+            + self.skipped_duplicate_count
+            != self.input_bar_count
+        ):
+            raise ValueError(
+                "処理足数と重複スキップ数の合計が"
+                "入力足数と一致しません。"
+            )
+
+        if (
+            self.decision is RealtimeSignalDecision.NO_NEW_BAR
+            and self.processed_bar_count != 0
+        ):
+            raise ValueError(
+                "新規足なし結果には処理済み足を設定できません。"
+            )
+
+        if (
+            self.decision is RealtimeSignalDecision.SIGNALS_GENERATED
+            and self.signal_count <= 0
+        ):
+            raise ValueError(
+                "シグナル生成結果には1件以上の"
+                "シグナルが必要です。"
+            )
+
+        if (
+            self.decision is RealtimeSignalDecision.BAR_PROCESSED
+            and self.signal_count != 0
+        ):
+            raise ValueError(
+                "足処理結果にはシグナルを設定できません。"
+            )
+
+
+================================================================================
+FILE: app\trading\paper_trading_pipeline.py
+================================================================================
+"""ORBシグナル生成からPaper Broker執行・レポートまで統合する。"""
+
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Protocol
+
+from app.market.models import StockPrice
+from app.trading.execution_engine import (
+    ExecutionBatchResult,
+    ExecutionDecision,
+    ExecutionEngine,
+    ExecutionItemResult,
+)
+from app.trading.execution_report import (
+    ExecutionReport,
+    ExecutionReportService,
+)
+from app.trading.execution_risk import (
+    ExecutionRiskDecision,
+    ExecutionRiskResult,
+    ExecutionRiskService,
+)
+from app.trading.order_models import (
+    OrderType,
+)
+from app.trading.orb_signal_service import (
+    OrbSignalGenerationResult,
+    OrbSignalGenerationService,
+)
+from app.trading.signal_models import (
+    TradeSignalRecord,
+)
+
+
+class SignalCanceller(Protocol):
+    """リスク拒否されたシグナルの取消処理。"""
+
+    def cancel(
+        self,
+        signal_id: str,
+        *,
+        process_note: str | None = None,
+    ) -> TradeSignalRecord:
+        """シグナルを取消済みに更新する。"""
+
+
+@dataclass(frozen=True, slots=True)
+class PaperTradingPipelineResult:
+    """Paper Trading統合パイプラインの実行結果。"""
+
+    signal_generation_result: OrbSignalGenerationResult
+    risk_results: tuple[
+        ExecutionRiskResult,
+        ...
+    ]
+    execution_batch_result: ExecutionBatchResult
+    execution_report: ExecutionReport
+    report_csv_path: Path | None
+
+    @property
+    def generated_signal_count(self) -> int:
+        """生成したシグナル数を返す。"""
+
+        return (
+            self.signal_generation_result
+            .generated_count
+        )
+
+    @property
+    def saved_signal_count(self) -> int:
+        """新規保存したシグナル数を返す。"""
+
+        return (
+            self.signal_generation_result
+            .saved_count
+        )
+
+    @property
+    def duplicate_signal_count(self) -> int:
+        """重複として保存しなかったシグナル数を返す。"""
+
+        return (
+            self.signal_generation_result
+            .duplicate_count
+        )
+
+    @property
+    def approved_count(self) -> int:
+        """リスク判定で承認された件数を返す。"""
+
+        return sum(
+            result.decision
+            is ExecutionRiskDecision.APPROVED
+            for result in self.risk_results
+        )
+
+    @property
+    def rejected_count(self) -> int:
+        """リスク判定で拒否された件数を返す。"""
+
+        return sum(
+            result.decision
+            is ExecutionRiskDecision.REJECTED
+            for result in self.risk_results
+        )
+
+    @property
+    def risk_failed_count(self) -> int:
+        """リスク判定自体に失敗した件数を返す。"""
+
+        return sum(
+            result.decision
+            is ExecutionRiskDecision.FAILED
+            for result in self.risk_results
+        )
+
+    @property
+    def executed_count(self) -> int:
+        """Broker同期まで到達した件数を返す。"""
+
+        return (
+            self.execution_batch_result
+            .executed_count
+        )
+
+    @property
+    def failed_count(self) -> int:
+        """統合処理で失敗した件数を返す。"""
+
+        return (
+            self.execution_batch_result
+            .failed_count
+        )
+
+    @property
+    def is_successful(self) -> bool:
+        """保存失敗・リスク失敗・執行失敗がないか返す。"""
+
+        return (
+            self.signal_generation_result
+            .is_successful
+            and self.risk_failed_count == 0
+            and self.failed_count == 0
+        )
+
+
+class PaperTradingPipeline:
+    """ORBデータからPaper Broker執行までを統合する。"""
+
+    def __init__(
+        self,
+        *,
+        signal_generation_service: OrbSignalGenerationService,
+        risk_service: ExecutionRiskService,
+        execution_engine: ExecutionEngine,
+        signal_repository: SignalCanceller,
+        report_service: ExecutionReportService | None = None,
+    ) -> None:
+        """統合処理に必要なサービスを設定する。"""
+
+        self.signal_generation_service = (
+            signal_generation_service
+        )
+        self.risk_service = risk_service
+        self.execution_engine = execution_engine
+        self.signal_repository = signal_repository
+        self.report_service = (
+            report_service
+            if report_service is not None
+            else ExecutionReportService()
+        )
+
+    def run(
+        self,
+        prices: list[StockPrice],
+        *,
+        order_type: OrderType = OrderType.MARKET,
+        limit_price: float | None = None,
+        stop_price: float | None = None,
+        report_generated_at: datetime | None = None,
+        report_csv_path: Path | None = None,
+        continue_on_error: bool = True,
+    ) -> PaperTradingPipelineResult:
+        """ORBシグナル生成から注文執行・レポートまで実行する。"""
+
+        signal_generation_result = (
+            self.signal_generation_service.run(
+                prices,
+                continue_on_error=continue_on_error,
+            )
+        )
+
+        risk_results: list[
+            ExecutionRiskResult
+        ] = []
+
+        execution_items: list[
+            ExecutionItemResult
+        ] = []
+
+        for signal_record in (
+            signal_generation_result.saved_records
+        ):
+            try:
+                risk_result = self.risk_service.evaluate(
+                    signal_record.signal,
+                    continue_on_error=continue_on_error,
+                )
+
+            except Exception as error:
+                if not continue_on_error:
+                    raise
+
+                execution_items.append(
+                    self._create_failed_item(
+                        signal_record=signal_record,
+                        message=str(error),
+                    )
+                )
+                continue
+
+            risk_results.append(
+                risk_result
+            )
+
+            if (
+                risk_result.decision
+                is ExecutionRiskDecision.APPROVED
+            ):
+                try:
+                    execution_item = (
+                        self.execution_engine.execute_signal(
+                            signal_record.signal_id,
+                            order_type=order_type,
+                            limit_price=limit_price,
+                            stop_price=stop_price,
+                        )
+                    )
+
+                except Exception as error:
+                    if not continue_on_error:
+                        raise
+
+                    execution_item = self._create_failed_item(
+                        signal_record=signal_record,
+                        message=str(error),
+                    )
+
+                execution_items.append(
+                    execution_item
+                )
+                continue
+
+            if (
+                risk_result.decision
+                is ExecutionRiskDecision.REJECTED
+            ):
+                cancelled_record = (
+                    self.signal_repository.cancel(
+                        signal_record.signal_id,
+                        process_note=(
+                            risk_result.message
+                            or "execution risk rejected"
+                        ),
+                    )
+                )
+
+                execution_items.append(
+                    self._create_failed_item(
+                        signal_record=cancelled_record,
+                        message=(
+                            risk_result.message
+                            or "execution risk rejected"
+                        ),
+                    )
+                )
+                continue
+
+            execution_items.append(
+                self._create_failed_item(
+                    signal_record=signal_record,
+                    message=(
+                        risk_result.message
+                        or "execution risk evaluation failed"
+                    ),
+                )
+            )
+
+        for failure in signal_generation_result.failures:
+            execution_items.append(
+                ExecutionItemResult(
+                    decision=ExecutionDecision.FAILED,
+                    signal_id=failure.signal_id,
+                    order_id=None,
+                    signal_record=None,
+                    order_record=None,
+                    order_creation_result=None,
+                    broker_sync_result=None,
+                    message=failure.message,
+                )
+            )
+
+        execution_batch_result = ExecutionBatchResult(
+            items=tuple(
+                execution_items
+            )
+        )
+
+        execution_report = self.report_service.create(
+            execution_batch_result,
+            generated_at=report_generated_at,
+        )
+
+        resolved_report_csv_path: Path | None = None
+
+        if report_csv_path is not None:
+            resolved_report_csv_path = (
+                self.report_service.write_csv(
+                    execution_report,
+                    report_csv_path,
+                )
+            )
+
+        return PaperTradingPipelineResult(
+            signal_generation_result=(
+                signal_generation_result
+            ),
+            risk_results=tuple(
+                risk_results
+            ),
+            execution_batch_result=(
+                execution_batch_result
+            ),
+            execution_report=execution_report,
+            report_csv_path=(
+                resolved_report_csv_path
+            ),
+        )
+
+    @staticmethod
+    def _create_failed_item(
+        *,
+        signal_record: TradeSignalRecord,
+        message: str,
+    ) -> ExecutionItemResult:
+        """シグナル処理失敗をExecution明細へ変換する。"""
+
+        return ExecutionItemResult(
+            decision=ExecutionDecision.FAILED,
+            signal_id=signal_record.signal_id,
+            order_id=None,
+            signal_record=signal_record,
+            order_record=None,
+            order_creation_result=None,
+            broker_sync_result=None,
+            message=message,
+        )
+
+================================================================================
+FILE: app\trading\paper_broker.py
+================================================================================
+"""実資金を使わずに注文・約定・ポジションを再現するPaper Broker。"""
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+from app.trading.broker_adapter import (
+    BrokerAccountSnapshot,
+    BrokerAdapter,
+    BrokerOrderNotFoundError,
+    BrokerOrderRejectedError,
+    BrokerOrderSnapshot,
+    BrokerPosition,
+    BrokerPositionSide,
+    BrokerRequestError,
+)
+from app.trading.order_models import (
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    TradeOrder,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PaperBrokerSettings:
+    """Paper Brokerの初期資金と約定条件。"""
+
+    initial_cash: float = 10_000_000.0
+    commission_per_order: float = 0.0
+    slippage_rate: float = 0.0
+    currency: str = "JPY"
+    broker_name: str = "paper"
+
+    def __post_init__(self) -> None:
+        """不正な設定を拒否して文字列を正規化する。"""
+
+        normalized_currency = self.currency.strip().upper()
+        normalized_broker_name = self.broker_name.strip()
+
+        if self.initial_cash < 0:
+            raise ValueError(
+                "初期資金は0以上である必要があります。"
+            )
+
+        if self.commission_per_order < 0:
+            raise ValueError(
+                "注文手数料は0以上である必要があります。"
+            )
+
+        if self.slippage_rate < 0:
+            raise ValueError(
+                "スリッページ率は0以上である必要があります。"
+            )
+
+        if (
+            len(normalized_currency) != 3
+            or not normalized_currency.isalpha()
+        ):
+            raise ValueError(
+                "通貨コードは英字3文字で指定してください。"
+            )
+
+        if not normalized_broker_name:
+            raise ValueError(
+                "Broker名を指定してください。"
+            )
+
+        object.__setattr__(
+            self,
+            "currency",
+            normalized_currency,
+        )
+        object.__setattr__(
+            self,
+            "broker_name",
+            normalized_broker_name,
+        )
+
+
+@dataclass(slots=True)
+class _PaperOrderState:
+    """Paper Broker内部の注文状態。"""
+
+    order: TradeOrder
+    broker_order_id: str
+    status: OrderStatus
+    filled_quantity: int
+    average_fill_price: float | None
+    submitted_at: datetime
+    updated_at: datetime
+    status_reason: str | None = None
+    stop_triggered: bool = False
+
+
+@dataclass(slots=True)
+class _PaperPositionState:
+    """Paper Broker内部のポジション状態。"""
+
+    code: str
+    side: BrokerPositionSide
+    quantity: int
+    average_price: float
+    market_price: float
+    updated_at: datetime
+
+
+class PaperBroker:
+    """市場価格を使ってPaper注文を処理するインメモリBroker。"""
+
+    def __init__(
+        self,
+        *,
+        price_provider: Callable[[str], float],
+        settings: PaperBrokerSettings | None = None,
+        now_provider: Callable[[], datetime] | None = None,
+    ) -> None:
+        """設定・現在価格取得処理・時計を受け取る。"""
+
+        self.settings = (
+            settings
+            if settings is not None
+            else PaperBrokerSettings()
+        )
+        self.price_provider = price_provider
+        self.now_provider = (
+            now_provider
+            if now_provider is not None
+            else lambda: datetime.now(timezone.utc)
+        )
+
+        self._cash_balance = self.settings.initial_cash
+
+        self._orders: dict[
+            str,
+            _PaperOrderState,
+        ] = {}
+
+        self._client_order_ids: dict[
+            str,
+            str,
+        ] = {}
+
+        self._positions: dict[
+            tuple[str, BrokerPositionSide],
+            _PaperPositionState,
+        ] = {}
+
+        self._market_prices: dict[
+            str,
+            float,
+        ] = {}
+
+        self._next_broker_order_number = 1
+
+    @property
+    def broker_name(self) -> str:
+        """Broker名を返す。"""
+
+        return self.settings.broker_name
+
+    def submit_order(
+        self,
+        order: TradeOrder,
+    ) -> BrokerOrderSnapshot:
+        """注文を登録し、条件成立時は即時約定する。"""
+
+        existing_broker_order_id = (
+            self._client_order_ids.get(
+                order.order_id,
+            )
+        )
+
+        if existing_broker_order_id is not None:
+            return self.get_order(
+                existing_broker_order_id,
+            )
+
+        current_time = self._current_time()
+        market_price = self._get_market_price(
+            order.code,
+        )
+
+        self._market_prices[
+            order.code
+        ] = market_price
+
+        broker_order_id = self._create_broker_order_id()
+
+        state = _PaperOrderState(
+            order=order,
+            broker_order_id=broker_order_id,
+            status=OrderStatus.SENT,
+            filled_quantity=0,
+            average_fill_price=None,
+            submitted_at=current_time,
+            updated_at=current_time,
+            status_reason="paper order accepted",
+        )
+
+        self._orders[
+            broker_order_id
+        ] = state
+        self._client_order_ids[
+            order.order_id
+        ] = broker_order_id
+
+        try:
+            self._process_order(
+                state=state,
+                market_price=market_price,
+                processed_at=current_time,
+            )
+
+        except Exception:
+            self._orders.pop(
+                broker_order_id,
+                None,
+            )
+            self._client_order_ids.pop(
+                order.order_id,
+                None,
+            )
+            raise
+
+        return self._to_snapshot(
+            state,
+        )
+
+    def cancel_order(
+        self,
+        broker_order_id: str,
+    ) -> BrokerOrderSnapshot:
+        """未完了注文を取り消す。"""
+
+        state = self._get_state(
+            broker_order_id,
+        )
+
+        if state.status.is_terminal:
+            raise BrokerRequestError(
+                "終了済み注文は取り消せません。 "
+                f"broker_order_id={state.broker_order_id} "
+                f"status={state.status.value}"
+            )
+
+        current_time = self._current_time()
+
+        state.status = OrderStatus.CANCELLED
+        state.updated_at = current_time
+        state.status_reason = "cancelled by client"
+
+        return self._to_snapshot(
+            state,
+        )
+
+    def get_order(
+        self,
+        broker_order_id: str,
+    ) -> BrokerOrderSnapshot:
+        """Broker注文の最新状態を返す。"""
+
+        return self._to_snapshot(
+            self._get_state(
+                broker_order_id,
+            )
+        )
+
+    def list_orders(
+        self,
+        *,
+        active_only: bool = False,
+    ) -> list[BrokerOrderSnapshot]:
+        """Broker注文一覧を新しい順に返す。"""
+
+        states = list(
+            self._orders.values()
+        )
+
+        if active_only:
+            states = [
+                state
+                for state in states
+                if not state.status.is_terminal
+            ]
+
+        sorted_states = sorted(
+            states,
+            key=lambda item: (
+                item.submitted_at,
+                item.broker_order_id,
+            ),
+            reverse=True,
+        )
+
+        return [
+            self._to_snapshot(state)
+            for state in sorted_states
+        ]
+
+    def list_positions(
+        self,
+    ) -> list[BrokerPosition]:
+        """現在保有しているポジション一覧を返す。"""
+
+        states = sorted(
+            self._positions.values(),
+            key=lambda item: (
+                item.code,
+                item.side.value,
+            ),
+        )
+
+        return [
+            BrokerPosition(
+                code=state.code,
+                side=state.side,
+                quantity=state.quantity,
+                average_price=state.average_price,
+                market_price=state.market_price,
+                updated_at=state.updated_at,
+            )
+            for state in states
+            if state.quantity > 0
+        ]
+
+    def get_account(
+        self,
+    ) -> BrokerAccountSnapshot:
+        """現金・時価総額・純資産額を返す。"""
+
+        current_time = self._current_time()
+
+        long_market_value = sum(
+            position.market_price
+            * position.quantity
+            for position in self._positions.values()
+            if position.side
+            is BrokerPositionSide.LONG
+        )
+
+        short_market_value = sum(
+            position.market_price
+            * position.quantity
+            for position in self._positions.values()
+            if position.side
+            is BrokerPositionSide.SHORT
+        )
+
+        equity = (
+            self._cash_balance
+            + long_market_value
+            - short_market_value
+        )
+
+        return BrokerAccountSnapshot(
+            currency=self.settings.currency,
+            cash_balance=self._cash_balance,
+            buying_power=self._cash_balance,
+            market_value=(
+                long_market_value
+                + short_market_value
+            ),
+            equity=equity,
+            updated_at=current_time,
+        )
+
+    def update_market_price(
+        self,
+        code: str,
+        market_price: float,
+    ) -> list[BrokerOrderSnapshot]:
+        """価格を更新し、条件成立した待機注文を処理する。"""
+
+        normalized_code = self._normalize_code(
+            code,
+        )
+
+        if market_price <= 0:
+            raise ValueError(
+                "現在価格は0より大きい必要があります。"
+            )
+
+        current_time = self._current_time()
+
+        self._market_prices[
+            normalized_code
+        ] = market_price
+
+        for (
+            position_code,
+            _position_side,
+        ), position in self._positions.items():
+            if position_code != normalized_code:
+                continue
+
+            position.market_price = market_price
+            position.updated_at = current_time
+
+        changed_snapshots: list[
+            BrokerOrderSnapshot
+        ] = []
+
+        active_states = sorted(
+            (
+                state
+                for state in self._orders.values()
+                if (
+                    state.order.code
+                    == normalized_code
+                    and not state.status.is_terminal
+                )
+            ),
+            key=lambda item: (
+                item.submitted_at,
+                item.broker_order_id,
+            ),
+        )
+
+        for state in active_states:
+            previous_status = state.status
+            previous_triggered = state.stop_triggered
+
+            self._process_order(
+                state=state,
+                market_price=market_price,
+                processed_at=current_time,
+            )
+
+            if (
+                state.status is not previous_status
+                or state.stop_triggered
+                is not previous_triggered
+            ):
+                changed_snapshots.append(
+                    self._to_snapshot(
+                        state,
+                    )
+                )
+
+        return changed_snapshots
+
+    def get_market_price(
+        self,
+        code: str,
+    ) -> float | None:
+        """Paper Brokerが保持する最新価格を返す。"""
+
+        normalized_code = self._normalize_code(
+            code,
+        )
+
+        return self._market_prices.get(
+            normalized_code,
+        )
+
+    def _process_order(
+        self,
+        *,
+        state: _PaperOrderState,
+        market_price: float,
+        processed_at: datetime,
+    ) -> None:
+        """注文種別に応じて発動・約定条件を判定する。"""
+
+        if state.status.is_terminal:
+            return
+
+        order = state.order
+
+        if order.order_type is OrderType.MARKET:
+            fill_price = self._calculate_market_fill_price(
+                side=order.side,
+                market_price=market_price,
+            )
+
+            self._execute_fill(
+                state=state,
+                fill_price=fill_price,
+                filled_at=processed_at,
+            )
+            return
+
+        if order.order_type is OrderType.LIMIT:
+            if not self._is_limit_marketable(
+                order=order,
+                market_price=market_price,
+            ):
+                state.status_reason = (
+                    "waiting for limit price"
+                )
+                return
+
+            fill_price = self._calculate_limit_fill_price(
+                order=order,
+                market_price=market_price,
+            )
+
+            self._execute_fill(
+                state=state,
+                fill_price=fill_price,
+                filled_at=processed_at,
+            )
+            return
+
+        if order.order_type is OrderType.STOP:
+            if not self._is_stop_triggered(
+                order=order,
+                market_price=market_price,
+            ):
+                state.status_reason = (
+                    "waiting for stop trigger"
+                )
+                return
+
+            state.stop_triggered = True
+
+            fill_price = self._calculate_market_fill_price(
+                side=order.side,
+                market_price=market_price,
+            )
+
+            self._execute_fill(
+                state=state,
+                fill_price=fill_price,
+                filled_at=processed_at,
+            )
+            return
+
+        if order.order_type is OrderType.STOP_LIMIT:
+            if not state.stop_triggered:
+                if not self._is_stop_triggered(
+                    order=order,
+                    market_price=market_price,
+                ):
+                    state.status_reason = (
+                        "waiting for stop trigger"
+                    )
+                    return
+
+                state.stop_triggered = True
+                state.updated_at = processed_at
+                state.status_reason = (
+                    "stop triggered; "
+                    "waiting for limit price"
+                )
+
+            if not self._is_limit_marketable(
+                order=order,
+                market_price=market_price,
+            ):
+                return
+
+            fill_price = self._calculate_limit_fill_price(
+                order=order,
+                market_price=market_price,
+            )
+
+            self._execute_fill(
+                state=state,
+                fill_price=fill_price,
+                filled_at=processed_at,
+            )
+            return
+
+        raise BrokerRequestError(
+            "未対応の注文種別です。 "
+            f"order_type={order.order_type.value}"
+        )
+
+    def _execute_fill(
+        self,
+        *,
+        state: _PaperOrderState,
+        fill_price: float,
+        filled_at: datetime,
+    ) -> None:
+        """全約定を資金とポジションへ反映する。"""
+
+        order = state.order
+
+        self._validate_execution(
+            order=order,
+            fill_price=fill_price,
+        )
+
+        gross_amount = (
+            fill_price
+            * order.quantity
+        )
+        commission = (
+            self.settings.commission_per_order
+        )
+
+        if order.side is OrderSide.BUY:
+            self._cash_balance -= (
+                gross_amount
+                + commission
+            )
+
+            self._increase_position(
+                code=order.code,
+                side=BrokerPositionSide.LONG,
+                quantity=order.quantity,
+                fill_price=fill_price,
+                filled_at=filled_at,
+            )
+
+        else:
+            self._execute_sell(
+                code=order.code,
+                quantity=order.quantity,
+                fill_price=fill_price,
+                commission=commission,
+                filled_at=filled_at,
+            )
+
+        state.status = OrderStatus.FILLED
+        state.filled_quantity = order.quantity
+        state.average_fill_price = fill_price
+        state.updated_at = filled_at
+        state.status_reason = "paper order filled"
+
+    def _execute_sell(
+        self,
+        *,
+        code: str,
+        quantity: int,
+        fill_price: float,
+        commission: float,
+        filled_at: datetime,
+    ) -> None:
+        """買いポジションを売却する。"""
+
+        position_key = (
+            code,
+            BrokerPositionSide.LONG,
+        )
+
+        position = self._positions.get(
+            position_key,
+        )
+
+        available_quantity = (
+            position.quantity
+            if position is not None
+            else 0
+        )
+
+        if available_quantity < quantity:
+            raise BrokerOrderRejectedError(
+                "売却可能数量が不足しています。 "
+                f"code={code} "
+                f"required={quantity} "
+                f"available={available_quantity}"
+            )
+
+        proceeds = (
+            fill_price
+            * quantity
+            - commission
+        )
+
+        self._cash_balance += proceeds
+
+        assert position is not None
+
+        position.quantity -= quantity
+        position.market_price = fill_price
+        position.updated_at = filled_at
+
+        if position.quantity == 0:
+            del self._positions[
+                position_key
+            ]
+
+    def _increase_position(
+        self,
+        *,
+        code: str,
+        side: BrokerPositionSide,
+        quantity: int,
+        fill_price: float,
+        filled_at: datetime,
+    ) -> None:
+        """同方向ポジションを加重平均で増加させる。"""
+
+        position_key = (
+            code,
+            side,
+        )
+
+        existing = self._positions.get(
+            position_key,
+        )
+
+        if existing is None:
+            self._positions[
+                position_key
+            ] = _PaperPositionState(
+                code=code,
+                side=side,
+                quantity=quantity,
+                average_price=fill_price,
+                market_price=fill_price,
+                updated_at=filled_at,
+            )
+            return
+
+        total_quantity = (
+            existing.quantity
+            + quantity
+        )
+
+        weighted_average = (
+            existing.average_price
+            * existing.quantity
+            + fill_price
+            * quantity
+        ) / total_quantity
+
+        existing.quantity = total_quantity
+        existing.average_price = weighted_average
+        existing.market_price = fill_price
+        existing.updated_at = filled_at
+
+    def _validate_execution(
+        self,
+        *,
+        order: TradeOrder,
+        fill_price: float,
+    ) -> None:
+        """約定直前の資金・保有数量を検証する。"""
+
+        if order.side is OrderSide.BUY:
+            required_cash = (
+                fill_price
+                * order.quantity
+                + self.settings.commission_per_order
+            )
+
+            if required_cash > self._cash_balance:
+                raise BrokerOrderRejectedError(
+                    "買付余力が不足しています。 "
+                    f"required={required_cash} "
+                    f"available={self._cash_balance}"
+                )
+            return
+
+        position = self._positions.get(
+            (
+                order.code,
+                BrokerPositionSide.LONG,
+            )
+        )
+
+        available_quantity = (
+            position.quantity
+            if position is not None
+            else 0
+        )
+
+        if available_quantity < order.quantity:
+            raise BrokerOrderRejectedError(
+                "売却可能数量が不足しています。 "
+                f"code={order.code} "
+                f"required={order.quantity} "
+                f"available={available_quantity}"
+            )
+
+    def _calculate_market_fill_price(
+        self,
+        *,
+        side: OrderSide,
+        market_price: float,
+    ) -> float:
+        """成行約定価格へスリッページを反映する。"""
+
+        if side is OrderSide.BUY:
+            return market_price * (
+                1.0
+                + self.settings.slippage_rate
+            )
+
+        return market_price * (
+            1.0
+            - self.settings.slippage_rate
+        )
+
+    def _calculate_limit_fill_price(
+        self,
+        *,
+        order: TradeOrder,
+        market_price: float,
+    ) -> float:
+        """指値より不利にならない約定価格を返す。"""
+
+        if order.limit_price is None:
+            raise BrokerRequestError(
+                "指値価格が設定されていません。"
+            )
+
+        slipped_price = (
+            self._calculate_market_fill_price(
+                side=order.side,
+                market_price=market_price,
+            )
+        )
+
+        if order.side is OrderSide.BUY:
+            return min(
+                slipped_price,
+                order.limit_price,
+            )
+
+        return max(
+            slipped_price,
+            order.limit_price,
+        )
+
+    @staticmethod
+    def _is_limit_marketable(
+        *,
+        order: TradeOrder,
+        market_price: float,
+    ) -> bool:
+        """指値注文が現在価格で約定可能か返す。"""
+
+        if order.limit_price is None:
+            return False
+
+        if order.side is OrderSide.BUY:
+            return (
+                market_price
+                <= order.limit_price
+            )
+
+        return (
+            market_price
+            >= order.limit_price
+        )
+
+    @staticmethod
+    def _is_stop_triggered(
+        *,
+        order: TradeOrder,
+        market_price: float,
+    ) -> bool:
+        """逆指値条件へ到達したか返す。"""
+
+        if order.stop_price is None:
+            return False
+
+        if order.side is OrderSide.BUY:
+            return (
+                market_price
+                >= order.stop_price
+            )
+
+        return (
+            market_price
+            <= order.stop_price
+        )
+
+    def _get_market_price(
+        self,
+        code: str,
+    ) -> float:
+        """現在価格を取得して検証する。"""
+
+        normalized_code = self._normalize_code(
+            code,
+        )
+
+        try:
+            price = float(
+                self.price_provider(
+                    normalized_code,
+                )
+            )
+
+        except Exception as error:
+            raise BrokerRequestError(
+                "現在価格を取得できませんでした。 "
+                f"code={normalized_code}"
+            ) from error
+
+        if price <= 0:
+            raise BrokerRequestError(
+                "現在価格は0より大きい必要があります。 "
+                f"code={normalized_code} "
+                f"price={price}"
+            )
+
+        return price
+
+    def _get_state(
+        self,
+        broker_order_id: str,
+    ) -> _PaperOrderState:
+        """Broker注文IDに対応する内部状態を返す。"""
+
+        normalized_broker_order_id = (
+            broker_order_id.strip()
+        )
+
+        if not normalized_broker_order_id:
+            raise ValueError(
+                "Broker注文IDを指定してください。"
+            )
+
+        state = self._orders.get(
+            normalized_broker_order_id,
+        )
+
+        if state is None:
+            raise BrokerOrderNotFoundError(
+                "指定されたPaper注文が存在しません。 "
+                f"broker_order_id="
+                f"{normalized_broker_order_id}"
+            )
+
+        return state
+
+    def _create_broker_order_id(
+        self,
+    ) -> str:
+        """連番のPaper注文IDを生成する。"""
+
+        broker_order_id = (
+            "paper-order-"
+            f"{self._next_broker_order_number:08d}"
+        )
+
+        self._next_broker_order_number += 1
+
+        return broker_order_id
+
+    def _current_time(
+        self,
+    ) -> datetime:
+        """UTCの現在日時を返す。"""
+
+        current_time = self.now_provider()
+
+        if current_time.tzinfo is None:
+            raise ValueError(
+                "現在日時にはタイムゾーンが必要です。"
+            )
+
+        return current_time.astimezone(
+            timezone.utc,
+        )
+
+    @staticmethod
+    def _normalize_code(
+        code: str,
+    ) -> str:
+        """銘柄コードを検証して正規化する。"""
+
+        normalized_code = code.strip()
+
+        if not normalized_code:
+            raise ValueError(
+                "銘柄コードを指定してください。"
+            )
+
+        if not normalized_code.isdigit():
+            raise ValueError(
+                "銘柄コードは数字で指定してください。"
+            )
+
+        if len(normalized_code) not in {
+            4,
+            5,
+        }:
+            raise ValueError(
+                "銘柄コードは4桁または5桁で"
+                "指定してください。"
+            )
+
+        return normalized_code
+
+    @staticmethod
+    def _to_snapshot(
+        state: _PaperOrderState,
+    ) -> BrokerOrderSnapshot:
+        """内部注文状態を公開Snapshotへ変換する。"""
+
+        return BrokerOrderSnapshot(
+            broker_order_id=state.broker_order_id,
+            client_order_id=state.order.order_id,
+            code=state.order.code,
+            side=state.order.side,
+            status=state.status,
+            quantity=state.order.quantity,
+            filled_quantity=state.filled_quantity,
+            average_fill_price=(
+                state.average_fill_price
+            ),
+            submitted_at=state.submitted_at,
+            updated_at=state.updated_at,
+            status_reason=state.status_reason,
+        )
+
+
+def ensure_broker_adapter(
+    broker: BrokerAdapter,
+) -> BrokerAdapter:
+    """型検査用途としてBrokerAdapterをそのまま返す。"""
+
+    return broker
+
+================================================================================
+FILE: app\trading\execution_engine.py
+================================================================================
+"""未処理シグナルを注文へ変換しBrokerへ執行するExecution Engine。"""
+
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Protocol
+
+from app.trading.order_broker_sync_service import (
+    OrderBrokerSyncResult,
+)
+from app.trading.order_models import (
+    OrderStatus,
+    OrderType,
+    TradeOrderRecord,
+)
+from app.trading.order_service import (
+    SignalOrderCreationResult,
+)
+from app.trading.signal_models import (
+    TradeSignalRecord,
+)
+
+
+class PendingSignalReader(Protocol):
+    """未処理シグナル取得処理のインターフェース。"""
+
+    def list_pending(
+        self,
+        *,
+        limit: int = 100,
+        code: str | None = None,
+        strategy_name: str | None = None,
+    ) -> list[TradeSignalRecord]:
+        """未処理シグナルを返す。"""
+
+
+class SignalOrderCreator(Protocol):
+    """シグナルから注文を作成する処理のインターフェース。"""
+
+    def create_from_signal(
+        self,
+        signal_id: str,
+        *,
+        order_type: OrderType = OrderType.MARKET,
+        limit_price: float | None = None,
+        stop_price: float | None = None,
+        continue_on_error: bool = False,
+    ) -> SignalOrderCreationResult:
+        """シグナルから注文を作成する。"""
+
+
+class OrderBrokerSynchronizer(Protocol):
+    """注文をBrokerへ送信・同期する処理のインターフェース。"""
+
+    def submit(
+        self,
+        order_id: str,
+        *,
+        continue_on_error: bool = False,
+    ) -> OrderBrokerSyncResult:
+        """注文をBrokerへ送信して状態を同期する。"""
+
+
+class ExecutionDecision(StrEnum):
+    """1件のシグナルに対する執行結果。"""
+
+    EXECUTED = "executed"
+    ACTIVE = "active"
+    TERMINAL = "terminal"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionItemResult:
+    """1件のシグナルを注文執行した結果。"""
+
+    decision: ExecutionDecision
+    signal_id: str
+    order_id: str | None
+
+    signal_record: TradeSignalRecord | None
+    order_record: TradeOrderRecord | None
+
+    order_creation_result: (
+        SignalOrderCreationResult | None
+    )
+    broker_sync_result: (
+        OrderBrokerSyncResult | None
+    )
+
+    message: str | None
+
+    @property
+    def is_executed(self) -> bool:
+        """Brokerへの送信・同期まで完了したか返す。"""
+
+        return self.decision in {
+            ExecutionDecision.EXECUTED,
+            ExecutionDecision.ACTIVE,
+            ExecutionDecision.TERMINAL,
+        }
+
+    @property
+    def is_active(self) -> bool:
+        """注文がBroker上で継続中か返す。"""
+
+        return (
+            self.decision
+            is ExecutionDecision.ACTIVE
+        )
+
+    @property
+    def is_terminal(self) -> bool:
+        """注文が終了状態になったか返す。"""
+
+        return (
+            self.decision
+            is ExecutionDecision.TERMINAL
+        )
+
+    @property
+    def is_failed(self) -> bool:
+        """処理に失敗したか返す。"""
+
+        return (
+            self.decision
+            is ExecutionDecision.FAILED
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionBatchResult:
+    """Execution Engineの一括処理結果。"""
+
+    items: tuple[
+        ExecutionItemResult,
+        ...
+    ]
+
+    @property
+    def input_count(self) -> int:
+        """処理対象シグナル数を返す。"""
+
+        return len(
+            self.items
+        )
+
+    @property
+    def executed_count(self) -> int:
+        """Broker同期まで完了した件数を返す。"""
+
+        return sum(
+            item.is_executed
+            for item in self.items
+        )
+
+    @property
+    def active_count(self) -> int:
+        """Broker上で継続中の注文件数を返す。"""
+
+        return sum(
+            item.is_active
+            for item in self.items
+        )
+
+    @property
+    def terminal_count(self) -> int:
+        """終了状態になった注文件数を返す。"""
+
+        return sum(
+            item.is_terminal
+            for item in self.items
+        )
+
+    @property
+    def failed_count(self) -> int:
+        """失敗件数を返す。"""
+
+        return sum(
+            item.is_failed
+            for item in self.items
+        )
+
+    @property
+    def order_records(
+        self,
+    ) -> tuple[
+        TradeOrderRecord,
+        ...
+    ]:
+        """取得できた注文レコード一覧を返す。"""
+
+        return tuple(
+            item.order_record
+            for item in self.items
+            if item.order_record is not None
+        )
+
+    @property
+    def is_successful(self) -> bool:
+        """失敗がないか返す。"""
+
+        return self.failed_count == 0
+
+
+class ExecutionEngine:
+    """未処理シグナルを順番に注文執行する。"""
+
+    def __init__(
+        self,
+        *,
+        signal_repository: PendingSignalReader,
+        order_service: SignalOrderCreator,
+        broker_sync_service: OrderBrokerSynchronizer,
+    ) -> None:
+        """必要なRepositoryとサービスを設定する。"""
+
+        self.signal_repository = signal_repository
+        self.order_service = order_service
+        self.broker_sync_service = broker_sync_service
+
+    def run_pending(
+        self,
+        *,
+        limit: int = 100,
+        code: str | None = None,
+        strategy_name: str | None = None,
+        order_type: OrderType = OrderType.MARKET,
+        limit_price: float | None = None,
+        stop_price: float | None = None,
+        continue_on_error: bool = True,
+    ) -> ExecutionBatchResult:
+        """未処理シグナルを古い順に注文執行する。"""
+
+        if limit <= 0:
+            raise ValueError(
+                "処理件数は0より大きい必要があります。"
+            )
+
+        pending_signals = (
+            self.signal_repository.list_pending(
+                limit=limit,
+                code=code,
+                strategy_name=strategy_name,
+            )
+        )
+
+        sorted_signals = sorted(
+            pending_signals,
+            key=lambda record: (
+                record.signal.generated_at,
+                record.signal_id,
+            ),
+        )
+
+        results: list[
+            ExecutionItemResult
+        ] = []
+
+        for signal_record in sorted_signals:
+            try:
+                item_result = self.execute_signal(
+                    signal_record.signal_id,
+                    order_type=order_type,
+                    limit_price=limit_price,
+                    stop_price=stop_price,
+                )
+
+            except Exception as error:
+                if not continue_on_error:
+                    raise
+
+                item_result = ExecutionItemResult(
+                    decision=ExecutionDecision.FAILED,
+                    signal_id=(
+                        signal_record.signal_id
+                    ),
+                    order_id=None,
+                    signal_record=signal_record,
+                    order_record=None,
+                    order_creation_result=None,
+                    broker_sync_result=None,
+                    message=str(error),
+                )
+
+            results.append(
+                item_result
+            )
+
+        return ExecutionBatchResult(
+            items=tuple(
+                results
+            ),
+        )
+
+    def execute_signal(
+        self,
+        signal_id: str,
+        *,
+        order_type: OrderType = OrderType.MARKET,
+        limit_price: float | None = None,
+        stop_price: float | None = None,
+    ) -> ExecutionItemResult:
+        """指定シグナルを注文へ変換してBrokerへ送信する。"""
+
+        normalized_signal_id = signal_id.strip()
+
+        if not normalized_signal_id:
+            raise ValueError(
+                "シグナルIDを指定してください。"
+            )
+
+        creation_result = (
+            self.order_service.create_from_signal(
+                normalized_signal_id,
+                order_type=order_type,
+                limit_price=limit_price,
+                stop_price=stop_price,
+                continue_on_error=False,
+            )
+        )
+
+        if creation_result.order_record is None:
+            raise RuntimeError(
+                "注文作成結果に注文レコードがありません。 "
+                f"signal_id={normalized_signal_id}"
+            )
+
+        order_id = (
+            creation_result
+            .order_record
+            .order_id
+        )
+
+        sync_result = (
+            self.broker_sync_service.submit(
+                order_id,
+                continue_on_error=False,
+            )
+        )
+
+        if sync_result.order_record is None:
+            raise RuntimeError(
+                "Broker同期結果に注文レコードがありません。 "
+                f"signal_id={normalized_signal_id} "
+                f"order_id={order_id}"
+            )
+
+        order_record = sync_result.order_record
+
+        decision = self._resolve_decision(
+            order_record
+        )
+
+        return ExecutionItemResult(
+            decision=decision,
+            signal_id=normalized_signal_id,
+            order_id=order_id,
+            signal_record=(
+                creation_result.signal_record
+            ),
+            order_record=order_record,
+            order_creation_result=creation_result,
+            broker_sync_result=sync_result,
+            message=None,
+        )
+
+    @staticmethod
+    def _resolve_decision(
+        order_record: TradeOrderRecord,
+    ) -> ExecutionDecision:
+        """注文状態からExecution結果を決定する。"""
+
+        if order_record.status.is_terminal:
+            return ExecutionDecision.TERMINAL
+
+        if order_record.status in {
+            OrderStatus.QUEUED,
+            OrderStatus.SENT,
+            OrderStatus.PARTIALLY_FILLED,
+        }:
+            return ExecutionDecision.ACTIVE
+
+        return ExecutionDecision.EXECUTED
+
+================================================================================
+FILE: app\runtime\paper_trading_runtime.py
+================================================================================
+"""Trading LoopとPortfolioを終日Paper Tradingとして集約する。"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from datetime import datetime, timezone
+from typing import Protocol
+
+from app.runtime.paper_trading_runtime_models import (
+    PaperTradingCycleRecord,
+    PaperTradingDailySummary,
+    PaperTradingRuntimeStatus,
+)
+from app.trading.portfolio_models import PortfolioSnapshot
+
+
+class PaperTradingCycleRunner(Protocol):
+    """終日Runtimeが利用するTrading Loop。"""
+
+    def run_cycle(self):
+        """次のTrading Cycleを実行する。"""
+
+
+class PaperTradingPortfolioReader(Protocol):
+    """終日Runtimeが利用するPortfolio取得処理。"""
+
+    def create_snapshot(
+        self,
+        *,
+        generated_at: datetime | None = None,
+    ) -> PortfolioSnapshot:
+        """現在のPortfolio Snapshotを返す。"""
+
+
+class PaperTradingRuntime:
+    """1営業日のTrading Cycleと資産推移を集約する。"""
+
+    def __init__(
+        self,
+        *,
+        cycle_runner: PaperTradingCycleRunner,
+        portfolio_reader: PaperTradingPortfolioReader,
+        now_provider: Callable[[], datetime] | None = None,
+    ) -> None:
+        """Trading Loop・Portfolio・時計を設定する。"""
+
+        self.cycle_runner = cycle_runner
+        self.portfolio_reader = portfolio_reader
+        self.now_provider = (
+            now_provider
+            if now_provider is not None
+            else lambda: datetime.now(timezone.utc)
+        )
+
+        self._started_at: datetime | None = None
+        self._records: list[PaperTradingCycleRecord] = []
+        self._initial_equity: float | None = None
+        self._status: PaperTradingRuntimeStatus | None = None
+
+    def start(self) -> None:
+        """終日Runtimeを開始する。"""
+
+        if self._status is PaperTradingRuntimeStatus.RUNNING:
+            raise RuntimeError(
+                "Paper Trading Runtimeはすでに稼働中です。"
+            )
+
+        started_at = self._current_time()
+        initial_snapshot = (
+            self.portfolio_reader.create_snapshot(
+                generated_at=started_at
+            )
+        )
+
+        self._started_at = started_at
+        self._records.clear()
+        self._initial_equity = (
+            initial_snapshot.broker_equity
+        )
+        self._status = PaperTradingRuntimeStatus.RUNNING
+
+    def run_cycle(self) -> PaperTradingCycleRecord:
+        """Trading Cycleを実行してPortfolioを記録する。"""
+
+        self._require_running()
+        cycle_result = self.cycle_runner.run_cycle()
+        snapshot = self.portfolio_reader.create_snapshot(
+            generated_at=self._current_time()
+        )
+        record = PaperTradingCycleRecord(
+            cycle_result=cycle_result,
+            portfolio_snapshot=snapshot,
+        )
+        self._records.append(record)
+
+        return record
+
+    def complete(self) -> PaperTradingDailySummary:
+        """正常終了の日次サマリーを返す。"""
+
+        return self._finalize(
+            status=PaperTradingRuntimeStatus.COMPLETED,
+            error_message=None,
+        )
+
+    def fail(
+        self,
+        *,
+        error_message: str,
+    ) -> PaperTradingDailySummary:
+        """異常終了の日次サマリーを返す。"""
+
+        normalized = error_message.strip()
+
+        if not normalized:
+            raise ValueError(
+                "異常終了メッセージを指定してください。"
+            )
+
+        return self._finalize(
+            status=PaperTradingRuntimeStatus.FAILED,
+            error_message=normalized,
+        )
+
+    def records(
+        self,
+    ) -> tuple[PaperTradingCycleRecord, ...]:
+        """現在までのCycle Recordを返す。"""
+
+        return tuple(self._records)
+
+    def _finalize(
+        self,
+        *,
+        status: PaperTradingRuntimeStatus,
+        error_message: str | None,
+    ) -> PaperTradingDailySummary:
+        """Runtimeを終了して日次集計を返す。"""
+
+        self._require_running()
+        completed_at = self._current_time()
+        final_snapshot = (
+            self.portfolio_reader.create_snapshot(
+                generated_at=completed_at
+            )
+        )
+
+        if self._started_at is None:
+            raise RuntimeError(
+                "Paper Trading Runtimeが開始されていません。"
+            )
+
+        summary = PaperTradingDailySummary(
+            trading_date=self._started_at.date(),
+            started_at=self._started_at,
+            completed_at=completed_at,
+            status=status,
+            records=tuple(self._records),
+            initial_equity=self._initial_equity,
+            final_equity=final_snapshot.broker_equity,
+            error_message=error_message,
+        )
+
+        self._status = status
+
+        return summary
+
+    def _require_running(self) -> None:
+        """稼働中でなければ例外を送出する。"""
+
+        if self._status is not PaperTradingRuntimeStatus.RUNNING:
+            raise RuntimeError(
+                "Paper Trading Runtimeが稼働していません。"
+            )
+
+    def _current_time(self) -> datetime:
+        """UTCへ正規化した現在日時を返す。"""
+
+        current = self.now_provider()
+
+        if current.tzinfo is None:
+            raise ValueError(
+                "現在日時にはタイムゾーンが必要です。"
+            )
+
+        return current.astimezone(timezone.utc)
+
+
+================================================================================
+FILE: app\runtime\paper_trading_service.py
+================================================================================
+[FILE NOT FOUND]
+
+================================================================================
+FILE: app\runtime\runtime_service.py
+================================================================================
+[FILE NOT FOUND]
+
+================================================================================
+FILE: app\run_paper_trading.py
+================================================================================
+[FILE NOT FOUND]
+
+================================================================================
+FILE: app\run_runtime.py
+================================================================================
+[FILE NOT FOUND]
+
+================================================================================
+FILE: app\main.py
+================================================================================
+"""Project KATANAの起動処理。"""
+
+from math import isinf
+
+from app.backtest.engine import BacktestEngine
+from app.backtest.service import CsvBacktestService
+from app.database import initialize_database
+from app.logger import create_logger
+from app.market.csv_reader import CsvStockReader
+from app.market.csv_repository import CsvStockRepository
+from app.market.downloader import DummyDownloader
+from app.market.repository import StockRepository
+from app.market.service import MarketDataService
+from app.market.summary import summarize_prices
+from app.settings import settings
+from app.strategy.buy_open_sell_close import (
+    BuyOpenSellCloseStrategy,
+)
+
+
+def main() -> None:
+    """アプリケーションを起動する。"""
+
+    print("=" * 50)
+    print(settings.app_name)
+    print(f"Version : {settings.version}")
+    print("=" * 50)
+
+    settings.create_directories()
+    logger = create_logger(settings.logs_dir)
+
+    logger.info("Project KATANAを起動します。")
+    logger.info("設定を読み込みました。")
+
+    initialize_database(settings.database_path)
+    logger.info("データベースを初期化しました。")
+
+    market_service = MarketDataService(
+        downloader=DummyDownloader(),
+        sqlite_repository=StockRepository(settings.database_path),
+        csv_repository=CsvStockRepository(settings.csv_dir),
+    )
+
+    import_result = market_service.import_prices()
+
+    logger.info(
+        "市場データを取り込みました。downloaded=%d database_count=%d",
+        import_result.downloaded_count,
+        import_result.database_count,
+    )
+
+    if import_result.latest_csv_path is not None:
+        csv_path = import_result.latest_csv_path
+
+        logger.info(
+            "CSVへ保存しました。path=%s",
+            csv_path,
+        )
+
+        csv_reader = CsvStockReader()
+        saved_prices = csv_reader.read(csv_path)
+        summary = summarize_prices(saved_prices)
+
+        logger.info(
+            "CSV集計: records=%d latest_close=%.2f "
+            "total_volume=%d highest=%.2f lowest=%.2f",
+            summary.record_count,
+            summary.latest_close,
+            summary.total_volume,
+            summary.highest_price,
+            summary.lowest_price,
+        )
+
+        strategy = BuyOpenSellCloseStrategy(
+            quantity=100,
+            commission=0.0,
+            slippage_rate=0.0005,
+        )
+
+        backtest_service = CsvBacktestService(
+            csv_reader=csv_reader,
+            strategy=strategy,
+            engine=BacktestEngine(),
+        )
+
+        result = backtest_service.run(csv_path)
+
+        profit_factor_text = (
+            "INF" if isinf(result.profit_factor) else f"{result.profit_factor:.2f}"
+        )
+
+        logger.info(
+            "バックテスト条件: quantity=%d commission=%.2f slippage_rate=%.4f",
+            strategy.quantity,
+            strategy.commission,
+            strategy.slippage_rate,
+        )
+
+        logger.info(
+            "バックテスト結果: trades=%d wins=%d "
+            "losses=%d breakeven=%d win_rate=%.2f%%",
+            result.trade_count,
+            result.win_count,
+            result.loss_count,
+            result.breakeven_count,
+            result.win_rate,
+        )
+
+        logger.info(
+            "バックテスト損益: total=%.2f "
+            "gross_profit=%.2f gross_loss=%.2f "
+            "average=%.2f",
+            result.total_profit,
+            result.gross_profit,
+            result.gross_loss,
+            result.average_profit,
+        )
+
+        logger.info(
+            "バックテスト指標: PF=%s expectancy=%.2f max_drawdown=%.2f",
+            profit_factor_text,
+            result.expectancy,
+            result.max_drawdown,
+        )
+
+    logger.info("Startup completed.")
+
+
+if __name__ == "__main__":
+    main()
+
+
+================================================================================
+FILE: tests\test_realtime_signal_engine.py
+================================================================================
+"""RealtimeSignalEngineのテスト。"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from app.market.models import StockPrice
+from app.market.realtime_signal_engine import (
+    RealtimeSignalEngine,
+)
+from app.market.realtime_signal_models import (
+    RealtimeSignalDecision,
+)
+from app.trading.signal_models import SignalAction
+
+
+JST = ZoneInfo("Asia/Tokyo")
+
+
+def price(
+    minute: int,
+    *,
+    high: float,
+    low: float,
+    close: float,
+    code: str = "7203",
+) -> StockPrice:
+    """ORB評価用5分足を作成する。"""
+
+    return StockPrice(
+        code=code,
+        datetime=datetime(
+            2026,
+            7,
+            17,
+            9,
+            minute,
+            tzinfo=JST,
+        ),
+        open=1000.0,
+        high=high,
+        low=low,
+        close=close,
+        volume=1000,
+    )
+
+
+def opening_and_breakout_prices(
+    code: str = "7203",
+) -> list[StockPrice]:
+    """BUYシグナルが発生する系列を返す。"""
+
+    return [
+        price(0, high=1000.0, low=990.0, close=995.0, code=code),
+        price(5, high=1000.0, low=990.0, close=998.0, code=code),
+        price(10, high=1000.0, low=995.0, close=999.0, code=code),
+        price(15, high=1000.0, low=995.0, close=999.0, code=code),
+        price(20, high=1010.0, low=999.0, close=1005.0, code=code),
+    ]
+
+
+def test_engine_generates_orb_buy_signal() -> None:
+    """オープニングレンジ突破でBUYを生成する。"""
+
+    result = RealtimeSignalEngine().process(
+        opening_and_breakout_prices()
+    )
+
+    assert result.decision is (
+        RealtimeSignalDecision.SIGNALS_GENERATED
+    )
+    assert result.processed_bar_count == 5
+    assert result.signal_count == 1
+    assert result.signals[0].action is SignalAction.BUY
+    assert result.signals[0].code == "7203"
+
+
+def test_engine_skips_duplicate_bars() -> None:
+    """同じ開始日時の足を再処理しない。"""
+
+    engine = RealtimeSignalEngine()
+    first = engine.process(
+        opening_and_breakout_prices()
+    )
+    second = engine.process(
+        opening_and_breakout_prices()
+    )
+
+    assert first.signal_count == 1
+    assert second.decision is RealtimeSignalDecision.NO_NEW_BAR
+    assert second.processed_bar_count == 0
+    assert second.skipped_duplicate_count == 5
+    assert second.signal_count == 0
+
+
+def test_engine_processes_only_incremental_bars() -> None:
+    """2回目は新しく追加された足だけ処理する。"""
+
+    engine = RealtimeSignalEngine()
+    bars = opening_and_breakout_prices()
+
+    first = engine.process(bars[:4])
+    second = engine.process(bars)
+
+    assert first.decision is RealtimeSignalDecision.BAR_PROCESSED
+    assert first.signal_count == 0
+    assert second.processed_bar_count == 1
+    assert second.skipped_duplicate_count == 4
+    assert second.signal_count == 1
+
+
+def test_engine_keeps_state_separately_by_code() -> None:
+    """戦略状態と最終処理日時を銘柄別に保持する。"""
+
+    engine = RealtimeSignalEngine()
+    result = engine.process(
+        opening_and_breakout_prices("7203")
+        + opening_and_breakout_prices("6758")
+    )
+
+    assert result.signal_count == 2
+    assert {
+        signal.code
+        for signal in result.signals
+    } == {"7203", "6758"}
+    assert engine.last_processed_at("7203") is not None
+    assert engine.last_processed_at("6758") is not None
+
+
+def test_engine_generates_take_profit_exit() -> None:
+    """BUY後の利確条件でEXITを生成する。"""
+
+    from app.backtest.orb_signal_strategy import (
+        OrbSignalStrategy,
+        OrbSignalStrategySettings,
+    )
+
+    engine = RealtimeSignalEngine(
+        strategy_factory=lambda _code: OrbSignalStrategy(
+            settings=OrbSignalStrategySettings(
+                take_profit_rate=0.01,
+            )
+        )
+    )
+    entry = opening_and_breakout_prices()
+    exit_bar = price(
+        25,
+        high=1020.0,
+        low=1000.0,
+        close=1015.0,
+    )
+
+    result = engine.process(entry + [exit_bar])
+
+    assert result.signal_count == 2
+    assert [
+        signal.action
+        for signal in result.signals
+    ] == [SignalAction.BUY, SignalAction.EXIT]
+
+
+def test_engine_returns_empty_result_for_no_input() -> None:
+    """入力なしでは安全な空結果を返す。"""
+
+    result = RealtimeSignalEngine().process(())
+
+    assert result.decision is RealtimeSignalDecision.NO_NEW_BAR
+    assert result.input_bar_count == 0
+    assert result.processed_bar_count == 0
+    assert result.signal_count == 0
+
+
+def test_engine_sorts_out_of_order_bars() -> None:
+    """順不同入力を開始日時順に処理する。"""
+
+    engine = RealtimeSignalEngine()
+    bars = opening_and_breakout_prices()
+    result = engine.process(tuple(reversed(bars)))
+
+    assert result.processed_bar_count == 5
+    assert result.signal_count == 1
+    assert engine.last_processed_at("7203") == (
+        bars[-1].datetime
+    )
+
+
+def test_engine_reset_one_code_only() -> None:
+    """指定銘柄だけ状態を初期化できる。"""
+
+    engine = RealtimeSignalEngine()
+    engine.process(
+        opening_and_breakout_prices("7203")
+        + opening_and_breakout_prices("6758")
+    )
+
+    engine.reset("7203")
+
+    assert engine.last_processed_at("7203") is None
+    assert engine.last_processed_at("6758") is not None
+
+    result = engine.process(
+        opening_and_breakout_prices("7203")
+    )
+    assert result.signal_count == 1
+
+
+def test_engine_reset_all_codes() -> None:
+    """全銘柄状態を初期化できる。"""
+
+    engine = RealtimeSignalEngine()
+    engine.process(
+        opening_and_breakout_prices()
+    )
+
+    engine.reset()
+
+    assert engine.last_processed_at("7203") is None
+
+    result = engine.process(
+        opening_and_breakout_prices()
+    )
+    assert result.signal_count == 1
+
+
+def test_engine_accepts_naive_market_datetime_as_jst() -> None:
+    """タイムゾーンなし市場時刻をJSTとして扱う。"""
+
+    bar = StockPrice(
+        code="7203",
+        datetime=datetime(2026, 7, 17, 9, 0),
+        open=1000.0,
+        high=1010.0,
+        low=990.0,
+        close=1005.0,
+        volume=1000,
+    )
+
+    engine = RealtimeSignalEngine()
+    result = engine.process((bar,))
+
+    assert result.processed_bar_count == 1
+    assert engine.last_processed_at("7203").tzinfo == JST
+

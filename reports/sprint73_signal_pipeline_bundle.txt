@@ -1,0 +1,4612 @@
+================================================================================
+FILE: app\trading\signal_models.py
+================================================================================
+"""売買シグナルの共通データモデル。"""
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import StrEnum
+from typing import Any
+
+
+class SignalAction(StrEnum):
+    """売買シグナルの指示種別。"""
+
+    BUY = "buy"
+    SELL = "sell"
+    EXIT = "exit"
+
+
+class SignalStatus(StrEnum):
+    """保存済み売買シグナルの処理状態。"""
+
+    PENDING = "pending"
+    PROCESSED = "processed"
+    CANCELLED = "cancelled"
+
+    @property
+    def is_terminal(self) -> bool:
+        """処理が終了した状態か返す。"""
+
+        return self in {
+            SignalStatus.PROCESSED,
+            SignalStatus.CANCELLED,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TradeSignal:
+    """戦略から生成された1件の売買シグナル。"""
+
+    signal_id: str
+    code: str
+    strategy_name: str
+    action: SignalAction
+    generated_at: datetime
+    signal_price: float
+    quantity: int
+    reason: str
+    confidence: float | None = None
+    metadata: dict[str, Any] = field(
+        default_factory=dict,
+    )
+
+    def __post_init__(self) -> None:
+        """不正なシグナルを拒否し、文字列を正規化する。"""
+
+        normalized_signal_id = self.signal_id.strip()
+        normalized_code = self.code.strip()
+        normalized_strategy_name = self.strategy_name.strip()
+        normalized_reason = self.reason.strip()
+
+        if not normalized_signal_id:
+            raise ValueError(
+                "シグナルIDを指定してください。"
+            )
+
+        if not normalized_code:
+            raise ValueError(
+                "銘柄コードを指定してください。"
+            )
+
+        if not normalized_code.isdigit():
+            raise ValueError(
+                "銘柄コードは数字で指定してください。"
+            )
+
+        if len(normalized_code) not in {
+            4,
+            5,
+        }:
+            raise ValueError(
+                "銘柄コードは4桁または5桁で指定してください。"
+            )
+
+        if not normalized_strategy_name:
+            raise ValueError(
+                "戦略名を指定してください。"
+            )
+
+        if not normalized_reason:
+            raise ValueError(
+                "シグナル理由を指定してください。"
+            )
+
+        if self.generated_at.tzinfo is None:
+            raise ValueError(
+                "シグナル生成日時にはタイムゾーンが必要です。"
+            )
+
+        if self.signal_price <= 0:
+            raise ValueError(
+                "シグナル価格は0より大きい必要があります。"
+            )
+
+        if self.quantity <= 0:
+            raise ValueError(
+                "数量は0より大きい必要があります。"
+            )
+
+        if self.confidence is not None and not (
+            0.0 <= self.confidence <= 1.0
+        ):
+            raise ValueError(
+                "信頼度は0以上1以下で指定してください。"
+            )
+
+        if not isinstance(
+            self.metadata,
+            dict,
+        ):
+            raise TypeError(
+                "メタデータは辞書形式で指定してください。"
+            )
+
+        object.__setattr__(
+            self,
+            "signal_id",
+            normalized_signal_id,
+        )
+        object.__setattr__(
+            self,
+            "code",
+            normalized_code,
+        )
+        object.__setattr__(
+            self,
+            "strategy_name",
+            normalized_strategy_name,
+        )
+        object.__setattr__(
+            self,
+            "reason",
+            normalized_reason,
+        )
+        object.__setattr__(
+            self,
+            "metadata",
+            dict(self.metadata),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TradeSignalRecord:
+    """SQLiteへ保存された売買シグナル。"""
+
+    id: int
+    signal: TradeSignal
+    status: SignalStatus
+    processed_at: datetime | None
+    process_note: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        """保存済みシグナルの整合性を検証する。"""
+
+        if self.id <= 0:
+            raise ValueError(
+                "保存IDは0より大きい必要があります。"
+            )
+
+        if self.created_at.tzinfo is None:
+            raise ValueError(
+                "作成日時にはタイムゾーンが必要です。"
+            )
+
+        if self.updated_at.tzinfo is None:
+            raise ValueError(
+                "更新日時にはタイムゾーンが必要です。"
+            )
+
+        if self.updated_at < self.created_at:
+            raise ValueError(
+                "更新日時は作成日時以後である必要があります。"
+            )
+
+        if (
+            self.processed_at is not None
+            and self.processed_at.tzinfo is None
+        ):
+            raise ValueError(
+                "処理日時にはタイムゾーンが必要です。"
+            )
+
+        if (
+            self.status is SignalStatus.PENDING
+            and self.processed_at is not None
+        ):
+            raise ValueError(
+                "未処理シグナルには処理日時を設定できません。"
+            )
+
+        if (
+            self.status.is_terminal
+            and self.processed_at is None
+        ):
+            raise ValueError(
+                "処理済みシグナルには処理日時が必要です。"
+            )
+
+    @property
+    def signal_id(self) -> str:
+        """シグナルIDを返す。"""
+
+        return self.signal.signal_id
+
+    @property
+    def code(self) -> str:
+        """銘柄コードを返す。"""
+
+        return self.signal.code
+
+    @property
+    def strategy_name(self) -> str:
+        """戦略名を返す。"""
+
+        return self.signal.strategy_name
+
+    @property
+    def action(self) -> SignalAction:
+        """売買指示を返す。"""
+
+        return self.signal.action
+
+    @property
+    def is_pending(self) -> bool:
+        """未処理状態か返す。"""
+
+        return self.status is SignalStatus.PENDING
+
+    @property
+    def is_processed(self) -> bool:
+        """処理済み状態か返す。"""
+
+        return self.status is SignalStatus.PROCESSED
+
+    @property
+    def is_cancelled(self) -> bool:
+        """取消済み状態か返す。"""
+
+        return self.status is SignalStatus.CANCELLED
+
+================================================================================
+FILE: app\trading\orb_signal_factory.py
+================================================================================
+"""ORB診断結果からBUYシグナルを生成する。"""
+
+import hashlib
+import json
+from dataclasses import dataclass
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from app.strategy.orb_diagnostics import (
+    OrbDailyDiagnostic,
+)
+from app.trading.signal_models import (
+    SignalAction,
+    TradeSignal,
+)
+
+
+JAPAN_TIMEZONE = ZoneInfo(
+    "Asia/Tokyo"
+)
+
+DEFAULT_ORB_STRATEGY_NAME = "orb"
+
+
+@dataclass(frozen=True, slots=True)
+class OrbSignalFactorySettings:
+    """ORBシグナル生成条件。"""
+
+    strategy_name: str = DEFAULT_ORB_STRATEGY_NAME
+    quantity: int = 100
+    confidence: float | None = None
+
+    def __post_init__(self) -> None:
+        """不正な設定を拒否する。"""
+
+        normalized_strategy_name = (
+            self.strategy_name.strip()
+        )
+
+        if not normalized_strategy_name:
+            raise ValueError(
+                "戦略名を指定してください。"
+            )
+
+        if self.quantity <= 0:
+            raise ValueError(
+                "数量は0より大きい必要があります。"
+            )
+
+        if self.confidence is not None and not (
+            0.0 <= self.confidence <= 1.0
+        ):
+            raise ValueError(
+                "信頼度は0以上1以下で指定してください。"
+            )
+
+        object.__setattr__(
+            self,
+            "strategy_name",
+            normalized_strategy_name,
+        )
+
+
+class OrbSignalFactory:
+    """ORBの日次診断候補をBUYシグナルへ変換する。"""
+
+    def __init__(
+        self,
+        *,
+        settings: OrbSignalFactorySettings | None = None,
+    ) -> None:
+        """シグナル生成条件を設定する。"""
+
+        self.settings = (
+            settings
+            if settings is not None
+            else OrbSignalFactorySettings()
+        )
+
+    def create(
+        self,
+        diagnostic: OrbDailyDiagnostic,
+    ) -> TradeSignal | None:
+        """取引候補からBUYシグナルを生成する。
+
+        候補条件を満たさない診断結果はNoneを返す。
+        """
+
+        if not diagnostic.trade_candidate:
+            return None
+
+        if diagnostic.rejection_reason:
+            raise ValueError(
+                "取引候補の診断結果に"
+                "除外理由が設定されています。 "
+                f"code={diagnostic.code} "
+                f"reason={diagnostic.rejection_reason}"
+            )
+
+        breakout_at = diagnostic.breakout_at
+        breakout_price = diagnostic.breakout_price
+
+        if breakout_at is None:
+            raise ValueError(
+                "取引候補にブレイク日時がありません。 "
+                f"code={diagnostic.code}"
+            )
+
+        if breakout_price is None:
+            raise ValueError(
+                "取引候補にブレイク価格がありません。 "
+                f"code={diagnostic.code}"
+            )
+
+        generated_at = self._normalize_market_datetime(
+            breakout_at
+        )
+
+        metadata = self._create_metadata(
+            diagnostic
+        )
+
+        signal_id = self._create_signal_id(
+            code=diagnostic.code,
+            generated_at=generated_at,
+            metadata=metadata,
+        )
+
+        return TradeSignal(
+            signal_id=signal_id,
+            code=diagnostic.code,
+            strategy_name=(
+                self.settings.strategy_name
+            ),
+            action=SignalAction.BUY,
+            generated_at=generated_at,
+            signal_price=breakout_price,
+            quantity=self.settings.quantity,
+            reason="opening_range_breakout",
+            confidence=self.settings.confidence,
+            metadata=metadata,
+        )
+
+    def create_many(
+        self,
+        diagnostics: list[OrbDailyDiagnostic],
+    ) -> list[TradeSignal]:
+        """複数診断結果からBUYシグナル一覧を生成する。"""
+
+        signals: list[TradeSignal] = []
+
+        for diagnostic in diagnostics:
+            signal = self.create(
+                diagnostic
+            )
+
+            if signal is not None:
+                signals.append(
+                    signal
+                )
+
+        return sorted(
+            signals,
+            key=lambda signal: (
+                signal.generated_at,
+                signal.code,
+                signal.signal_id,
+            ),
+        )
+
+    def _create_signal_id(
+        self,
+        *,
+        code: str,
+        generated_at: datetime,
+        metadata: dict[str, object],
+    ) -> str:
+        """シグナル内容から再現可能なIDを生成する。"""
+
+        identity = {
+            "code": code,
+            "strategy_name": (
+                self.settings.strategy_name
+            ),
+            "action": SignalAction.BUY.value,
+            "generated_at": (
+                generated_at.isoformat()
+            ),
+            "metadata": metadata,
+        }
+
+        identity_json = json.dumps(
+            identity,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(
+                ",",
+                ":",
+            ),
+        )
+
+        digest = hashlib.sha256(
+            identity_json.encode(
+                "utf-8"
+            )
+        ).hexdigest()[:24]
+
+        return (
+            f"{self.settings.strategy_name}"
+            f"-{code}-{digest}"
+        )
+
+    @staticmethod
+    def _create_metadata(
+        diagnostic: OrbDailyDiagnostic,
+    ) -> dict[str, object]:
+        """ORB診断内容をシグナルメタデータへ変換する。"""
+
+        return {
+            "trading_date": (
+                diagnostic.trading_date.isoformat()
+            ),
+            "bar_count": diagnostic.bar_count,
+            "opening_bar_count": (
+                diagnostic.opening_bar_count
+            ),
+            "opening_range_high": (
+                diagnostic.opening_range_high
+            ),
+            "opening_range_volume": (
+                diagnostic.opening_range_volume
+            ),
+            "opening_range_turnover": (
+                diagnostic.opening_range_turnover
+            ),
+            "average_opening_volume": (
+                diagnostic.average_opening_volume
+            ),
+            "breakout_price": (
+                diagnostic.breakout_price
+            ),
+            "breakout_volume": (
+                diagnostic.breakout_volume
+            ),
+            "breakout_volume_ratio": (
+                diagnostic.breakout_volume_ratio
+            ),
+            "breakout_turnover": (
+                diagnostic.breakout_turnover
+            ),
+            "trade_candidate": (
+                diagnostic.trade_candidate
+            ),
+        }
+
+    @staticmethod
+    def _normalize_market_datetime(
+        value: datetime,
+    ) -> datetime:
+        """市場日時をAsia/Tokyoの日時へ正規化する。"""
+
+        if value.tzinfo is None:
+            return value.replace(
+                tzinfo=JAPAN_TIMEZONE
+            )
+
+        return value.astimezone(
+            JAPAN_TIMEZONE
+        )
+
+================================================================================
+FILE: app\trading\orb_signal_service.py
+================================================================================
+"""5分足からORBシグナルを生成してSQLiteへ保存する。"""
+
+from dataclasses import dataclass
+from typing import Protocol
+
+from app.market.models import StockPrice
+from app.strategy.orb_diagnostics import (
+    OrbDiagnosticReport,
+    OrbDiagnosticService,
+)
+from app.trading.orb_signal_factory import (
+    OrbSignalFactory,
+)
+from app.trading.signal_models import (
+    TradeSignal,
+    TradeSignalRecord,
+)
+from app.trading.signal_repository import (
+    DuplicateSignalError,
+)
+
+
+class TradeSignalWriter(Protocol):
+    """売買シグナル保存処理のインターフェース。"""
+
+    def save(
+        self,
+        signal: TradeSignal,
+    ) -> TradeSignalRecord:
+        """シグナルを保存する。"""
+
+
+@dataclass(frozen=True, slots=True)
+class OrbSignalGenerationFailure:
+    """ORBシグナル保存失敗。"""
+
+    signal_id: str
+    code: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class OrbSignalGenerationResult:
+    """ORBシグナル生成処理の結果。"""
+
+    diagnostic_report: OrbDiagnosticReport
+    generated_signals: tuple[
+        TradeSignal,
+        ...
+    ]
+    saved_records: tuple[
+        TradeSignalRecord,
+        ...
+    ]
+    duplicate_signals: tuple[
+        TradeSignal,
+        ...
+    ]
+    failures: tuple[
+        OrbSignalGenerationFailure,
+        ...
+    ]
+
+    @property
+    def diagnostic_count(self) -> int:
+        """診断した銘柄・営業日数を返す。"""
+
+        return (
+            self.diagnostic_report
+            .trading_day_count
+        )
+
+    @property
+    def candidate_count(self) -> int:
+        """ORB候補件数を返す。"""
+
+        return (
+            self.diagnostic_report
+            .trade_candidate_count
+        )
+
+    @property
+    def generated_count(self) -> int:
+        """生成したシグナル件数を返す。"""
+
+        return len(
+            self.generated_signals
+        )
+
+    @property
+    def saved_count(self) -> int:
+        """新規保存した件数を返す。"""
+
+        return len(
+            self.saved_records
+        )
+
+    @property
+    def duplicate_count(self) -> int:
+        """重複としてスキップした件数を返す。"""
+
+        return len(
+            self.duplicate_signals
+        )
+
+    @property
+    def failed_count(self) -> int:
+        """保存に失敗した件数を返す。"""
+
+        return len(
+            self.failures
+        )
+
+    @property
+    def is_successful(self) -> bool:
+        """重複以外の保存失敗がないか返す。"""
+
+        return self.failed_count == 0
+
+
+class OrbSignalGenerationService:
+    """ORB診断・シグナル生成・永続化を実行する。"""
+
+    def __init__(
+        self,
+        *,
+        diagnostic_service: OrbDiagnosticService,
+        signal_factory: OrbSignalFactory,
+        signal_repository: TradeSignalWriter,
+    ) -> None:
+        """必要な診断・生成・保存処理を設定する。"""
+
+        self.diagnostic_service = (
+            diagnostic_service
+        )
+        self.signal_factory = (
+            signal_factory
+        )
+        self.signal_repository = (
+            signal_repository
+        )
+
+    def run(
+        self,
+        prices: list[StockPrice],
+        *,
+        continue_on_error: bool = True,
+    ) -> OrbSignalGenerationResult:
+        """5分足からORBシグナルを生成して保存する。"""
+
+        diagnostic_report = (
+            self.diagnostic_service.run(
+                prices
+            )
+        )
+
+        generated_signals = (
+            self.signal_factory.create_many(
+                diagnostic_report.daily_results
+            )
+        )
+
+        saved_records: list[
+            TradeSignalRecord
+        ] = []
+        duplicate_signals: list[
+            TradeSignal
+        ] = []
+        failures: list[
+            OrbSignalGenerationFailure
+        ] = []
+
+        for signal in generated_signals:
+            try:
+                record = (
+                    self.signal_repository.save(
+                        signal
+                    )
+                )
+
+            except DuplicateSignalError:
+                duplicate_signals.append(
+                    signal
+                )
+                continue
+
+            except Exception as error:
+                if not continue_on_error:
+                    raise
+
+                failures.append(
+                    OrbSignalGenerationFailure(
+                        signal_id=(
+                            signal.signal_id
+                        ),
+                        code=signal.code,
+                        message=str(error),
+                    )
+                )
+                continue
+
+            saved_records.append(
+                record
+            )
+
+        return OrbSignalGenerationResult(
+            diagnostic_report=(
+                diagnostic_report
+            ),
+            generated_signals=tuple(
+                generated_signals
+            ),
+            saved_records=tuple(
+                saved_records
+            ),
+            duplicate_signals=tuple(
+                duplicate_signals
+            ),
+            failures=tuple(
+                failures
+            ),
+        )
+
+================================================================================
+FILE: app\trading\signal_deduplication_service.py
+================================================================================
+"""営業日単位で売買シグナルの重複を判定・抑止する。"""
+
+from dataclasses import dataclass
+from datetime import date
+from enum import StrEnum
+from typing import Protocol
+from zoneinfo import ZoneInfo
+
+from app.trading.signal_models import (
+    SignalAction,
+    SignalStatus,
+    TradeSignal,
+    TradeSignalRecord,
+)
+from app.trading.signal_repository import (
+    DuplicateSignalError,
+)
+
+
+JAPAN_TIMEZONE = ZoneInfo(
+    "Asia/Tokyo",
+)
+
+
+class SignalDeduplicationDecision(StrEnum):
+    """重複判定結果。"""
+
+    ACCEPTED = "accepted"
+    DUPLICATE = "duplicate"
+    FAILED = "failed"
+
+
+class TradeSignalRepositoryReaderWriter(Protocol):
+    """重複判定で使用するSignalRepositoryのインターフェース。"""
+
+    def list_recent(
+        self,
+        *,
+        limit: int = 100,
+        code: str | None = None,
+        strategy_name: str | None = None,
+        status: SignalStatus | None = None,
+        action: SignalAction | None = None,
+    ) -> list[TradeSignalRecord]:
+        """条件に一致するシグナルを新しい順に返す。"""
+
+    def save(
+        self,
+        signal: TradeSignal,
+    ) -> TradeSignalRecord:
+        """シグナルを保存する。"""
+
+
+@dataclass(frozen=True, slots=True)
+class SignalDeduplicationResult:
+    """1件のシグナルに対する重複判定・保存結果。"""
+
+    decision: SignalDeduplicationDecision
+    signal: TradeSignal
+    trading_date: date
+
+    saved_record: TradeSignalRecord | None
+    duplicate_record: TradeSignalRecord | None
+    message: str | None
+
+    @property
+    def is_accepted(self) -> bool:
+        """新規採用されたか返す。"""
+
+        return (
+            self.decision
+            is SignalDeduplicationDecision.ACCEPTED
+        )
+
+    @property
+    def is_duplicate(self) -> bool:
+        """重複として拒否されたか返す。"""
+
+        return (
+            self.decision
+            is SignalDeduplicationDecision.DUPLICATE
+        )
+
+    @property
+    def is_failed(self) -> bool:
+        """判定または保存に失敗したか返す。"""
+
+        return (
+            self.decision
+            is SignalDeduplicationDecision.FAILED
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SignalDeduplicationBatchResult:
+    """複数シグナルの重複判定結果。"""
+
+    results: tuple[
+        SignalDeduplicationResult,
+        ...,
+    ]
+
+    @property
+    def input_count(self) -> int:
+        """入力シグナル数を返す。"""
+
+        return len(
+            self.results,
+        )
+
+    @property
+    def accepted_count(self) -> int:
+        """採用件数を返す。"""
+
+        return sum(
+            result.is_accepted
+            for result in self.results
+        )
+
+    @property
+    def duplicate_count(self) -> int:
+        """重複件数を返す。"""
+
+        return sum(
+            result.is_duplicate
+            for result in self.results
+        )
+
+    @property
+    def failed_count(self) -> int:
+        """失敗件数を返す。"""
+
+        return sum(
+            result.is_failed
+            for result in self.results
+        )
+
+    @property
+    def saved_records(
+        self,
+    ) -> tuple[
+        TradeSignalRecord,
+        ...,
+    ]:
+        """新規保存されたレコードを返す。"""
+
+        return tuple(
+            result.saved_record
+            for result in self.results
+            if result.saved_record is not None
+        )
+
+    @property
+    def is_successful(self) -> bool:
+        """保存失敗がないか返す。"""
+
+        return self.failed_count == 0
+
+
+class SignalDeduplicationService:
+    """同一営業日の同種シグナルを保存前に抑止する。"""
+
+    BLOCKING_STATUSES = frozenset(
+        {
+            SignalStatus.PENDING,
+            SignalStatus.PROCESSED,
+        }
+    )
+
+    def __init__(
+        self,
+        repository: TradeSignalRepositoryReaderWriter,
+        *,
+        search_limit: int = 1000,
+    ) -> None:
+        """SignalRepositoryと検索上限を設定する。"""
+
+        if search_limit <= 0:
+            raise ValueError(
+                "重複検索件数は0より大きい必要があります。"
+            )
+
+        self.repository = repository
+        self.search_limit = search_limit
+
+    def save_if_unique(
+        self,
+        signal: TradeSignal,
+        *,
+        continue_on_error: bool = True,
+    ) -> SignalDeduplicationResult:
+        """営業日内で重複していなければシグナルを保存する。"""
+
+        trading_date = self.resolve_trading_date(
+            signal,
+        )
+
+        try:
+            duplicate_record = self.find_duplicate(
+                signal,
+            )
+
+            if duplicate_record is not None:
+                return SignalDeduplicationResult(
+                    decision=(
+                        SignalDeduplicationDecision.DUPLICATE
+                    ),
+                    signal=signal,
+                    trading_date=trading_date,
+                    saved_record=None,
+                    duplicate_record=duplicate_record,
+                    message=(
+                        "同一営業日に有効な同種シグナルが"
+                        "既に存在します。 "
+                        f"existing_signal_id="
+                        f"{duplicate_record.signal_id}"
+                    ),
+                )
+
+            saved_record = self.repository.save(
+                signal,
+            )
+
+        except DuplicateSignalError:
+            concurrent_duplicate = self.find_duplicate(
+                signal,
+            )
+
+            return SignalDeduplicationResult(
+                decision=(
+                    SignalDeduplicationDecision.DUPLICATE
+                ),
+                signal=signal,
+                trading_date=trading_date,
+                saved_record=None,
+                duplicate_record=concurrent_duplicate,
+                message=(
+                    "同一シグナルが同時実行により"
+                    "先に保存されました。"
+                ),
+            )
+
+        except Exception as error:
+            if not continue_on_error:
+                raise
+
+            return SignalDeduplicationResult(
+                decision=(
+                    SignalDeduplicationDecision.FAILED
+                ),
+                signal=signal,
+                trading_date=trading_date,
+                saved_record=None,
+                duplicate_record=None,
+                message=str(
+                    error,
+                ),
+            )
+
+        return SignalDeduplicationResult(
+            decision=(
+                SignalDeduplicationDecision.ACCEPTED
+            ),
+            signal=signal,
+            trading_date=trading_date,
+            saved_record=saved_record,
+            duplicate_record=None,
+            message=None,
+        )
+
+    def save_many(
+        self,
+        signals: list[TradeSignal],
+        *,
+        continue_on_error: bool = True,
+    ) -> SignalDeduplicationBatchResult:
+        """複数シグナルを順番に重複判定して保存する。"""
+
+        results: list[
+            SignalDeduplicationResult
+        ] = []
+
+        for signal in sorted(
+            signals,
+            key=lambda item: (
+                item.generated_at,
+                item.code,
+                item.strategy_name,
+                item.action.value,
+                item.signal_id,
+            ),
+        ):
+            result = self.save_if_unique(
+                signal,
+                continue_on_error=continue_on_error,
+            )
+
+            results.append(
+                result,
+            )
+
+        return SignalDeduplicationBatchResult(
+            results=tuple(
+                results,
+            ),
+        )
+
+    def find_duplicate(
+        self,
+        signal: TradeSignal,
+    ) -> TradeSignalRecord | None:
+        """同一営業日の有効な同種シグナルを返す。"""
+
+        trading_date = self.resolve_trading_date(
+            signal,
+        )
+
+        records = self.repository.list_recent(
+            limit=self.search_limit,
+            code=signal.code,
+            strategy_name=signal.strategy_name,
+            action=signal.action,
+        )
+
+        for record in records:
+            if (
+                record.status
+                not in self.BLOCKING_STATUSES
+            ):
+                continue
+
+            existing_trading_date = (
+                self.resolve_trading_date(
+                    record.signal,
+                )
+            )
+
+            if (
+                existing_trading_date
+                == trading_date
+            ):
+                return record
+
+        return None
+
+    @staticmethod
+    def resolve_trading_date(
+        signal: TradeSignal,
+    ) -> date:
+        """シグナル生成日時を日本時間の営業日へ変換する。"""
+
+        if signal.generated_at.tzinfo is None:
+            raise ValueError(
+                "シグナル生成日時には"
+                "タイムゾーンが必要です。"
+            )
+
+        return (
+            signal.generated_at
+            .astimezone(
+                JAPAN_TIMEZONE,
+            )
+            .date()
+        )
+
+================================================================================
+FILE: app\trading\signal_repository.py
+================================================================================
+"""売買シグナルをSQLiteへ保存・取得するRepository。"""
+
+import json
+import sqlite3
+from collections.abc import Callable
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from app.trading.signal_models import (
+    SignalAction,
+    SignalStatus,
+    TradeSignal,
+    TradeSignalRecord,
+)
+
+
+class SignalRepositoryError(RuntimeError):
+    """売買シグナルRepositoryの基底例外。"""
+
+
+class SignalNotFoundError(SignalRepositoryError):
+    """指定された売買シグナルが存在しないことを表す。"""
+
+
+class DuplicateSignalError(SignalRepositoryError):
+    """同一シグナルが既に保存されていることを表す。"""
+
+
+class SignalStateTransitionError(SignalRepositoryError):
+    """許可されないシグナル状態遷移を表す。"""
+
+
+class SignalRepository:
+    """売買シグナルをSQLiteで管理する。"""
+
+    def __init__(
+        self,
+        database_path: Path,
+        *,
+        now_provider: Callable[[], datetime] | None = None,
+    ) -> None:
+        """DBパスと現在日時取得処理を設定する。"""
+
+        self.database_path = database_path
+        self.now_provider = (
+            now_provider
+            if now_provider is not None
+            else lambda: datetime.now(timezone.utc)
+        )
+
+    def save(
+        self,
+        signal: TradeSignal,
+    ) -> TradeSignalRecord:
+        """売買シグナルを未処理状態で保存する。"""
+
+        current_time = self._current_time()
+        metadata_json = self._serialize_metadata(
+            signal.metadata,
+        )
+
+        try:
+            with sqlite3.connect(
+                self.database_path,
+            ) as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO trade_signals (
+                        signal_id,
+                        code,
+                        strategy_name,
+                        action,
+                        generated_at,
+                        signal_price,
+                        quantity,
+                        reason,
+                        confidence,
+                        metadata_json,
+                        status,
+                        processed_at,
+                        process_note,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (
+                        ?,
+                        ?,
+                        ?,
+                        ?,
+                        ?,
+                        ?,
+                        ?,
+                        ?,
+                        ?,
+                        ?,
+                        ?,
+                        NULL,
+                        NULL,
+                        ?,
+                        ?
+                    )
+                    """,
+                    (
+                        signal.signal_id,
+                        signal.code,
+                        signal.strategy_name,
+                        signal.action.value,
+                        (
+                            signal.generated_at
+                            .astimezone(timezone.utc)
+                            .isoformat()
+                        ),
+                        signal.signal_price,
+                        signal.quantity,
+                        signal.reason,
+                        signal.confidence,
+                        metadata_json,
+                        SignalStatus.PENDING.value,
+                        current_time.isoformat(),
+                        current_time.isoformat(),
+                    ),
+                )
+
+                connection.commit()
+
+                record_id = int(
+                    cursor.lastrowid,
+                )
+
+        except sqlite3.IntegrityError as error:
+            raise DuplicateSignalError(
+                "同一の売買シグナルが既に存在します。 "
+                f"signal_id={signal.signal_id} "
+                f"code={signal.code} "
+                f"strategy={signal.strategy_name} "
+                f"action={signal.action.value} "
+                f"generated_at="
+                f"{signal.generated_at.isoformat()}"
+            ) from error
+
+        except sqlite3.Error as error:
+            raise SignalRepositoryError(
+                "売買シグナルを保存できませんでした。 "
+                f"signal_id={signal.signal_id}"
+            ) from error
+
+        return self._create_record(
+            record_id=record_id,
+            signal=signal,
+            status=SignalStatus.PENDING,
+            processed_at=None,
+            process_note=None,
+            created_at=current_time,
+            updated_at=current_time,
+        )
+
+    def get(
+        self,
+        signal_id: str,
+    ) -> TradeSignalRecord:
+        """シグナルIDに一致する保存済みシグナルを返す。"""
+
+        normalized_signal_id = self._normalize_signal_id(
+            signal_id,
+        )
+
+        try:
+            with sqlite3.connect(
+                self.database_path,
+            ) as connection:
+                row = connection.execute(
+                    self._select_sql()
+                    + """
+                    WHERE signal_id = ?
+                    """,
+                    (
+                        normalized_signal_id,
+                    ),
+                ).fetchone()
+
+        except sqlite3.Error as error:
+            raise SignalRepositoryError(
+                "売買シグナルを読み込めませんでした。 "
+                f"signal_id={normalized_signal_id}"
+            ) from error
+
+        if row is None:
+            raise SignalNotFoundError(
+                "指定された売買シグナルが存在しません。 "
+                f"signal_id={normalized_signal_id}"
+            )
+
+        return self._row_to_record(
+            row,
+        )
+
+    def latest(
+        self,
+        *,
+        code: str | None = None,
+        strategy_name: str | None = None,
+        status: SignalStatus | None = None,
+    ) -> TradeSignalRecord | None:
+        """条件に一致する最新シグナルを返す。"""
+
+        records = self.list_recent(
+            limit=1,
+            code=code,
+            strategy_name=strategy_name,
+            status=status,
+        )
+
+        if not records:
+            return None
+
+        return records[0]
+
+    def list_recent(
+        self,
+        *,
+        limit: int = 100,
+        code: str | None = None,
+        strategy_name: str | None = None,
+        status: SignalStatus | None = None,
+        action: SignalAction | None = None,
+    ) -> list[TradeSignalRecord]:
+        """条件に一致するシグナルを新しい順に返す。"""
+
+        if limit <= 0:
+            raise ValueError(
+                "取得件数は0より大きい必要があります。"
+            )
+
+        conditions: list[str] = []
+        parameters: list[object] = []
+
+        if code is not None:
+            conditions.append(
+                "code = ?",
+            )
+            parameters.append(
+                self._normalize_code(code),
+            )
+
+        if strategy_name is not None:
+            conditions.append(
+                "strategy_name = ?",
+            )
+            parameters.append(
+                self._normalize_strategy_name(
+                    strategy_name,
+                ),
+            )
+
+        if status is not None:
+            conditions.append(
+                "status = ?",
+            )
+            parameters.append(
+                status.value,
+            )
+
+        if action is not None:
+            conditions.append(
+                "action = ?",
+            )
+            parameters.append(
+                action.value,
+            )
+
+        where_clause = ""
+
+        if conditions:
+            where_clause = (
+                "WHERE "
+                + " AND ".join(conditions)
+            )
+
+        parameters.append(
+            limit,
+        )
+
+        try:
+            with sqlite3.connect(
+                self.database_path,
+            ) as connection:
+                rows = connection.execute(
+                    self._select_sql()
+                    + f"""
+                    {where_clause}
+                    ORDER BY generated_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    parameters,
+                ).fetchall()
+
+        except sqlite3.Error as error:
+            raise SignalRepositoryError(
+                "売買シグナル一覧を読み込めませんでした。"
+            ) from error
+
+        return [
+            self._row_to_record(row)
+            for row in rows
+        ]
+
+    def list_pending(
+        self,
+        *,
+        limit: int = 100,
+        code: str | None = None,
+        strategy_name: str | None = None,
+    ) -> list[TradeSignalRecord]:
+        """未処理シグナルを新しい順に返す。"""
+
+        return self.list_recent(
+            limit=limit,
+            code=code,
+            strategy_name=strategy_name,
+            status=SignalStatus.PENDING,
+        )
+
+    def mark_processed(
+        self,
+        signal_id: str,
+        *,
+        process_note: str | None = None,
+    ) -> TradeSignalRecord:
+        """未処理シグナルを処理済みに更新する。"""
+
+        return self._finish_signal(
+            signal_id=signal_id,
+            target_status=SignalStatus.PROCESSED,
+            process_note=process_note,
+        )
+
+    def cancel(
+        self,
+        signal_id: str,
+        *,
+        process_note: str | None = None,
+    ) -> TradeSignalRecord:
+        """未処理シグナルを取消済みに更新する。"""
+
+        return self._finish_signal(
+            signal_id=signal_id,
+            target_status=SignalStatus.CANCELLED,
+            process_note=process_note,
+        )
+
+    def count(
+        self,
+        *,
+        code: str | None = None,
+        strategy_name: str | None = None,
+        status: SignalStatus | None = None,
+        action: SignalAction | None = None,
+    ) -> int:
+        """条件に一致するシグナル件数を返す。"""
+
+        conditions: list[str] = []
+        parameters: list[object] = []
+
+        if code is not None:
+            conditions.append(
+                "code = ?",
+            )
+            parameters.append(
+                self._normalize_code(code),
+            )
+
+        if strategy_name is not None:
+            conditions.append(
+                "strategy_name = ?",
+            )
+            parameters.append(
+                self._normalize_strategy_name(
+                    strategy_name,
+                ),
+            )
+
+        if status is not None:
+            conditions.append(
+                "status = ?",
+            )
+            parameters.append(
+                status.value,
+            )
+
+        if action is not None:
+            conditions.append(
+                "action = ?",
+            )
+            parameters.append(
+                action.value,
+            )
+
+        where_clause = ""
+
+        if conditions:
+            where_clause = (
+                "WHERE "
+                + " AND ".join(conditions)
+            )
+
+        try:
+            with sqlite3.connect(
+                self.database_path,
+            ) as connection:
+                row = connection.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM trade_signals
+                    {where_clause}
+                    """,
+                    parameters,
+                ).fetchone()
+
+        except sqlite3.Error as error:
+            raise SignalRepositoryError(
+                "売買シグナル件数を取得できませんでした。"
+            ) from error
+
+        if row is None:
+            return 0
+
+        return int(
+            row[0],
+        )
+
+    def _finish_signal(
+        self,
+        *,
+        signal_id: str,
+        target_status: SignalStatus,
+        process_note: str | None,
+    ) -> TradeSignalRecord:
+        """未処理シグナルを終了状態へ更新する。"""
+
+        normalized_signal_id = self._normalize_signal_id(
+            signal_id,
+        )
+
+        if not target_status.is_terminal:
+            raise ValueError(
+                "終了状態を指定してください。"
+            )
+
+        current_record = self.get(
+            normalized_signal_id,
+        )
+
+        if not current_record.is_pending:
+            raise SignalStateTransitionError(
+                "未処理ではない売買シグナルは"
+                "状態変更できません。 "
+                f"signal_id={normalized_signal_id} "
+                f"status={current_record.status.value}"
+            )
+
+        normalized_process_note = (
+            process_note.strip()
+            if process_note is not None
+            else None
+        )
+
+        if normalized_process_note == "":
+            normalized_process_note = None
+
+        processed_at = self._current_time()
+
+        if processed_at < current_record.created_at:
+            raise ValueError(
+                "処理日時は作成日時以後である必要があります。"
+            )
+
+        try:
+            with sqlite3.connect(
+                self.database_path,
+            ) as connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE trade_signals
+                    SET
+                        status = ?,
+                        processed_at = ?,
+                        process_note = ?,
+                        updated_at = ?
+                    WHERE signal_id = ?
+                      AND status = ?
+                    """,
+                    (
+                        target_status.value,
+                        processed_at.isoformat(),
+                        normalized_process_note,
+                        processed_at.isoformat(),
+                        normalized_signal_id,
+                        SignalStatus.PENDING.value,
+                    ),
+                )
+
+                connection.commit()
+
+                if cursor.rowcount != 1:
+                    raise SignalStateTransitionError(
+                        "売買シグナルの状態を"
+                        "更新できませんでした。 "
+                        f"signal_id={normalized_signal_id}"
+                    )
+
+        except SignalStateTransitionError:
+            raise
+
+        except sqlite3.Error as error:
+            raise SignalRepositoryError(
+                "売買シグナルの状態を"
+                "更新できませんでした。 "
+                f"signal_id={normalized_signal_id}"
+            ) from error
+
+        return self.get(
+            normalized_signal_id,
+        )
+
+    def _current_time(
+        self,
+    ) -> datetime:
+        """UTCの現在日時を返す。"""
+
+        current_time = self.now_provider()
+
+        if current_time.tzinfo is None:
+            raise ValueError(
+                "現在日時にはタイムゾーンが必要です。"
+            )
+
+        return current_time.astimezone(
+            timezone.utc,
+        )
+
+    @staticmethod
+    def _serialize_metadata(
+        metadata: dict[str, Any],
+    ) -> str:
+        """メタデータをJSON文字列へ変換する。"""
+
+        try:
+            return json.dumps(
+                metadata,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(
+                    ",",
+                    ":",
+                ),
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ) as error:
+            raise ValueError(
+                "シグナルのメタデータを"
+                "JSONへ変換できません。"
+            ) from error
+
+    @staticmethod
+    def _deserialize_metadata(
+        raw_metadata: object,
+    ) -> dict[str, Any]:
+        """JSON文字列からメタデータを復元する。"""
+
+        try:
+            parsed = json.loads(
+                str(raw_metadata),
+            )
+
+        except json.JSONDecodeError as error:
+            raise SignalRepositoryError(
+                "保存済みシグナルのメタデータが"
+                "不正なJSONです。"
+            ) from error
+
+        if not isinstance(
+            parsed,
+            dict,
+        ):
+            raise SignalRepositoryError(
+                "保存済みシグナルのメタデータは"
+                "辞書形式である必要があります。"
+            )
+
+        return parsed
+
+    @staticmethod
+    def _normalize_signal_id(
+        signal_id: str,
+    ) -> str:
+        """シグナルIDを検証して正規化する。"""
+
+        normalized_signal_id = signal_id.strip()
+
+        if not normalized_signal_id:
+            raise ValueError(
+                "シグナルIDを指定してください。"
+            )
+
+        return normalized_signal_id
+
+    @staticmethod
+    def _normalize_code(
+        code: str,
+    ) -> str:
+        """銘柄コードを検証して正規化する。"""
+
+        normalized_code = code.strip()
+
+        if not normalized_code:
+            raise ValueError(
+                "銘柄コードを指定してください。"
+            )
+
+        if not normalized_code.isdigit():
+            raise ValueError(
+                "銘柄コードは数字で指定してください。"
+            )
+
+        if len(normalized_code) not in {
+            4,
+            5,
+        }:
+            raise ValueError(
+                "銘柄コードは4桁または5桁で指定してください。"
+            )
+
+        return normalized_code
+
+    @staticmethod
+    def _normalize_strategy_name(
+        strategy_name: str,
+    ) -> str:
+        """戦略名を検証して正規化する。"""
+
+        normalized_strategy_name = (
+            strategy_name.strip()
+        )
+
+        if not normalized_strategy_name:
+            raise ValueError(
+                "戦略名を指定してください。"
+            )
+
+        return normalized_strategy_name
+
+    @staticmethod
+    def _select_sql() -> str:
+        """シグナル取得用SELECT文を返す。"""
+
+        return """
+            SELECT
+                id,
+                signal_id,
+                code,
+                strategy_name,
+                action,
+                generated_at,
+                signal_price,
+                quantity,
+                reason,
+                confidence,
+                metadata_json,
+                status,
+                processed_at,
+                process_note,
+                created_at,
+                updated_at
+            FROM trade_signals
+        """
+
+    @classmethod
+    def _row_to_record(
+        cls,
+        row: tuple[object, ...],
+    ) -> TradeSignalRecord:
+        """SQLiteの1行を保存済みシグナルへ変換する。"""
+
+        signal = TradeSignal(
+            signal_id=str(row[1]),
+            code=str(row[2]),
+            strategy_name=str(row[3]),
+            action=SignalAction(
+                str(row[4]),
+            ),
+            generated_at=datetime.fromisoformat(
+                str(row[5]),
+            ),
+            signal_price=float(row[6]),
+            quantity=int(row[7]),
+            reason=str(row[8]),
+            confidence=(
+                float(row[9])
+                if row[9] is not None
+                else None
+            ),
+            metadata=cls._deserialize_metadata(
+                row[10],
+            ),
+        )
+
+        processed_at = (
+            datetime.fromisoformat(
+                str(row[12]),
+            )
+            if row[12] is not None
+            else None
+        )
+
+        process_note = (
+            str(row[13])
+            if row[13] is not None
+            else None
+        )
+
+        return cls._create_record(
+            record_id=int(row[0]),
+            signal=signal,
+            status=SignalStatus(
+                str(row[11]),
+            ),
+            processed_at=processed_at,
+            process_note=process_note,
+            created_at=datetime.fromisoformat(
+                str(row[14]),
+            ),
+            updated_at=datetime.fromisoformat(
+                str(row[15]),
+            ),
+        )
+
+    @staticmethod
+    def _create_record(
+        *,
+        record_id: int,
+        signal: TradeSignal,
+        status: SignalStatus,
+        processed_at: datetime | None,
+        process_note: str | None,
+        created_at: datetime,
+        updated_at: datetime,
+    ) -> TradeSignalRecord:
+        """保存済みシグナルを作成する。"""
+
+        return TradeSignalRecord(
+            id=record_id,
+            signal=signal,
+            status=status,
+            processed_at=processed_at,
+            process_note=process_note,
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+
+================================================================================
+FILE: app\trading\paper_trading_pipeline.py
+================================================================================
+"""ORBシグナル生成からPaper Broker執行・レポートまで統合する。"""
+
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Protocol
+
+from app.market.models import StockPrice
+from app.trading.execution_engine import (
+    ExecutionBatchResult,
+    ExecutionDecision,
+    ExecutionEngine,
+    ExecutionItemResult,
+)
+from app.trading.execution_report import (
+    ExecutionReport,
+    ExecutionReportService,
+)
+from app.trading.execution_risk import (
+    ExecutionRiskDecision,
+    ExecutionRiskResult,
+    ExecutionRiskService,
+)
+from app.trading.order_models import (
+    OrderType,
+)
+from app.trading.orb_signal_service import (
+    OrbSignalGenerationResult,
+    OrbSignalGenerationService,
+)
+from app.trading.signal_models import (
+    TradeSignalRecord,
+)
+
+
+class SignalCanceller(Protocol):
+    """リスク拒否されたシグナルの取消処理。"""
+
+    def cancel(
+        self,
+        signal_id: str,
+        *,
+        process_note: str | None = None,
+    ) -> TradeSignalRecord:
+        """シグナルを取消済みに更新する。"""
+
+
+@dataclass(frozen=True, slots=True)
+class PaperTradingPipelineResult:
+    """Paper Trading統合パイプラインの実行結果。"""
+
+    signal_generation_result: OrbSignalGenerationResult
+    risk_results: tuple[
+        ExecutionRiskResult,
+        ...
+    ]
+    execution_batch_result: ExecutionBatchResult
+    execution_report: ExecutionReport
+    report_csv_path: Path | None
+
+    @property
+    def generated_signal_count(self) -> int:
+        """生成したシグナル数を返す。"""
+
+        return (
+            self.signal_generation_result
+            .generated_count
+        )
+
+    @property
+    def saved_signal_count(self) -> int:
+        """新規保存したシグナル数を返す。"""
+
+        return (
+            self.signal_generation_result
+            .saved_count
+        )
+
+    @property
+    def duplicate_signal_count(self) -> int:
+        """重複として保存しなかったシグナル数を返す。"""
+
+        return (
+            self.signal_generation_result
+            .duplicate_count
+        )
+
+    @property
+    def approved_count(self) -> int:
+        """リスク判定で承認された件数を返す。"""
+
+        return sum(
+            result.decision
+            is ExecutionRiskDecision.APPROVED
+            for result in self.risk_results
+        )
+
+    @property
+    def rejected_count(self) -> int:
+        """リスク判定で拒否された件数を返す。"""
+
+        return sum(
+            result.decision
+            is ExecutionRiskDecision.REJECTED
+            for result in self.risk_results
+        )
+
+    @property
+    def risk_failed_count(self) -> int:
+        """リスク判定自体に失敗した件数を返す。"""
+
+        return sum(
+            result.decision
+            is ExecutionRiskDecision.FAILED
+            for result in self.risk_results
+        )
+
+    @property
+    def executed_count(self) -> int:
+        """Broker同期まで到達した件数を返す。"""
+
+        return (
+            self.execution_batch_result
+            .executed_count
+        )
+
+    @property
+    def failed_count(self) -> int:
+        """統合処理で失敗した件数を返す。"""
+
+        return (
+            self.execution_batch_result
+            .failed_count
+        )
+
+    @property
+    def is_successful(self) -> bool:
+        """保存失敗・リスク失敗・執行失敗がないか返す。"""
+
+        return (
+            self.signal_generation_result
+            .is_successful
+            and self.risk_failed_count == 0
+            and self.failed_count == 0
+        )
+
+
+class PaperTradingPipeline:
+    """ORBデータからPaper Broker執行までを統合する。"""
+
+    def __init__(
+        self,
+        *,
+        signal_generation_service: OrbSignalGenerationService,
+        risk_service: ExecutionRiskService,
+        execution_engine: ExecutionEngine,
+        signal_repository: SignalCanceller,
+        report_service: ExecutionReportService | None = None,
+    ) -> None:
+        """統合処理に必要なサービスを設定する。"""
+
+        self.signal_generation_service = (
+            signal_generation_service
+        )
+        self.risk_service = risk_service
+        self.execution_engine = execution_engine
+        self.signal_repository = signal_repository
+        self.report_service = (
+            report_service
+            if report_service is not None
+            else ExecutionReportService()
+        )
+
+    def run(
+        self,
+        prices: list[StockPrice],
+        *,
+        order_type: OrderType = OrderType.MARKET,
+        limit_price: float | None = None,
+        stop_price: float | None = None,
+        report_generated_at: datetime | None = None,
+        report_csv_path: Path | None = None,
+        continue_on_error: bool = True,
+    ) -> PaperTradingPipelineResult:
+        """ORBシグナル生成から注文執行・レポートまで実行する。"""
+
+        signal_generation_result = (
+            self.signal_generation_service.run(
+                prices,
+                continue_on_error=continue_on_error,
+            )
+        )
+
+        risk_results: list[
+            ExecutionRiskResult
+        ] = []
+
+        execution_items: list[
+            ExecutionItemResult
+        ] = []
+
+        for signal_record in (
+            signal_generation_result.saved_records
+        ):
+            try:
+                risk_result = self.risk_service.evaluate(
+                    signal_record.signal,
+                    continue_on_error=continue_on_error,
+                )
+
+            except Exception as error:
+                if not continue_on_error:
+                    raise
+
+                execution_items.append(
+                    self._create_failed_item(
+                        signal_record=signal_record,
+                        message=str(error),
+                    )
+                )
+                continue
+
+            risk_results.append(
+                risk_result
+            )
+
+            if (
+                risk_result.decision
+                is ExecutionRiskDecision.APPROVED
+            ):
+                try:
+                    execution_item = (
+                        self.execution_engine.execute_signal(
+                            signal_record.signal_id,
+                            order_type=order_type,
+                            limit_price=limit_price,
+                            stop_price=stop_price,
+                        )
+                    )
+
+                except Exception as error:
+                    if not continue_on_error:
+                        raise
+
+                    execution_item = self._create_failed_item(
+                        signal_record=signal_record,
+                        message=str(error),
+                    )
+
+                execution_items.append(
+                    execution_item
+                )
+                continue
+
+            if (
+                risk_result.decision
+                is ExecutionRiskDecision.REJECTED
+            ):
+                cancelled_record = (
+                    self.signal_repository.cancel(
+                        signal_record.signal_id,
+                        process_note=(
+                            risk_result.message
+                            or "execution risk rejected"
+                        ),
+                    )
+                )
+
+                execution_items.append(
+                    self._create_failed_item(
+                        signal_record=cancelled_record,
+                        message=(
+                            risk_result.message
+                            or "execution risk rejected"
+                        ),
+                    )
+                )
+                continue
+
+            execution_items.append(
+                self._create_failed_item(
+                    signal_record=signal_record,
+                    message=(
+                        risk_result.message
+                        or "execution risk evaluation failed"
+                    ),
+                )
+            )
+
+        for failure in signal_generation_result.failures:
+            execution_items.append(
+                ExecutionItemResult(
+                    decision=ExecutionDecision.FAILED,
+                    signal_id=failure.signal_id,
+                    order_id=None,
+                    signal_record=None,
+                    order_record=None,
+                    order_creation_result=None,
+                    broker_sync_result=None,
+                    message=failure.message,
+                )
+            )
+
+        execution_batch_result = ExecutionBatchResult(
+            items=tuple(
+                execution_items
+            )
+        )
+
+        execution_report = self.report_service.create(
+            execution_batch_result,
+            generated_at=report_generated_at,
+        )
+
+        resolved_report_csv_path: Path | None = None
+
+        if report_csv_path is not None:
+            resolved_report_csv_path = (
+                self.report_service.write_csv(
+                    execution_report,
+                    report_csv_path,
+                )
+            )
+
+        return PaperTradingPipelineResult(
+            signal_generation_result=(
+                signal_generation_result
+            ),
+            risk_results=tuple(
+                risk_results
+            ),
+            execution_batch_result=(
+                execution_batch_result
+            ),
+            execution_report=execution_report,
+            report_csv_path=(
+                resolved_report_csv_path
+            ),
+        )
+
+    @staticmethod
+    def _create_failed_item(
+        *,
+        signal_record: TradeSignalRecord,
+        message: str,
+    ) -> ExecutionItemResult:
+        """シグナル処理失敗をExecution明細へ変換する。"""
+
+        return ExecutionItemResult(
+            decision=ExecutionDecision.FAILED,
+            signal_id=signal_record.signal_id,
+            order_id=None,
+            signal_record=signal_record,
+            order_record=None,
+            order_creation_result=None,
+            broker_sync_result=None,
+            message=message,
+        )
+
+================================================================================
+FILE: app\runtime\realtime_signal_engine.py
+================================================================================
+[FILE NOT FOUND]
+
+================================================================================
+FILE: tests\test_orb_signal_factory.py
+================================================================================
+"""ORB診断結果からのシグナル生成テスト。"""
+
+from datetime import date, datetime, timezone
+
+import pytest
+
+from app.strategy.orb_diagnostics import (
+    OrbDailyDiagnostic,
+)
+from app.trading.orb_signal_factory import (
+    JAPAN_TIMEZONE,
+    OrbSignalFactory,
+    OrbSignalFactorySettings,
+)
+from app.trading.signal_models import (
+    SignalAction,
+)
+
+
+BREAKOUT_AT = datetime(
+    2026,
+    7,
+    16,
+    9,
+    20,
+)
+
+
+def create_diagnostic(
+    *,
+    code: str = "7203",
+    trade_candidate: bool = True,
+    rejection_reason: str = "",
+    breakout_at: datetime | None = BREAKOUT_AT,
+    breakout_price: float | None = 2500.0,
+) -> OrbDailyDiagnostic:
+    """テスト用ORB診断結果を作成する。"""
+
+    return OrbDailyDiagnostic(
+        code=code,
+        trading_date=date(
+            2026,
+            7,
+            16,
+        ),
+        bar_count=60,
+        opening_bar_count=4,
+        opening_range_high=2480.0,
+        opening_range_volume=400_000,
+        opening_range_turnover=990_000_000.0,
+        average_opening_volume=100_000.0,
+        opening_range_available=True,
+        opening_volume_passed=True,
+        opening_turnover_passed=True,
+        price_breakout_found=True,
+        breakout_at=breakout_at,
+        breakout_price=breakout_price,
+        breakout_volume=150_000,
+        breakout_volume_ratio=1.5,
+        breakout_turnover=375_000_000.0,
+        breakout_volume_passed=True,
+        breakout_volume_ratio_passed=True,
+        breakout_turnover_passed=True,
+        price_range_passed=True,
+        exit_available=True,
+        trade_candidate=trade_candidate,
+        rejection_reason=rejection_reason,
+    )
+
+
+def test_factory_creates_buy_signal() -> None:
+    """ORB候補からBUYシグナルを生成する。"""
+
+    factory = OrbSignalFactory(
+        settings=OrbSignalFactorySettings(
+            strategy_name="orb",
+            quantity=200,
+            confidence=0.85,
+        )
+    )
+
+    signal = factory.create(
+        create_diagnostic()
+    )
+
+    assert signal is not None
+    assert signal.code == "7203"
+    assert signal.strategy_name == "orb"
+    assert signal.action is SignalAction.BUY
+    assert signal.generated_at == (
+        BREAKOUT_AT.replace(
+            tzinfo=JAPAN_TIMEZONE,
+        )
+    )
+    assert signal.signal_price == pytest.approx(
+        2500.0,
+    )
+    assert signal.quantity == 200
+    assert signal.reason == (
+        "opening_range_breakout"
+    )
+    assert signal.confidence == pytest.approx(
+        0.85,
+    )
+    assert signal.signal_id.startswith(
+        "orb-7203-"
+    )
+
+
+def test_factory_creates_orb_metadata() -> None:
+    """診断情報をシグナルメタデータへ保存する。"""
+
+    signal = OrbSignalFactory().create(
+        create_diagnostic()
+    )
+
+    assert signal is not None
+
+    assert signal.metadata[
+        "trading_date"
+    ] == "2026-07-16"
+    assert signal.metadata[
+        "opening_range_high"
+    ] == pytest.approx(
+        2480.0,
+    )
+    assert signal.metadata[
+        "opening_range_volume"
+    ] == 400_000
+    assert signal.metadata[
+        "breakout_volume"
+    ] == 150_000
+    assert signal.metadata[
+        "breakout_volume_ratio"
+    ] == pytest.approx(
+        1.5,
+    )
+    assert signal.metadata[
+        "trade_candidate"
+    ] is True
+
+
+def test_factory_returns_none_for_rejected_diagnostic() -> None:
+    """ORB候補でない診断結果はシグナル化しない。"""
+
+    factory = OrbSignalFactory()
+
+    signal = factory.create(
+        create_diagnostic(
+            trade_candidate=False,
+            rejection_reason=(
+                "breakout_volume"
+            ),
+        )
+    )
+
+    assert signal is None
+
+
+def test_factory_generates_deterministic_signal_id() -> None:
+    """同じ診断結果から同じシグナルIDを生成する。"""
+
+    factory = OrbSignalFactory()
+
+    first_signal = factory.create(
+        create_diagnostic()
+    )
+    second_signal = factory.create(
+        create_diagnostic()
+    )
+
+    assert first_signal is not None
+    assert second_signal is not None
+
+    assert (
+        first_signal.signal_id
+        == second_signal.signal_id
+    )
+
+
+def test_factory_generates_different_ids_for_different_codes() -> None:
+    """銘柄が異なれば別のシグナルIDを生成する。"""
+
+    factory = OrbSignalFactory()
+
+    first_signal = factory.create(
+        create_diagnostic(
+            code="7203",
+        )
+    )
+    second_signal = factory.create(
+        create_diagnostic(
+            code="8306",
+        )
+    )
+
+    assert first_signal is not None
+    assert second_signal is not None
+    assert (
+        first_signal.signal_id
+        != second_signal.signal_id
+    )
+
+
+def test_factory_accepts_timezone_aware_datetime() -> None:
+    """タイムゾーン付き日時を日本時間へ変換する。"""
+
+    utc_breakout_at = datetime(
+        2026,
+        7,
+        16,
+        0,
+        20,
+        tzinfo=timezone.utc,
+    )
+
+    signal = OrbSignalFactory().create(
+        create_diagnostic(
+            breakout_at=utc_breakout_at,
+        )
+    )
+
+    assert signal is not None
+    assert signal.generated_at == datetime(
+        2026,
+        7,
+        16,
+        9,
+        20,
+        tzinfo=JAPAN_TIMEZONE,
+    )
+
+
+def test_factory_create_many_filters_and_sorts() -> None:
+    """候補だけをシグナル化して日時・銘柄順に返す。"""
+
+    factory = OrbSignalFactory()
+
+    diagnostics = [
+        create_diagnostic(
+            code="8306",
+            breakout_at=datetime(
+                2026,
+                7,
+                16,
+                9,
+                25,
+            ),
+        ),
+        create_diagnostic(
+            code="7203",
+            trade_candidate=False,
+            rejection_reason="price_range",
+        ),
+        create_diagnostic(
+            code="6758",
+            breakout_at=datetime(
+                2026,
+                7,
+                16,
+                9,
+                20,
+            ),
+        ),
+    ]
+
+    signals = factory.create_many(
+        diagnostics
+    )
+
+    assert [
+        signal.code
+        for signal in signals
+    ] == [
+        "6758",
+        "8306",
+    ]
+
+
+def test_factory_rejects_candidate_with_rejection_reason() -> None:
+    """候補と除外理由が同時設定された不整合を拒否する。"""
+
+    factory = OrbSignalFactory()
+
+    with pytest.raises(
+        ValueError,
+        match="除外理由",
+    ):
+        factory.create(
+            create_diagnostic(
+                trade_candidate=True,
+                rejection_reason=(
+                    "breakout_volume"
+                ),
+            )
+        )
+
+
+def test_factory_rejects_candidate_without_breakout_time() -> None:
+    """候補にブレイク日時がなければ拒否する。"""
+
+    factory = OrbSignalFactory()
+
+    with pytest.raises(
+        ValueError,
+        match="ブレイク日時",
+    ):
+        factory.create(
+            create_diagnostic(
+                breakout_at=None,
+            )
+        )
+
+
+def test_factory_rejects_candidate_without_breakout_price() -> None:
+    """候補にブレイク価格がなければ拒否する。"""
+
+    factory = OrbSignalFactory()
+
+    with pytest.raises(
+        ValueError,
+        match="ブレイク価格",
+    ):
+        factory.create(
+            create_diagnostic(
+                breakout_price=None,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    (
+        "arguments",
+        "message",
+    ),
+    [
+        (
+            {
+                "strategy_name": " ",
+            },
+            "戦略名",
+        ),
+        (
+            {
+                "quantity": 0,
+            },
+            "数量",
+        ),
+        (
+            {
+                "confidence": -0.1,
+            },
+            "信頼度",
+        ),
+        (
+            {
+                "confidence": 1.1,
+            },
+            "信頼度",
+        ),
+    ],
+)
+def test_factory_settings_reject_invalid_values(
+    arguments: dict[str, object],
+    message: str,
+) -> None:
+    """不正なシグナル生成設定を拒否する。"""
+
+    with pytest.raises(
+        ValueError,
+        match=message,
+    ):
+        OrbSignalFactorySettings(
+            **arguments,
+        )
+
+================================================================================
+FILE: tests\test_orb_signal_service.py
+================================================================================
+"""ORBシグナル生成・保存サービスのテスト。"""
+
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+from app.database import initialize_database
+from app.market.models import StockPrice
+from app.strategy.opening_range_breakout import (
+    OpeningRangeBreakoutStrategy,
+)
+from app.strategy.orb_diagnostics import (
+    OrbDiagnosticService,
+)
+from app.trading.orb_signal_factory import (
+    OrbSignalFactory,
+    OrbSignalFactorySettings,
+)
+from app.trading.orb_signal_service import (
+    OrbSignalGenerationService,
+)
+from app.trading.signal_models import (
+    SignalAction,
+    SignalStatus,
+)
+from app.trading.signal_repository import (
+    SignalRepository,
+)
+
+
+CREATED_AT = datetime(
+    2026,
+    7,
+    16,
+    1,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+def create_price(
+    code: str,
+    time_text: str,
+    *,
+    high: float,
+    low: float,
+    close: float,
+    volume: int,
+) -> StockPrice:
+    """サービス用の5分足を作成する。"""
+
+    return StockPrice(
+        code=code,
+        datetime=datetime.strptime(
+            f"2026-07-16 {time_text}",
+            "%Y-%m-%d %H:%M",
+        ),
+        open=close,
+        high=high,
+        low=low,
+        close=close,
+        volume=volume,
+    )
+
+
+def create_candidate_prices(
+    code: str,
+) -> list[StockPrice]:
+    """ORB候補になる1日分の5分足を作成する。"""
+
+    return [
+        create_price(
+            code,
+            "09:00",
+            high=1005.0,
+            low=995.0,
+            close=1000.0,
+            volume=100_000,
+        ),
+        create_price(
+            code,
+            "09:15",
+            high=1010.0,
+            low=998.0,
+            close=1005.0,
+            volume=100_000,
+        ),
+        create_price(
+            code,
+            "09:20",
+            high=1020.0,
+            low=1008.0,
+            close=1015.0,
+            volume=200_000,
+        ),
+        create_price(
+            code,
+            "14:50",
+            high=1025.0,
+            low=1010.0,
+            close=1020.0,
+            volume=300_000,
+        ),
+    ]
+
+
+def create_rejected_prices(
+    code: str,
+) -> list[StockPrice]:
+    """価格ブレイクしない1日分の5分足を作成する。"""
+
+    return [
+        create_price(
+            code,
+            "09:00",
+            high=1005.0,
+            low=995.0,
+            close=1000.0,
+            volume=100_000,
+        ),
+        create_price(
+            code,
+            "09:15",
+            high=1010.0,
+            low=998.0,
+            close=1005.0,
+            volume=100_000,
+        ),
+        create_price(
+            code,
+            "09:20",
+            high=1010.0,
+            low=1000.0,
+            close=1008.0,
+            volume=200_000,
+        ),
+        create_price(
+            code,
+            "14:50",
+            high=1009.0,
+            low=1000.0,
+            close=1005.0,
+            volume=300_000,
+        ),
+    ]
+
+
+def create_strategy() -> OpeningRangeBreakoutStrategy:
+    """サービス用ORB戦略を作成する。"""
+
+    return OpeningRangeBreakoutStrategy(
+        quantity=100,
+        min_opening_range_volume=200_000,
+        min_breakout_volume=150_000,
+        breakout_volume_ratio=1.2,
+        min_price=500.0,
+        max_price=20_000.0,
+        min_opening_range_turnover=(
+            100_000_000.0
+        ),
+        min_breakout_turnover=(
+            100_000_000.0
+        ),
+    )
+
+
+def create_service(
+    tmp_path: Path,
+) -> tuple[
+    SignalRepository,
+    OrbSignalGenerationService,
+]:
+    """実SQLiteを使用するサービスを作成する。"""
+
+    database_path = (
+        tmp_path / "katana.db"
+    )
+
+    initialize_database(
+        database_path
+    )
+
+    repository = SignalRepository(
+        database_path,
+        now_provider=lambda: CREATED_AT,
+    )
+
+    service = OrbSignalGenerationService(
+        diagnostic_service=(
+            OrbDiagnosticService(
+                create_strategy()
+            )
+        ),
+        signal_factory=(
+            OrbSignalFactory(
+                settings=(
+                    OrbSignalFactorySettings(
+                        strategy_name="orb",
+                        quantity=100,
+                        confidence=0.8,
+                    )
+                )
+            )
+        ),
+        signal_repository=repository,
+    )
+
+    return repository, service
+
+
+def test_service_generates_and_saves_candidate_signal(
+    tmp_path: Path,
+) -> None:
+    """ORB候補を生成してPENDING保存する。"""
+
+    repository, service = create_service(
+        tmp_path
+    )
+
+    result = service.run(
+        create_candidate_prices(
+            "7203"
+        )
+    )
+
+    assert result.diagnostic_count == 1
+    assert result.candidate_count == 1
+    assert result.generated_count == 1
+    assert result.saved_count == 1
+    assert result.duplicate_count == 0
+    assert result.failed_count == 0
+    assert result.is_successful is True
+
+    record = result.saved_records[0]
+
+    assert record.code == "7203"
+    assert record.strategy_name == "orb"
+    assert record.action is SignalAction.BUY
+    assert record.status is SignalStatus.PENDING
+    assert record.signal.signal_price == pytest.approx(
+        1015.0
+    )
+    assert record.signal.quantity == 100
+    assert record.signal.confidence == pytest.approx(
+        0.8
+    )
+
+    assert repository.count() == 1
+    assert repository.count(
+        status=SignalStatus.PENDING
+    ) == 1
+
+
+def test_service_does_not_save_rejected_diagnostic(
+    tmp_path: Path,
+) -> None:
+    """ORB候補でない診断結果は保存しない。"""
+
+    repository, service = create_service(
+        tmp_path
+    )
+
+    result = service.run(
+        create_rejected_prices(
+            "7203"
+        )
+    )
+
+    assert result.diagnostic_count == 1
+    assert result.candidate_count == 0
+    assert result.generated_count == 0
+    assert result.saved_count == 0
+    assert result.duplicate_count == 0
+    assert result.failed_count == 0
+    assert repository.count() == 0
+
+
+def test_service_saves_multiple_candidate_codes(
+    tmp_path: Path,
+) -> None:
+    """複数銘柄の候補をそれぞれ保存する。"""
+
+    repository, service = create_service(
+        tmp_path
+    )
+
+    prices = [
+        *create_candidate_prices(
+            "7203"
+        ),
+        *create_candidate_prices(
+            "8306"
+        ),
+    ]
+
+    result = service.run(
+        prices
+    )
+
+    assert result.diagnostic_count == 2
+    assert result.candidate_count == 2
+    assert result.generated_count == 2
+    assert result.saved_count == 2
+    assert repository.count() == 2
+
+    assert {
+        record.code
+        for record in result.saved_records
+    } == {
+        "7203",
+        "8306",
+    }
+
+
+def test_service_skips_duplicate_signals(
+    tmp_path: Path,
+) -> None:
+    """同じ市場データの再実行では重複保存しない。"""
+
+    repository, service = create_service(
+        tmp_path
+    )
+
+    prices = create_candidate_prices(
+        "7203"
+    )
+
+    first_result = service.run(
+        prices
+    )
+    second_result = service.run(
+        prices
+    )
+
+    assert first_result.saved_count == 1
+    assert first_result.duplicate_count == 0
+
+    assert second_result.generated_count == 1
+    assert second_result.saved_count == 0
+    assert second_result.duplicate_count == 1
+    assert second_result.failed_count == 0
+    assert second_result.is_successful is True
+
+    assert repository.count() == 1
+
+
+def test_service_combines_candidates_and_rejections(
+    tmp_path: Path,
+) -> None:
+    """候補銘柄だけを保存し、除外銘柄は診断に残す。"""
+
+    repository, service = create_service(
+        tmp_path
+    )
+
+    prices = [
+        *create_candidate_prices(
+            "7203"
+        ),
+        *create_rejected_prices(
+            "8306"
+        ),
+    ]
+
+    result = service.run(
+        prices
+    )
+
+    assert result.diagnostic_count == 2
+    assert result.candidate_count == 1
+    assert result.generated_count == 1
+    assert result.saved_count == 1
+
+    assert (
+        result.saved_records[0].code
+        == "7203"
+    )
+    assert repository.count() == 1
+
+
+class FailingSignalRepository:
+    """常に保存エラーを発生させるRepository。"""
+
+    def save(
+        self,
+        signal,
+    ):
+        """保存失敗を発生させる。"""
+
+        raise RuntimeError(
+            f"save failed: {signal.signal_id}"
+        )
+
+
+def create_failing_service() -> OrbSignalGenerationService:
+    """保存失敗用サービスを作成する。"""
+
+    return OrbSignalGenerationService(
+        diagnostic_service=(
+            OrbDiagnosticService(
+                create_strategy()
+            )
+        ),
+        signal_factory=(
+            OrbSignalFactory()
+        ),
+        signal_repository=(
+            FailingSignalRepository()
+        ),
+    )
+
+
+def test_service_records_save_failure() -> None:
+    """continue_on_error有効時は保存失敗を記録する。"""
+
+    service = create_failing_service()
+
+    result = service.run(
+        create_candidate_prices(
+            "7203"
+        ),
+        continue_on_error=True,
+    )
+
+    assert result.generated_count == 1
+    assert result.saved_count == 0
+    assert result.failed_count == 1
+    assert result.is_successful is False
+
+    failure = result.failures[0]
+
+    assert failure.code == "7203"
+    assert "save failed" in failure.message
+
+
+def test_service_raises_save_failure_when_continuation_disabled() -> None:
+    """continue_on_error無効時は保存例外を再送出する。"""
+
+    service = create_failing_service()
+
+    with pytest.raises(
+        RuntimeError,
+        match="save failed",
+    ):
+        service.run(
+            create_candidate_prices(
+                "7203"
+            ),
+            continue_on_error=False,
+        )
+
+
+def test_service_handles_empty_prices(
+    tmp_path: Path,
+) -> None:
+    """価格データが空なら空の正常結果を返す。"""
+
+    repository, service = create_service(
+        tmp_path
+    )
+
+    result = service.run(
+        []
+    )
+
+    assert result.diagnostic_count == 0
+    assert result.candidate_count == 0
+    assert result.generated_count == 0
+    assert result.saved_count == 0
+    assert result.duplicate_count == 0
+    assert result.failed_count == 0
+    assert result.is_successful is True
+    assert repository.count() == 0
+
+================================================================================
+FILE: tests\test_signal_deduplication_service.py
+================================================================================
+"""売買シグナル重複抑止サービスのテスト。"""
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from app.database import initialize_database
+from app.trading.signal_deduplication_service import (
+    SignalDeduplicationDecision,
+    SignalDeduplicationService,
+)
+from app.trading.signal_models import (
+    SignalAction,
+    SignalStatus,
+    TradeSignal,
+)
+from app.trading.signal_repository import (
+    SignalRepository,
+)
+
+
+GENERATED_AT = datetime(
+    2026,
+    7,
+    16,
+    0,
+    20,
+    tzinfo=timezone.utc,
+)
+
+CREATED_AT = datetime(
+    2026,
+    7,
+    16,
+    0,
+    21,
+    tzinfo=timezone.utc,
+)
+
+SECOND_CREATED_AT = datetime(
+    2026,
+    7,
+    16,
+    0,
+    22,
+    tzinfo=timezone.utc,
+)
+
+PROCESSED_AT = datetime(
+    2026,
+    7,
+    16,
+    0,
+    23,
+    tzinfo=timezone.utc,
+)
+
+
+class SequentialClock:
+    """指定日時を順番に返すテスト用時計。"""
+
+    def __init__(
+        self,
+        times: list[datetime],
+    ) -> None:
+        """返却日時を設定する。"""
+
+        self.times = iter(
+            times
+        )
+
+    def now(self) -> datetime:
+        """次の日時を返す。"""
+
+        return next(
+            self.times
+        )
+
+
+def create_signal(
+    *,
+    signal_id: str = "signal-001",
+    code: str = "7203",
+    strategy_name: str = "orb",
+    action: SignalAction = SignalAction.BUY,
+    generated_at: datetime = GENERATED_AT,
+) -> TradeSignal:
+    """重複判定用の標準シグナルを作成する。"""
+
+    return TradeSignal(
+        signal_id=signal_id,
+        code=code,
+        strategy_name=strategy_name,
+        action=action,
+        generated_at=generated_at,
+        signal_price=2500.0,
+        quantity=100,
+        reason="opening_range_breakout",
+        confidence=0.8,
+        metadata={
+            "trading_date": (
+                generated_at
+                .astimezone(
+                    timezone(
+                        timedelta(
+                            hours=9
+                        )
+                    )
+                )
+                .date()
+                .isoformat()
+            ),
+        },
+    )
+
+
+def create_service(
+    tmp_path: Path,
+    *,
+    times: list[datetime] | None = None,
+) -> tuple[
+    SignalRepository,
+    SignalDeduplicationService,
+]:
+    """実SQLiteを使用する重複抑止サービスを作成する。"""
+
+    database_path = (
+        tmp_path / "katana.db"
+    )
+
+    initialize_database(
+        database_path
+    )
+
+    repository = SignalRepository(
+        database_path,
+        now_provider=SequentialClock(
+            times or [
+                CREATED_AT,
+                SECOND_CREATED_AT,
+                PROCESSED_AT,
+            ]
+        ).now,
+    )
+
+    service = SignalDeduplicationService(
+        repository
+    )
+
+    return repository, service
+
+
+def test_service_accepts_first_signal(
+    tmp_path: Path,
+) -> None:
+    """同種シグナルがなければ新規保存する。"""
+
+    repository, service = create_service(
+        tmp_path
+    )
+
+    signal = create_signal()
+
+    result = service.save_if_unique(
+        signal
+    )
+
+    assert result.decision is (
+        SignalDeduplicationDecision.ACCEPTED
+    )
+    assert result.is_accepted is True
+    assert result.is_duplicate is False
+    assert result.is_failed is False
+    assert result.signal == signal
+    assert result.saved_record is not None
+    assert result.duplicate_record is None
+    assert result.message is None
+    assert result.trading_date.isoformat() == (
+        "2026-07-16"
+    )
+
+    assert repository.count() == 1
+    assert repository.count(
+        status=SignalStatus.PENDING
+    ) == 1
+
+
+def test_service_rejects_pending_duplicate_on_same_day(
+    tmp_path: Path,
+) -> None:
+    """同一営業日のPENDINGシグナルを重複として拒否する。"""
+
+    repository, service = create_service(
+        tmp_path
+    )
+
+    first_result = service.save_if_unique(
+        create_signal(
+            signal_id="signal-001",
+        )
+    )
+
+    second_result = service.save_if_unique(
+        create_signal(
+            signal_id="signal-002",
+            generated_at=(
+                GENERATED_AT
+                + timedelta(minutes=5)
+            ),
+        )
+    )
+
+    assert first_result.is_accepted is True
+
+    assert second_result.decision is (
+        SignalDeduplicationDecision.DUPLICATE
+    )
+    assert second_result.is_duplicate is True
+    assert second_result.saved_record is None
+    assert second_result.duplicate_record is not None
+    assert (
+        second_result
+        .duplicate_record
+        .signal_id
+        == "signal-001"
+    )
+    assert "既に存在" in (
+        second_result.message or ""
+    )
+
+    assert repository.count() == 1
+
+
+def test_service_rejects_processed_duplicate_on_same_day(
+    tmp_path: Path,
+) -> None:
+    """同一営業日のPROCESSEDシグナルも重複として拒否する。"""
+
+    repository, service = create_service(
+        tmp_path,
+        times=[
+            CREATED_AT,
+            PROCESSED_AT,
+        ],
+    )
+
+    accepted = service.save_if_unique(
+        create_signal(
+            signal_id="signal-001",
+        )
+    )
+
+    assert accepted.saved_record is not None
+
+    repository.mark_processed(
+        accepted.saved_record.signal_id,
+        process_note="order created",
+    )
+
+    duplicate = service.save_if_unique(
+        create_signal(
+            signal_id="signal-002",
+            generated_at=(
+                GENERATED_AT
+                + timedelta(minutes=10)
+            ),
+        )
+    )
+
+    assert duplicate.is_duplicate is True
+    assert duplicate.duplicate_record is not None
+    assert duplicate.duplicate_record.status is (
+        SignalStatus.PROCESSED
+    )
+    assert repository.count() == 1
+
+
+def test_service_allows_replacement_after_cancel(
+    tmp_path: Path,
+) -> None:
+    """既存シグナルがCANCELLEDなら同日の再生成を許可する。"""
+
+    repository, service = create_service(
+        tmp_path,
+        times=[
+            CREATED_AT,
+            PROCESSED_AT,
+            SECOND_CREATED_AT,
+        ],
+    )
+
+    accepted = service.save_if_unique(
+        create_signal(
+            signal_id="signal-001",
+        )
+    )
+
+    assert accepted.saved_record is not None
+
+    repository.cancel(
+        accepted.saved_record.signal_id,
+        process_note="risk filter rejected",
+    )
+
+    replacement = service.save_if_unique(
+        create_signal(
+            signal_id="signal-002",
+            generated_at=(
+                GENERATED_AT
+                + timedelta(minutes=10)
+            ),
+        )
+    )
+
+    assert replacement.is_accepted is True
+    assert replacement.saved_record is not None
+    assert replacement.saved_record.signal_id == (
+        "signal-002"
+    )
+
+    assert repository.count() == 2
+    assert repository.count(
+        status=SignalStatus.CANCELLED
+    ) == 1
+    assert repository.count(
+        status=SignalStatus.PENDING
+    ) == 1
+
+
+def test_service_allows_same_signal_type_on_next_day(
+    tmp_path: Path,
+) -> None:
+    """営業日が変われば同じ銘柄・戦略・方向を許可する。"""
+
+    repository, service = create_service(
+        tmp_path,
+        times=[
+            CREATED_AT,
+            SECOND_CREATED_AT,
+        ],
+    )
+
+    first = service.save_if_unique(
+        create_signal(
+            signal_id="signal-001",
+        )
+    )
+
+    next_day = service.save_if_unique(
+        create_signal(
+            signal_id="signal-002",
+            generated_at=(
+                GENERATED_AT
+                + timedelta(days=1)
+            ),
+        )
+    )
+
+    assert first.is_accepted is True
+    assert next_day.is_accepted is True
+    assert repository.count() == 2
+
+
+def test_service_allows_different_code_on_same_day(
+    tmp_path: Path,
+) -> None:
+    """銘柄が異なれば同一営業日でも保存する。"""
+
+    repository, service = create_service(
+        tmp_path,
+        times=[
+            CREATED_AT,
+            SECOND_CREATED_AT,
+        ],
+    )
+
+    first = service.save_if_unique(
+        create_signal(
+            signal_id="signal-001",
+            code="7203",
+        )
+    )
+
+    second = service.save_if_unique(
+        create_signal(
+            signal_id="signal-002",
+            code="8306",
+        )
+    )
+
+    assert first.is_accepted is True
+    assert second.is_accepted is True
+    assert repository.count() == 2
+
+
+def test_service_allows_different_strategy_on_same_day(
+    tmp_path: Path,
+) -> None:
+    """戦略が異なれば同一銘柄・営業日でも保存する。"""
+
+    repository, service = create_service(
+        tmp_path,
+        times=[
+            CREATED_AT,
+            SECOND_CREATED_AT,
+        ],
+    )
+
+    first = service.save_if_unique(
+        create_signal(
+            signal_id="signal-001",
+            strategy_name="orb",
+        )
+    )
+
+    second = service.save_if_unique(
+        create_signal(
+            signal_id="signal-002",
+            strategy_name="momentum",
+        )
+    )
+
+    assert first.is_accepted is True
+    assert second.is_accepted is True
+    assert repository.count() == 2
+
+
+def test_service_allows_different_action_on_same_day(
+    tmp_path: Path,
+) -> None:
+    """売買方向が異なれば同一銘柄・営業日でも保存する。"""
+
+    repository, service = create_service(
+        tmp_path,
+        times=[
+            CREATED_AT,
+            SECOND_CREATED_AT,
+        ],
+    )
+
+    buy_result = service.save_if_unique(
+        create_signal(
+            signal_id="signal-001",
+            action=SignalAction.BUY,
+        )
+    )
+
+    exit_result = service.save_if_unique(
+        create_signal(
+            signal_id="signal-002",
+            action=SignalAction.EXIT,
+        )
+    )
+
+    assert buy_result.is_accepted is True
+    assert exit_result.is_accepted is True
+    assert repository.count() == 2
+
+
+def test_service_uses_japan_date_across_utc_boundary(
+    tmp_path: Path,
+) -> None:
+    """UTC日付が異なっても日本時間の同日なら重複と判定する。"""
+
+    repository, service = create_service(
+        tmp_path
+    )
+
+    first_time = datetime(
+        2026,
+        7,
+        15,
+        23,
+        30,
+        tzinfo=timezone.utc,
+    )
+
+    second_time = datetime(
+        2026,
+        7,
+        16,
+        1,
+        0,
+        tzinfo=timezone.utc,
+    )
+
+    first = service.save_if_unique(
+        create_signal(
+            signal_id="signal-001",
+            generated_at=first_time,
+        )
+    )
+
+    second = service.save_if_unique(
+        create_signal(
+            signal_id="signal-002",
+            generated_at=second_time,
+        )
+    )
+
+    assert first.trading_date.isoformat() == (
+        "2026-07-16"
+    )
+    assert second.trading_date.isoformat() == (
+        "2026-07-16"
+    )
+
+    assert first.is_accepted is True
+    assert second.is_duplicate is True
+    assert repository.count() == 1
+
+
+def test_service_save_many_sorts_and_suppresses_duplicates(
+    tmp_path: Path,
+) -> None:
+    """複数シグナルを時系列処理し最初の1件だけ採用する。"""
+
+    repository, service = create_service(
+        tmp_path
+    )
+
+    later_signal = create_signal(
+        signal_id="signal-later",
+        generated_at=(
+            GENERATED_AT
+            + timedelta(minutes=10)
+        ),
+    )
+
+    earlier_signal = create_signal(
+        signal_id="signal-earlier",
+        generated_at=GENERATED_AT,
+    )
+
+    result = service.save_many(
+        [
+            later_signal,
+            earlier_signal,
+        ]
+    )
+
+    assert result.input_count == 2
+    assert result.accepted_count == 1
+    assert result.duplicate_count == 1
+    assert result.failed_count == 0
+    assert result.is_successful is True
+
+    assert result.results[0].signal.signal_id == (
+        "signal-earlier"
+    )
+    assert result.results[0].is_accepted is True
+
+    assert result.results[1].signal.signal_id == (
+        "signal-later"
+    )
+    assert result.results[1].is_duplicate is True
+
+    assert len(
+        result.saved_records
+    ) == 1
+    assert (
+        result.saved_records[0].signal_id
+        == "signal-earlier"
+    )
+    assert repository.count() == 1
+
+
+class FailingRepository:
+    """常に失敗するテスト用Repository。"""
+
+    def list_recent(
+        self,
+        *,
+        limit: int = 100,
+        code: str | None = None,
+        strategy_name: str | None = None,
+        status: SignalStatus | None = None,
+        action: object | None = None,
+    ):
+        """空の検索結果を返す。"""
+
+        del limit
+        del code
+        del strategy_name
+        del status
+        del action
+
+        return []
+
+    def save(
+        self,
+        signal: TradeSignal,
+    ):
+        """保存失敗を発生させる。"""
+
+        raise RuntimeError(
+            f"save failed: {signal.signal_id}"
+        )
+
+
+def test_service_records_save_failure() -> None:
+    """continue_on_error有効時は保存失敗を結果へ記録する。"""
+
+    service = SignalDeduplicationService(
+        FailingRepository()
+    )
+
+    signal = create_signal()
+
+    result = service.save_if_unique(
+        signal,
+        continue_on_error=True,
+    )
+
+    assert result.decision is (
+        SignalDeduplicationDecision.FAILED
+    )
+    assert result.is_failed is True
+    assert result.saved_record is None
+    assert result.duplicate_record is None
+    assert "save failed" in (
+        result.message or ""
+    )
+
+
+def test_service_raises_save_failure_when_continuation_disabled() -> None:
+    """continue_on_error無効時は保存失敗を再送出する。"""
+
+    service = SignalDeduplicationService(
+        FailingRepository()
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="save failed",
+    ):
+        service.save_if_unique(
+            create_signal(),
+            continue_on_error=False,
+        )
+
+
+def test_service_rejects_invalid_search_limit() -> None:
+    """0以下の重複検索件数を拒否する。"""
+
+    with pytest.raises(
+        ValueError,
+        match="重複検索件数",
+    ):
+        SignalDeduplicationService(
+            FailingRepository(),
+            search_limit=0,
+        )
+
+================================================================================
+FILE: tests\test_realtime_signal_engine.py
+================================================================================
+"""RealtimeSignalEngineのテスト。"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from app.market.models import StockPrice
+from app.market.realtime_signal_engine import (
+    RealtimeSignalEngine,
+)
+from app.market.realtime_signal_models import (
+    RealtimeSignalDecision,
+)
+from app.trading.signal_models import SignalAction
+
+
+JST = ZoneInfo("Asia/Tokyo")
+
+
+def price(
+    minute: int,
+    *,
+    high: float,
+    low: float,
+    close: float,
+    code: str = "7203",
+) -> StockPrice:
+    """ORB評価用5分足を作成する。"""
+
+    return StockPrice(
+        code=code,
+        datetime=datetime(
+            2026,
+            7,
+            17,
+            9,
+            minute,
+            tzinfo=JST,
+        ),
+        open=1000.0,
+        high=high,
+        low=low,
+        close=close,
+        volume=1000,
+    )
+
+
+def opening_and_breakout_prices(
+    code: str = "7203",
+) -> list[StockPrice]:
+    """BUYシグナルが発生する系列を返す。"""
+
+    return [
+        price(0, high=1000.0, low=990.0, close=995.0, code=code),
+        price(5, high=1000.0, low=990.0, close=998.0, code=code),
+        price(10, high=1000.0, low=995.0, close=999.0, code=code),
+        price(15, high=1000.0, low=995.0, close=999.0, code=code),
+        price(20, high=1010.0, low=999.0, close=1005.0, code=code),
+    ]
+
+
+def test_engine_generates_orb_buy_signal() -> None:
+    """オープニングレンジ突破でBUYを生成する。"""
+
+    result = RealtimeSignalEngine().process(
+        opening_and_breakout_prices()
+    )
+
+    assert result.decision is (
+        RealtimeSignalDecision.SIGNALS_GENERATED
+    )
+    assert result.processed_bar_count == 5
+    assert result.signal_count == 1
+    assert result.signals[0].action is SignalAction.BUY
+    assert result.signals[0].code == "7203"
+
+
+def test_engine_skips_duplicate_bars() -> None:
+    """同じ開始日時の足を再処理しない。"""
+
+    engine = RealtimeSignalEngine()
+    first = engine.process(
+        opening_and_breakout_prices()
+    )
+    second = engine.process(
+        opening_and_breakout_prices()
+    )
+
+    assert first.signal_count == 1
+    assert second.decision is RealtimeSignalDecision.NO_NEW_BAR
+    assert second.processed_bar_count == 0
+    assert second.skipped_duplicate_count == 5
+    assert second.signal_count == 0
+
+
+def test_engine_processes_only_incremental_bars() -> None:
+    """2回目は新しく追加された足だけ処理する。"""
+
+    engine = RealtimeSignalEngine()
+    bars = opening_and_breakout_prices()
+
+    first = engine.process(bars[:4])
+    second = engine.process(bars)
+
+    assert first.decision is RealtimeSignalDecision.BAR_PROCESSED
+    assert first.signal_count == 0
+    assert second.processed_bar_count == 1
+    assert second.skipped_duplicate_count == 4
+    assert second.signal_count == 1
+
+
+def test_engine_keeps_state_separately_by_code() -> None:
+    """戦略状態と最終処理日時を銘柄別に保持する。"""
+
+    engine = RealtimeSignalEngine()
+    result = engine.process(
+        opening_and_breakout_prices("7203")
+        + opening_and_breakout_prices("6758")
+    )
+
+    assert result.signal_count == 2
+    assert {
+        signal.code
+        for signal in result.signals
+    } == {"7203", "6758"}
+    assert engine.last_processed_at("7203") is not None
+    assert engine.last_processed_at("6758") is not None
+
+
+def test_engine_generates_take_profit_exit() -> None:
+    """BUY後の利確条件でEXITを生成する。"""
+
+    from app.backtest.orb_signal_strategy import (
+        OrbSignalStrategy,
+        OrbSignalStrategySettings,
+    )
+
+    engine = RealtimeSignalEngine(
+        strategy_factory=lambda _code: OrbSignalStrategy(
+            settings=OrbSignalStrategySettings(
+                take_profit_rate=0.01,
+            )
+        )
+    )
+    entry = opening_and_breakout_prices()
+    exit_bar = price(
+        25,
+        high=1020.0,
+        low=1000.0,
+        close=1015.0,
+    )
+
+    result = engine.process(entry + [exit_bar])
+
+    assert result.signal_count == 2
+    assert [
+        signal.action
+        for signal in result.signals
+    ] == [SignalAction.BUY, SignalAction.EXIT]
+
+
+def test_engine_returns_empty_result_for_no_input() -> None:
+    """入力なしでは安全な空結果を返す。"""
+
+    result = RealtimeSignalEngine().process(())
+
+    assert result.decision is RealtimeSignalDecision.NO_NEW_BAR
+    assert result.input_bar_count == 0
+    assert result.processed_bar_count == 0
+    assert result.signal_count == 0
+
+
+def test_engine_sorts_out_of_order_bars() -> None:
+    """順不同入力を開始日時順に処理する。"""
+
+    engine = RealtimeSignalEngine()
+    bars = opening_and_breakout_prices()
+    result = engine.process(tuple(reversed(bars)))
+
+    assert result.processed_bar_count == 5
+    assert result.signal_count == 1
+    assert engine.last_processed_at("7203") == (
+        bars[-1].datetime
+    )
+
+
+def test_engine_reset_one_code_only() -> None:
+    """指定銘柄だけ状態を初期化できる。"""
+
+    engine = RealtimeSignalEngine()
+    engine.process(
+        opening_and_breakout_prices("7203")
+        + opening_and_breakout_prices("6758")
+    )
+
+    engine.reset("7203")
+
+    assert engine.last_processed_at("7203") is None
+    assert engine.last_processed_at("6758") is not None
+
+    result = engine.process(
+        opening_and_breakout_prices("7203")
+    )
+    assert result.signal_count == 1
+
+
+def test_engine_reset_all_codes() -> None:
+    """全銘柄状態を初期化できる。"""
+
+    engine = RealtimeSignalEngine()
+    engine.process(
+        opening_and_breakout_prices()
+    )
+
+    engine.reset()
+
+    assert engine.last_processed_at("7203") is None
+
+    result = engine.process(
+        opening_and_breakout_prices()
+    )
+    assert result.signal_count == 1
+
+
+def test_engine_accepts_naive_market_datetime_as_jst() -> None:
+    """タイムゾーンなし市場時刻をJSTとして扱う。"""
+
+    bar = StockPrice(
+        code="7203",
+        datetime=datetime(2026, 7, 17, 9, 0),
+        open=1000.0,
+        high=1010.0,
+        low=990.0,
+        close=1005.0,
+        volume=1000,
+    )
+
+    engine = RealtimeSignalEngine()
+    result = engine.process((bar,))
+
+    assert result.processed_bar_count == 1
+    assert engine.last_processed_at("7203").tzinfo == JST
+
+
+================================================================================
+FILE: tests\test_paper_trading_pipeline.py
+================================================================================
+"""ORBからPaper Broker約定までのEnd-to-End統合テスト。"""
+
+import csv
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+from app.database import initialize_database
+from app.market.models import StockPrice
+from app.strategy.opening_range_breakout import (
+    OpeningRangeBreakoutStrategy,
+)
+from app.strategy.orb_diagnostics import (
+    OrbDiagnosticService,
+)
+from app.trading.execution_engine import (
+    ExecutionDecision,
+    ExecutionEngine,
+)
+from app.trading.execution_report import (
+    ExecutionReportService,
+)
+from app.trading.execution_risk import (
+    ExecutionRiskPolicy,
+    ExecutionRiskReason,
+    ExecutionRiskService,
+)
+from app.trading.order_broker_sync_service import (
+    OrderBrokerSyncService,
+)
+from app.trading.order_models import (
+    OrderStatus,
+    OrderType,
+)
+from app.trading.order_repository import (
+    OrderRepository,
+)
+from app.trading.order_service import (
+    SignalOrderService,
+)
+from app.trading.orb_signal_factory import (
+    OrbSignalFactory,
+    OrbSignalFactorySettings,
+)
+from app.trading.orb_signal_service import (
+    OrbSignalGenerationService,
+)
+from app.trading.paper_broker import (
+    PaperBroker,
+    PaperBrokerSettings,
+)
+from app.trading.paper_trading_pipeline import (
+    PaperTradingPipeline,
+)
+from app.trading.signal_models import (
+    SignalStatus,
+)
+from app.trading.signal_repository import (
+    SignalRepository,
+)
+
+
+CURRENT_TIME = datetime(
+    2026,
+    7,
+    16,
+    1,
+    0,
+    tzinfo=timezone.utc,
+)
+
+
+def create_price(
+    time_text: str,
+    *,
+    code: str = "7203",
+    high: float,
+    low: float,
+    close: float,
+    volume: int,
+) -> StockPrice:
+    """統合テスト用の5分足を作成する。"""
+
+    return StockPrice(
+        code=code,
+        datetime=datetime.strptime(
+            f"2026-07-16 {time_text}",
+            "%Y-%m-%d %H:%M",
+        ),
+        open=close,
+        high=high,
+        low=low,
+        close=close,
+        volume=volume,
+    )
+
+
+def create_candidate_prices(
+    *,
+    code: str = "7203",
+) -> list[StockPrice]:
+    """ORB取引候補になる5分足を作成する。"""
+
+    return [
+        create_price(
+            "09:00",
+            code=code,
+            high=1005.0,
+            low=995.0,
+            close=1000.0,
+            volume=100_000,
+        ),
+        create_price(
+            "09:15",
+            code=code,
+            high=1010.0,
+            low=998.0,
+            close=1005.0,
+            volume=100_000,
+        ),
+        create_price(
+            "09:20",
+            code=code,
+            high=1020.0,
+            low=1008.0,
+            close=1015.0,
+            volume=200_000,
+        ),
+        create_price(
+            "14:50",
+            code=code,
+            high=1025.0,
+            low=1010.0,
+            close=1020.0,
+            volume=300_000,
+        ),
+    ]
+
+
+def create_rejected_prices() -> list[StockPrice]:
+    """ORB価格ブレイクが発生しない5分足を作成する。"""
+
+    return [
+        create_price(
+            "09:00",
+            high=1005.0,
+            low=995.0,
+            close=1000.0,
+            volume=100_000,
+        ),
+        create_price(
+            "09:15",
+            high=1010.0,
+            low=998.0,
+            close=1005.0,
+            volume=100_000,
+        ),
+        create_price(
+            "09:20",
+            high=1010.0,
+            low=1000.0,
+            close=1008.0,
+            volume=200_000,
+        ),
+        create_price(
+            "14:50",
+            high=1009.0,
+            low=1000.0,
+            close=1005.0,
+            volume=300_000,
+        ),
+    ]
+
+
+def create_strategy() -> OpeningRangeBreakoutStrategy:
+    """統合テスト用ORB戦略を作成する。"""
+
+    return OpeningRangeBreakoutStrategy(
+        quantity=100,
+        min_opening_range_volume=200_000,
+        min_breakout_volume=150_000,
+        breakout_volume_ratio=1.2,
+        min_price=500.0,
+        max_price=20_000.0,
+        min_opening_range_turnover=(
+            100_000_000.0
+        ),
+        min_breakout_turnover=(
+            100_000_000.0
+        ),
+    )
+
+
+def create_environment(
+    tmp_path: Path,
+    *,
+    initial_cash: float = 1_000_000.0,
+    market_price: float = 1020.0,
+    risk_policy: ExecutionRiskPolicy | None = None,
+) -> tuple[
+    SignalRepository,
+    OrderRepository,
+    PaperBroker,
+    PaperTradingPipeline,
+]:
+    """実SQLiteを使用する統合環境を作成する。"""
+
+    database_path = tmp_path / "katana.db"
+
+    initialize_database(
+        database_path
+    )
+
+    signal_repository = SignalRepository(
+        database_path,
+        now_provider=lambda: CURRENT_TIME,
+    )
+
+    order_repository = OrderRepository(
+        database_path,
+        now_provider=lambda: CURRENT_TIME,
+    )
+
+    broker = PaperBroker(
+        settings=PaperBrokerSettings(
+            initial_cash=initial_cash,
+        ),
+        price_provider=lambda _code: market_price,
+        now_provider=lambda: CURRENT_TIME,
+    )
+
+    signal_generation_service = (
+        OrbSignalGenerationService(
+            diagnostic_service=(
+                OrbDiagnosticService(
+                    create_strategy()
+                )
+            ),
+            signal_factory=(
+                OrbSignalFactory(
+                    settings=(
+                        OrbSignalFactorySettings(
+                            strategy_name="orb",
+                            quantity=100,
+                            confidence=0.8,
+                        )
+                    )
+                )
+            ),
+            signal_repository=signal_repository,
+        )
+    )
+
+    order_service = SignalOrderService(
+        signal_repository=signal_repository,
+        order_repository=order_repository,
+    )
+
+    broker_sync_service = (
+        OrderBrokerSyncService(
+            order_repository=order_repository,
+            broker=broker,
+        )
+    )
+
+    execution_engine = ExecutionEngine(
+        signal_repository=signal_repository,
+        order_service=order_service,
+        broker_sync_service=broker_sync_service,
+    )
+
+    risk_service = ExecutionRiskService(
+        broker=broker,
+        policy=(
+            risk_policy
+            if risk_policy is not None
+            else ExecutionRiskPolicy(
+                max_order_value=500_000.0,
+                minimum_cash_reserve=100_000.0,
+                max_position_count=5,
+                max_code_market_value=500_000.0,
+                max_total_market_value=1_000_000.0,
+                allow_additional_buy=False,
+            )
+        ),
+    )
+
+    pipeline = PaperTradingPipeline(
+        signal_generation_service=(
+            signal_generation_service
+        ),
+        risk_service=risk_service,
+        execution_engine=execution_engine,
+        signal_repository=signal_repository,
+        report_service=ExecutionReportService(),
+    )
+
+    return (
+        signal_repository,
+        order_repository,
+        broker,
+        pipeline,
+    )
+
+
+def test_pipeline_executes_orb_candidate_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """ORB候補をシグナル・注文・約定まで一気通しする。"""
+
+    (
+        signal_repository,
+        order_repository,
+        broker,
+        pipeline,
+    ) = create_environment(
+        tmp_path
+    )
+
+    result = pipeline.run(
+        create_candidate_prices(),
+        report_generated_at=CURRENT_TIME,
+    )
+
+    assert result.generated_signal_count == 1
+    assert result.saved_signal_count == 1
+    assert result.duplicate_signal_count == 0
+
+    assert result.approved_count == 1
+    assert result.rejected_count == 0
+    assert result.risk_failed_count == 0
+
+    assert result.executed_count == 1
+    assert result.failed_count == 0
+    assert result.is_successful is True
+
+    assert signal_repository.count(
+        status=SignalStatus.PROCESSED,
+    ) == 1
+
+    assert order_repository.count(
+        status=OrderStatus.FILLED,
+    ) == 1
+
+    order = order_repository.list_recent()[0]
+
+    assert order.code == "7203"
+    assert order.filled_quantity == 100
+    assert order.average_fill_price == pytest.approx(
+        1020.0
+    )
+    assert order.broker_order_id == (
+        "paper-order-00000001"
+    )
+
+    positions = broker.list_positions()
+
+    assert len(positions) == 1
+    assert positions[0].code == "7203"
+    assert positions[0].quantity == 100
+
+    report = result.execution_report
+
+    assert report.input_count == 1
+    assert report.filled_count == 1
+    assert report.failed_count == 0
+    assert report.rows[0].code == "7203"
+
+
+def test_pipeline_rejects_signal_by_risk_policy(
+    tmp_path: Path,
+) -> None:
+    """最大注文金額超過時は注文を作らずシグナルを取消す。"""
+
+    (
+        signal_repository,
+        order_repository,
+        broker,
+        pipeline,
+    ) = create_environment(
+        tmp_path,
+        risk_policy=ExecutionRiskPolicy(
+            max_order_value=50_000.0,
+            minimum_cash_reserve=0.0,
+            max_position_count=5,
+            max_code_market_value=500_000.0,
+            max_total_market_value=1_000_000.0,
+        ),
+    )
+
+    result = pipeline.run(
+        create_candidate_prices(),
+        report_generated_at=CURRENT_TIME,
+    )
+
+    assert result.saved_signal_count == 1
+    assert result.approved_count == 0
+    assert result.rejected_count == 1
+    assert result.executed_count == 0
+    assert result.failed_count == 1
+    assert result.is_successful is False
+
+    assert (
+        ExecutionRiskReason.ORDER_VALUE_LIMIT
+        in result.risk_results[0].reasons
+    )
+
+    assert signal_repository.count(
+        status=SignalStatus.CANCELLED,
+    ) == 1
+
+    assert order_repository.count() == 0
+    assert broker.list_orders() == []
+    assert broker.list_positions() == []
+
+    item = result.execution_batch_result.items[0]
+
+    assert item.decision is (
+        ExecutionDecision.FAILED
+    )
+    assert "order_value_limit" in (
+        item.message or ""
+    )
+
+
+def test_pipeline_does_nothing_without_orb_candidate(
+    tmp_path: Path,
+) -> None:
+    """ORB候補がなければシグナルも注文も作らない。"""
+
+    (
+        signal_repository,
+        order_repository,
+        broker,
+        pipeline,
+    ) = create_environment(
+        tmp_path
+    )
+
+    result = pipeline.run(
+        create_rejected_prices(),
+        report_generated_at=CURRENT_TIME,
+    )
+
+    assert result.generated_signal_count == 0
+    assert result.saved_signal_count == 0
+    assert result.approved_count == 0
+    assert result.executed_count == 0
+    assert result.failed_count == 0
+    assert result.is_successful is True
+
+    assert signal_repository.count() == 0
+    assert order_repository.count() == 0
+    assert broker.list_orders() == []
+
+    assert result.execution_report.input_count == 0
+    assert result.execution_report.is_successful is True
+
+
+def test_pipeline_is_idempotent_on_same_market_data(
+    tmp_path: Path,
+) -> None:
+    """同じ5分足を再実行しても二重発注しない。"""
+
+    (
+        signal_repository,
+        order_repository,
+        broker,
+        pipeline,
+    ) = create_environment(
+        tmp_path
+    )
+
+    prices = create_candidate_prices()
+
+    first = pipeline.run(
+        prices,
+        report_generated_at=CURRENT_TIME,
+    )
+
+    second = pipeline.run(
+        prices,
+        report_generated_at=CURRENT_TIME,
+    )
+
+    assert first.saved_signal_count == 1
+    assert first.executed_count == 1
+
+    assert second.generated_signal_count == 1
+    assert second.saved_signal_count == 0
+    assert second.duplicate_signal_count == 1
+    assert second.executed_count == 0
+    assert second.failed_count == 0
+
+    assert signal_repository.count() == 1
+    assert order_repository.count() == 1
+    assert len(broker.list_orders()) == 1
+    assert broker.list_positions()[0].quantity == 100
+
+
+def test_pipeline_creates_active_limit_order(
+    tmp_path: Path,
+) -> None:
+    """条件未到達の指値注文をSENT状態で保持する。"""
+
+    (
+        _signal_repository,
+        order_repository,
+        broker,
+        pipeline,
+    ) = create_environment(
+        tmp_path,
+        market_price=1020.0,
+    )
+
+    result = pipeline.run(
+        create_candidate_prices(),
+        order_type=OrderType.LIMIT,
+        limit_price=1000.0,
+        report_generated_at=CURRENT_TIME,
+    )
+
+    assert result.approved_count == 1
+    assert result.executed_count == 1
+    assert result.failed_count == 0
+
+    item = result.execution_batch_result.items[0]
+
+    assert item.decision is (
+        ExecutionDecision.ACTIVE
+    )
+    assert item.order_record is not None
+    assert item.order_record.status is (
+        OrderStatus.SENT
+    )
+
+    assert order_repository.count(
+        status=OrderStatus.SENT,
+    ) == 1
+    assert broker.list_positions() == []
+
+    assert result.execution_report.active_count == 1
+    assert result.execution_report.filled_count == 0
+
+
+def test_pipeline_writes_execution_report_csv(
+    tmp_path: Path,
+) -> None:
+    """End-to-End実行結果をCSVへ保存する。"""
+
+    (
+        _signal_repository,
+        _order_repository,
+        _broker,
+        pipeline,
+    ) = create_environment(
+        tmp_path
+    )
+
+    output_path = (
+        tmp_path
+        / "reports"
+        / "paper_execution.csv"
+    )
+
+    result = pipeline.run(
+        create_candidate_prices(),
+        report_generated_at=CURRENT_TIME,
+        report_csv_path=output_path,
+    )
+
+    assert result.report_csv_path == output_path
+    assert output_path.exists()
+
+    with output_path.open(
+        "r",
+        encoding="utf-8-sig",
+        newline="",
+    ) as input_file:
+        rows = list(
+            csv.DictReader(
+                input_file
+            )
+        )
+
+    assert len(rows) == 1
+    assert rows[0]["code"] == "7203"
+    assert rows[0]["side"] == "buy"
+    assert rows[0]["order_status"] == "filled"
+    assert rows[0]["filled_quantity"] == "100"
+    assert rows[0]["average_fill_price"] == (
+        "1020.0"
+    )
