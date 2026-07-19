@@ -28,6 +28,16 @@ from app.live.live_orchestrator import (
     LiveTradingOrchestrator,
 )
 from app.market.bar_aggregator import StockPriceAggregator
+from app.notifications.execution_notification_service import (
+    ExecutionNotificationService,
+)
+from app.notifications.notification_composition import (
+    NotificationComposition,
+)
+from app.notifications.notification_rule_models import (
+    NotificationRulePolicy,
+)
+from app.settings import ROOT_DIR, Settings
 from app.market.bar_repository import MarketBarRepository
 from app.market.jquants_downloader import (
     JQuantsMinuteDownloader,
@@ -370,6 +380,43 @@ class PaperTradingComposition:
             order_repository=order_repository,
             broker=paper_broker,
         )
+
+        app_settings = Settings.from_environment(
+            env_file=ROOT_DIR / ".env"
+        )
+        provisional_notifications = (
+            NotificationComposition.create(
+                settings=app_settings.notifications,
+                require_channel=False,
+            )
+        )
+        execution_observers = ()
+
+        if provisional_notifications.channels:
+            channel_names = (
+                provisional_notifications.channel_names
+            )
+            notification_policy = NotificationRulePolicy(
+                info_channels=channel_names,
+                warning_channels=channel_names,
+                error_channels=channel_names,
+                critical_channels=channel_names,
+                duplicate_cooldown_seconds=0,
+            )
+            notification_bundle = (
+                NotificationComposition.create(
+                    settings=app_settings.notifications,
+                    policy=notification_policy,
+                    require_channel=True,
+                )
+            )
+            execution_observers = (
+                ExecutionNotificationService(
+                    gateway=notification_bundle.gateway,
+                    signal_provider=signal_repository,
+                ),
+            )
+
         queue_execution_service = (
             BacktestQueueExecutionService(
                 order_queue=order_queue,
@@ -380,6 +427,10 @@ class PaperTradingComposition:
                     settings.commission_per_order
                 ),
                 slippage_per_execution=0.0,
+                execution_observers=(
+                    execution_observers
+                ),
+                continue_on_notification_error=True,
             )
         )
 

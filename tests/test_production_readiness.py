@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 from app.database import initialize_database
@@ -298,3 +299,122 @@ def test_database_check_uses_temporary_write(
 
     assert row is not None
     assert int(row[0]) == 0
+
+
+def test_optional_operational_checks_are_reported(
+    tmp_path: Path,
+) -> None:
+    """通知・営業日・Runtime設定を診断へ追加できる。"""
+
+    FakeCompositionFactory.reset()
+
+    report = ProductionReadinessChecker(
+        composition_factory=FakeCompositionFactory,
+        python_version_provider=lambda: (
+            3,
+            14,
+            0,
+        ),
+        notification_channel_provider=lambda: (
+            "discord",
+            "line",
+        ),
+        trading_day_provider=lambda target_date: (
+            target_date == date(2026, 7, 21)
+        ),
+        today_provider=lambda: date(
+            2026,
+            7,
+            21,
+        ),
+    ).check(
+        settings=create_settings(tmp_path)
+    )
+
+    assert report.is_ready
+
+    item_map = {
+        item.name: item
+        for item in report.items
+    }
+
+    assert item_map[
+        "Runtime Settings"
+    ].is_ok
+    assert (
+        "discord,line"
+        in item_map[
+            "Notification Channels"
+        ].message
+    )
+    assert (
+        "営業日です"
+        in item_map["Trading Day"].message
+    )
+
+
+def test_missing_notification_channel_is_not_ready(
+    tmp_path: Path,
+) -> None:
+    """運用診断で通知チャネル未設定を検出する。"""
+
+    FakeCompositionFactory.reset()
+
+    report = ProductionReadinessChecker(
+        composition_factory=FakeCompositionFactory,
+        python_version_provider=lambda: (
+            3,
+            14,
+            0,
+        ),
+        notification_channel_provider=lambda: (),
+    ).check(
+        settings=create_settings(tmp_path)
+    )
+
+    assert report.is_ready is False
+
+    failed = next(
+        item
+        for item in report.items
+        if item.name == "Notification Channels"
+    )
+
+    assert failed.is_failed
+    assert FakeCompositionFactory.call_count == 0
+
+
+def test_non_trading_day_is_informational(
+    tmp_path: Path,
+) -> None:
+    """非営業日でもシステム自体のREADY判定を妨げない。"""
+
+    FakeCompositionFactory.reset()
+
+    report = ProductionReadinessChecker(
+        composition_factory=FakeCompositionFactory,
+        python_version_provider=lambda: (
+            3,
+            14,
+            0,
+        ),
+        trading_day_provider=lambda _date: False,
+        today_provider=lambda: date(
+            2026,
+            7,
+            19,
+        ),
+    ).check(
+        settings=create_settings(tmp_path)
+    )
+
+    assert report.is_ready
+
+    trading_day = next(
+        item
+        for item in report.items
+        if item.name == "Trading Day"
+    )
+
+    assert trading_day.is_ok
+    assert "非営業日" in trading_day.message

@@ -1,5 +1,6 @@
 """バックテスト注文キューをBrokerへ送信し約定履歴を保存する。"""
 
+from typing import Protocol
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -20,6 +21,17 @@ from app.trading.trade_execution_repository import (
     DuplicateTradeExecutionError,
     TradeExecutionRepository,
 )
+
+
+
+class TradeExecutionObserver(Protocol):
+    """新規保存された約定を受け取るObserver。"""
+
+    def record(
+        self,
+        execution_record: TradeExecutionRecord,
+    ) -> None:
+        """新規約定を処理する。"""
 
 
 class BacktestQueueExecutionDecision(StrEnum):
@@ -144,6 +156,11 @@ class BacktestQueueExecutionService:
         broker_name: str,
         commission_per_execution: float = 0.0,
         slippage_per_execution: float = 0.0,
+        execution_observers: tuple[
+            TradeExecutionObserver,
+            ...,
+        ] = (),
+        continue_on_notification_error: bool = True,
     ) -> None:
         """必要な依存関係と約定コストを設定する。"""
 
@@ -173,6 +190,12 @@ class BacktestQueueExecutionService:
         )
         self.slippage_per_execution = (
             slippage_per_execution
+        )
+        self.execution_observers = tuple(
+            execution_observers
+        )
+        self.continue_on_notification_error = (
+            continue_on_notification_error
         )
 
     def execute_next(
@@ -356,10 +379,33 @@ class BacktestQueueExecutionService:
         )
 
         try:
-            return self.execution_repository.save(
+            record = self.execution_repository.save(
                 execution
             )
         except DuplicateTradeExecutionError:
             return self.execution_repository.get(
                 execution_id
             )
+
+        self._notify_execution_observers(
+            record
+        )
+
+        return record
+
+    def _notify_execution_observers(
+        self,
+        execution_record: TradeExecutionRecord,
+    ) -> None:
+        """新規約定をObserverへ通知する。"""
+
+        for observer in self.execution_observers:
+            try:
+                observer.record(
+                    execution_record
+                )
+            except Exception:
+                if (
+                    not self.continue_on_notification_error
+                ):
+                    raise

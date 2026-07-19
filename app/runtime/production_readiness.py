@@ -6,6 +6,7 @@ import sqlite3
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
@@ -131,6 +132,20 @@ class ProductionReadinessCompositionFactory(Protocol):
         """本番Composition Bundleを返す。"""
 
 
+NotificationChannelProvider = Callable[
+    [],
+    tuple[str, ...],
+]
+TradingDayProvider = Callable[
+    [date],
+    bool,
+]
+TodayProvider = Callable[
+    [],
+    date,
+]
+
+
 PythonVersionProvider = Callable[
     [],
     tuple[int, int, int],
@@ -155,14 +170,30 @@ class ProductionReadinessChecker:
         python_version_provider: (
             PythonVersionProvider | None
         ) = None,
+        notification_channel_provider: (
+            NotificationChannelProvider | None
+        ) = None,
+        trading_day_provider: (
+            TradingDayProvider | None
+        ) = None,
+        today_provider: TodayProvider | None = None,
     ) -> None:
-        """Composition FactoryとPython情報を設定する。"""
+        """Composition Factoryと運用診断用Providerを設定する。"""
 
         self.composition_factory = composition_factory
         self.python_version_provider = (
             python_version_provider
             if python_version_provider is not None
             else self._current_python_version
+        )
+        self.notification_channel_provider = (
+            notification_channel_provider
+        )
+        self.trading_day_provider = trading_day_provider
+        self.today_provider = (
+            today_provider
+            if today_provider is not None
+            else date.today
         )
 
     def check(
@@ -181,6 +212,23 @@ class ProductionReadinessChecker:
             settings
         )
         items.append(settings_item)
+
+        runtime_settings_item = (
+            self._check_runtime_settings(
+                settings
+            )
+        )
+        items.append(runtime_settings_item)
+
+        if self.notification_channel_provider is not None:
+            items.append(
+                self._check_notification_channels()
+            )
+
+        if self.trading_day_provider is not None:
+            items.append(
+                self._check_trading_day()
+            )
 
         api_key_item = self._check_api_key(
             settings
@@ -292,6 +340,128 @@ class ProductionReadinessChecker:
             (
                 "本番設定を読み込めました。 "
                 f"code_count={len(settings.codes)}"
+            ),
+        )
+
+    @staticmethod
+    def _check_runtime_settings(
+        settings: PaperTradingProductionSettings,
+    ) -> ProductionReadinessItem:
+        """Paper Tradingの主要Runtime設定を診断する。"""
+
+        if settings.initial_cash <= 0:
+            return ProductionReadinessChecker._failed(
+                "Runtime Settings",
+                "初期資金は0より大きい必要があります。",
+            )
+
+        if settings.cycle_interval_seconds < 0:
+            return ProductionReadinessChecker._failed(
+                "Runtime Settings",
+                "サイクル間隔は0秒以上である必要があります。",
+            )
+
+        if (
+            settings.maximum_cycles is not None
+            and settings.maximum_cycles <= 0
+        ):
+            return ProductionReadinessChecker._failed(
+                "Runtime Settings",
+                "最大サイクル数は0より大きい必要があります。",
+            )
+
+        return ProductionReadinessChecker._ok(
+            "Runtime Settings",
+            (
+                "Runtime設定を確認しました。 "
+                f"initial_cash={settings.initial_cash:.2f} "
+                "cycle_interval_seconds="
+                f"{settings.cycle_interval_seconds} "
+                f"maximum_cycles={settings.maximum_cycles}"
+            ),
+        )
+
+    def _check_notification_channels(
+        self,
+    ) -> ProductionReadinessItem:
+        """外部通知チャネルが1件以上有効か診断する。"""
+
+        assert self.notification_channel_provider is not None
+
+        try:
+            raw_channels = (
+                self.notification_channel_provider()
+            )
+            channels = tuple(
+                dict.fromkeys(
+                    channel.strip()
+                    for channel in raw_channels
+                    if channel.strip()
+                )
+            )
+        except Exception as error:
+            return self._failed(
+                "Notification Channels",
+                (
+                    "通知設定を読み込めませんでした。 "
+                    f"error={self._error_message(error)}"
+                ),
+            )
+
+        if not channels:
+            return self._failed(
+                "Notification Channels",
+                (
+                    "DiscordまたはLINEの通知チャネルが"
+                    "設定されていません。"
+                ),
+            )
+
+        return self._ok(
+            "Notification Channels",
+            (
+                "外部通知チャネルが有効です。 "
+                f"channels={','.join(channels)}"
+            ),
+        )
+
+    def _check_trading_day(
+        self,
+    ) -> ProductionReadinessItem:
+        """診断日が東京市場の営業日か確認する。"""
+
+        assert self.trading_day_provider is not None
+        target_date = self.today_provider()
+
+        try:
+            is_trading_day = self.trading_day_provider(
+                target_date
+            )
+        except Exception as error:
+            return self._failed(
+                "Trading Day",
+                (
+                    "営業日判定に失敗しました。 "
+                    f"date={target_date.isoformat()} "
+                    f"error={self._error_message(error)}"
+                ),
+            )
+
+        if not is_trading_day:
+            return self._ok(
+                "Trading Day",
+                (
+                    "診断日は東京市場の非営業日です。 "
+                    "診断は有効ですが、取引は開始されません。 "
+                    f"date={target_date.isoformat()}"
+                ),
+            )
+
+        return self._ok(
+            "Trading Day",
+            (
+                "診断日は東京市場の営業日です。 "
+                f"date={target_date.isoformat()}"
             ),
         )
 
