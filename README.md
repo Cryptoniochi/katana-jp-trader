@@ -7,8 +7,9 @@ testing trading strategies, running recoverable paper-trading sessions, and
 progressively adding production-grade risk controls and operational safeguards
 before live brokerage integration.
 
-> **Current status:** v0.9 release candidate is operational and ready for the paper-trading trial.  
-> Windows Task Scheduler startup, market-session gating, and Discord/LINE runtime notifications are verified.  
+> **Current status:** v0.9.1 paper-trading baseline is operational and ready for an unattended trial.  
+> Windows Task Scheduler startup, market-session gating, Discord/LINE runtime notifications,
+> daily summaries, J-Quants rate-limit protection, and round-robin market-data polling are verified.  
 > **Live brokerage execution is not yet implemented.**
 
 ---
@@ -26,10 +27,11 @@ Project KATANA is being developed as a self-contained platform for:
 - Runtime monitoring and recovery
 - Risk management
 - Discord and LINE operational notifications
+- Safe unattended scheduling
 - Future automated order execution
 
-Safety, reproducibility, recoverability, and test coverage are prioritized
-before connecting the system to a live brokerage account.
+Safety, reproducibility, recoverability, observability, and test coverage are
+prioritized before connecting the system to a live brokerage account.
 
 ---
 
@@ -67,6 +69,7 @@ before connecting the system to a live brokerage account.
 - Paper-trading start notifications
 - Paper-trading completion notifications
 - Paper-trading interruption and failure notifications
+- Daily paper-trading summary notifications
 - Notification-failure isolation from the trading runtime
 - Windows Task Scheduler installation and removal CLI
 - Production-readiness check before scheduled execution
@@ -75,13 +78,20 @@ before connecting the system to a live brokerage account.
 - Runtime notification delivery diagnostics by channel
 - Runtime notifications bypass quiet-hour suppression while ordinary notifications retain it
 - Discord and LINE delivery verified from the scheduled market-session path
-- Full regression test suite: **1,924 passing tests**
+- Paper-trading cycle failure diagnostics
+- J-Quants HTTP 429 rate-limit detection
+- J-Quants `Retry-After` handling
+- Rate-limit cooldown handling without stopping the runtime
+- Round-robin symbol polling
+- Configurable maximum symbols per poll
+- Reduced J-Quants API load for 100-symbol paper trading
+- Full regression test suite: **1,938 passing tests**
 
 ### Current milestone
 
-**Sprint 84 completed: v0.9 paper-trading trial preparation**
+**Sprint 86-2 completed: J-Quants rate-limit protection and polling optimization**
 
-The unattended startup path is now operational:
+The unattended paper-trading path is now:
 
 ```text
 Windows Task Scheduler
@@ -96,19 +106,28 @@ Tokyo Market Session Decision
    |                        |
    v                        v
 Run Paper Trading       Skip Safely
-                            |
-                            v
-                      Discord + LINE
+   |                        |
+   v                        v
+Round-Robin Polling     Discord + LINE
+   |
+   v
+J-Quants Rate-Limit Protection
+   |
+   v
+Strategy, Risk, Paper Broker,
+Persistence, Daily Summary,
+Discord, and LINE
 ```
 
 Verified operational results:
 
 ```text
-Production readiness: READY
-Scheduler result:      SUCCESS
-Discord delivery:      SUCCESS
-LINE delivery:         SUCCESS
-Regression suite:      1,924 passed, 1 warning
+Production readiness:         READY
+Scheduler result:              SUCCESS
+Discord delivery:              SUCCESS
+LINE delivery:                 SUCCESS
+Sprint 86-2 focused tests:     55 passed
+Regression suite:              1,938 passed, 1 warning
 ```
 
 Runtime notifications use a dedicated policy that bypasses quiet-hour
@@ -116,21 +135,56 @@ suppression. Ordinary strategy and trading notifications continue to use the
 configured quiet-hour rules. Channel-level delivery outcomes are written to
 the runtime log for diagnosis.
 
+The paper-trading runtime also records the most frequent cycle-failure causes.
+This diagnostic identified repeated J-Quants HTTP 429 responses as the cause
+of earlier failed cycles. The runtime summary itself was operating correctly.
+
+### Current J-Quants polling policy
+
+The default production settings are:
+
+```text
+Maximum symbols per poll:       10
+Rate-limit cooldown:            60 seconds
+Paper-trading cycle interval:   30 seconds
+Market-data interval:           5 minutes
+```
+
+With a 100-symbol watch list, the runtime polls symbols in round-robin batches
+of 10. Under a 30-second runtime cycle, all 100 symbols are visited in
+approximately five minutes.
+
+When J-Quants returns HTTP 429:
+
+- the error is identified structurally by HTTP status
+- `Retry-After` is used when provided
+- otherwise the configured cooldown is used
+- provider calls are paused during cooldown
+- the runtime remains active
+- non-429 download errors continue to propagate as ordinary failures
+
 ### Next
 
-The next step is the v0.9 release-candidate paper-trading trial:
+The next step is an unattended v0.9.1 paper-trading validation period:
 
-- Run unattended paper trading across the next four Tokyo-market business days
+- Run paper trading for approximately one Tokyo-market week
+- Keep the 100-symbol watch list enabled
 - Confirm scheduled startup, safe skip, and shutdown behavior
 - Review Discord and LINE notifications each day
 - Review runtime logs and daily summaries
-- Record warnings, failures, and operational observations
-- Decide whether to promote the release candidate to v0.9
+- Confirm the HTTP 429 count is substantially reduced
+- Record API waiting periods, warnings, failures, and operational observations
+- Confirm BUY, SELL, and EXIT notification delivery
+- Decide whether further polling optimization is required
+- Decide whether to promote the baseline toward v0.9 release
 
 ### Planned
 
 - Extended paper-trading validation
 - Operational quality and warning cleanup
+- Market-data polling metrics
+- Daily Summary observability improvements
+- API-call and rate-limit statistics
 - Live broker adapter
 - Order reconciliation
 - Production safeguards
@@ -168,6 +222,27 @@ The risk-management and notification layers are intentionally independent of
 individual strategies so that the same controls can be reused by ORB and future
 strategies.
 
+The real-time market-data path is:
+
+```text
+PaperTradingComposition
+        |
+        v
+RealtimeMarketMonitor
+        |
+        v
+Round-Robin Symbol Selection
+        |
+        v
+JQuantsMinuteDownloader
+        |
+        v
+HTTP 429 Detection and Cooldown
+        |
+        v
+Bar Aggregation and Repository
+```
+
 ---
 
 ## Main components
@@ -183,6 +258,12 @@ The market-data layer supports:
 - Five-minute bar aggregation
 - SQLite storage
 - CSV reporting
+- Real-time symbol polling
+- Round-robin watch-list traversal
+- Configurable per-poll symbol limits
+- J-Quants HTTP 429 handling
+- `Retry-After` parsing
+- Rate-limit cooldowns
 
 Representative modules include:
 
@@ -194,6 +275,7 @@ app/market/bar_aggregator.py
 app/market/bar_repository.py
 app/market/history_state.py
 app/market/history_retry.py
+app/market/realtime_market_service.py
 app/import_jquants_history.py
 ```
 
@@ -243,6 +325,10 @@ The paper-trading subsystem provides:
 - Runtime lifecycle management
 - Safe-stop handling
 - Daily runtime results
+- Cycle success and failure counting
+- Frequent failure-cause diagnostics
+- Rate-limit-safe continuation
+- Configurable symbol polling limits
 
 The production paper-trading launchers are:
 
@@ -250,6 +336,12 @@ The production paper-trading launchers are:
 app/run_paper_trading.py
 app/run_market_session.py
 app/scheduler.py
+```
+
+The production composition root is:
+
+```text
+app/runtime/paper_trading_composition.py
 ```
 
 Windows Task Scheduler integration is managed with:
@@ -273,6 +365,8 @@ Runtime monitoring includes:
 - Heartbeat freshness evaluation
 - Heartbeat restoration
 - Resource-critical stop decisions
+- Cycle-failure diagnostics
+- Daily runtime summaries
 
 ### Notifications
 
@@ -289,6 +383,10 @@ Project KATANA supports external operational notifications through:
 - Failure isolation from the trading runtime
 - Channel-level delivery-result logging
 - Dedicated runtime policy that bypasses quiet hours
+- Runtime start and completion notifications
+- Runtime interruption and failure notifications
+- BUY, SELL, and EXIT notifications
+- Daily paper-trading summaries
 
 Representative modules include:
 
@@ -346,6 +444,9 @@ app/
 ├── backtest/
 ├── live/
 ├── market/
+│   ├── jquants_downloader.py
+│   ├── realtime_market_service.py
+│   └── ...
 ├── notifications/
 │   ├── line/
 │   ├── discord_notification_channel.py
@@ -354,13 +455,20 @@ app/
 │   └── webhook_transport.py
 ├── risk/
 ├── runtime/
+│   ├── paper_trading_composition.py
+│   └── ...
 ├── strategy/
 ├── trading/
 ├── database.py
 ├── notification_test.py
-└── run_paper_trading.py
+├── run_market_session.py
+├── run_paper_trading.py
+└── scheduler.py
 
 tests/
+├── test_jquants_downloader.py
+├── test_realtime_market_service.py
+├── test_paper_trading_composition.py
 ├── test_notification_composition.py
 ├── test_notification_test.py
 ├── test_run_paper_trading.py
@@ -395,6 +503,7 @@ Example key names:
 
 ```env
 KATANA_ENVIRONMENT=paper
+JQUANTS_API_KEY=...
 KATANA_DISCORD_WEBHOOK_URL=...
 KATANA_LINE_CHANNEL_ACCESS_TOKEN=...
 KATANA_LINE_DESTINATION_ID=U...
@@ -415,7 +524,23 @@ python -m pytest -v
 Current verified result:
 
 ```text
-1924 passed, 1 warning
+1938 passed, 1 warning
+```
+
+Run the Sprint 86-2 focused tests:
+
+```powershell
+python -m pytest `
+    tests/test_jquants_downloader.py `
+    tests/test_realtime_market_service.py `
+    tests/test_paper_trading_composition.py `
+    -v
+```
+
+Current verified focused result:
+
+```text
+55 passed
 ```
 
 Run notification-related tests:
@@ -470,6 +595,29 @@ Use `Ctrl+C` to request a safe stop.
 
 ---
 
+## Paper-trading validation checklist
+
+During the v0.9.1 trial, review the following each market day:
+
+```text
+[ ] Windows Task Scheduler started the process
+[ ] Production readiness returned READY
+[ ] Market-session decision was correct
+[ ] Runtime start notification arrived
+[ ] Discord delivery succeeded
+[ ] LINE delivery succeeded
+[ ] Runtime remained active through the expected session
+[ ] BUY/SELL/EXIT notifications were correct when signals occurred
+[ ] Daily Summary arrived
+[ ] Success and failure cycle counts were plausible
+[ ] J-Quants 429 count was reduced
+[ ] No repeated API hammering occurred during cooldown
+[ ] Runtime completed or stopped safely
+[ ] Logs contain no unexplained exceptions
+```
+
+---
+
 ## Development workflow
 
 Project KATANA uses a safety-first workflow:
@@ -482,9 +630,50 @@ Project KATANA uses a safety-first workflow:
 6. Ensure secrets and generated artifacts are excluded.
 7. Commit only after tests pass.
 8. Push the reviewed commit to GitHub.
+9. Tag stable paper-trading baselines when appropriate.
 
 This approach reduces accidental partial edits and makes each development step
 easier to review and recover.
+
+---
+
+## Git checkpoint for Sprint 86-2
+
+Review changes:
+
+```powershell
+git status
+git diff --stat
+git diff --cached --name-only
+```
+
+Stage the completed files:
+
+```powershell
+git add .
+```
+
+Commit the verified baseline:
+
+```powershell
+git commit -m "Sprint86-2: add J-Quants rate-limit protection and round-robin polling"
+```
+
+Push the current branch:
+
+```powershell
+git push origin main
+```
+
+Create a stable baseline tag:
+
+```powershell
+git tag -a v0.9.1 -m "Stable paper-trading baseline with J-Quants rate-limit protection"
+git push origin v0.9.1
+```
+
+Confirm the actual branch name before pushing if the repository does not use
+`main`.
 
 ---
 
@@ -512,7 +701,20 @@ Review staged files before every commit:
 ```powershell
 git status
 git diff --cached --name-only
+git diff --cached
 ```
+
+Do not commit:
+
+- API keys
+- Discord webhook URLs
+- LINE access tokens
+- LINE destination IDs
+- local databases
+- local logs
+- generated reports
+- notification-test secrets
+- sprint ZIP archives
 
 ---
 
@@ -539,11 +741,27 @@ Runtime notification integration — completed
 Sprint 84
 v0.9 paper-trading trial preparation — completed
 
-v0.9 release-candidate trial
-Four Tokyo-market business days of unattended operational validation
+Sprint 85
+Paper-trading trial start and watch-list expansion — completed
+
+Sprint 86-1
+Runtime cycle-failure diagnostics — completed
+
+Sprint 86-2
+J-Quants HTTP 429 protection,
+Retry-After handling,
+cooldown control,
+and round-robin polling — completed
+
+v0.9.1 validation
+Approximately one Tokyo-market week of unattended paper trading
+
+Next operational sprint
+Analyze trial logs, API usage, 429 frequency,
+daily summaries, and notification reliability
 
 v0.9
-Release decision after trial-log and notification review
+Release decision after trial validation
 
 Later sprints
 Extended validation, live brokerage integration,
