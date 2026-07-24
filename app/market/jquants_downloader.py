@@ -21,6 +21,25 @@ HttpGetter = Callable[[Request, float], JsonResponse]
 class JQuantsDownloadError(RuntimeError):
     """J-Quants APIからの取得失敗を表す。"""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        """メッセージとHTTPエラー情報を保持する。"""
+
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
+
+    @property
+    def is_rate_limited(self) -> bool:
+        """HTTP 429のレート制限エラーか返す。"""
+
+        return self.status_code == 429
+
 
 class JQuantsMinuteDownloader:
     """J-Quantsから1分足を取得してStockPriceへ変換する。"""
@@ -153,10 +172,18 @@ class JQuantsMinuteDownloader:
                 "utf-8",
                 errors="replace",
             )
+            retry_after_seconds = (
+                JQuantsMinuteDownloader
+                ._parse_retry_after_seconds(
+                    error.headers.get("Retry-After")
+                )
+            )
 
             raise JQuantsDownloadError(
                 "J-Quants APIがHTTPエラーを返しました。"
-                f" status={error.code} body={error_body}"
+                f" status={error.code} body={error_body}",
+                status_code=error.code,
+                retry_after_seconds=retry_after_seconds,
             ) from error
 
         except URLError as error:
@@ -175,6 +202,30 @@ class JQuantsMinuteDownloader:
             raise JQuantsDownloadError("J-Quants APIから想定外の形式が返されました。")
 
         return parsed
+
+    @staticmethod
+    def _parse_retry_after_seconds(
+        value: str | None,
+    ) -> float | None:
+        """Retry-Afterの秒数表現を正規化する。"""
+
+        if value is None:
+            return None
+
+        normalized = value.strip()
+
+        if not normalized:
+            return None
+
+        try:
+            seconds = float(normalized)
+        except ValueError:
+            return None
+
+        if seconds < 0:
+            return None
+
+        return seconds
 
     @classmethod
     def _convert_row(

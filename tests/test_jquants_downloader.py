@@ -1,5 +1,7 @@
 """J-Quants分足Downloaderのテスト。"""
 
+from io import BytesIO
+from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request
 
@@ -235,3 +237,63 @@ def test_downloader_requires_api_key() -> None:
 
     with pytest.raises(ValueError, match="APIキー"):
         JQuantsMinuteDownloader(api_key="")
+
+
+
+def test_default_http_getter_preserves_rate_limit_metadata() -> None:
+    """HTTP 429とRetry-Afterを例外情報へ保持する。"""
+
+    error = HTTPError(
+        url="https://example.test",
+        code=429,
+        msg="Too Many Requests",
+        hdrs={"Retry-After": "45"},
+        fp=BytesIO(b'{"message":"Rate limit exceeded"}'),
+    )
+
+    def fake_urlopen(*_args, **_kwargs):
+        raise error
+
+    import app.market.jquants_downloader as module
+
+    original = module.urlopen
+    module.urlopen = fake_urlopen
+
+    try:
+        with pytest.raises(
+            JQuantsDownloadError,
+        ) as captured:
+            JQuantsMinuteDownloader._default_http_getter(
+                Request("https://example.test"),
+                30.0,
+            )
+    finally:
+        module.urlopen = original
+
+    assert captured.value.status_code == 429
+    assert captured.value.is_rate_limited is True
+    assert captured.value.retry_after_seconds == 45.0
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ("15", 15.0),
+        ("1.5", 1.5),
+        ("-1", None),
+        ("invalid", None),
+    ],
+)
+def test_parse_retry_after_seconds(
+    value: str | None,
+    expected: float | None,
+) -> None:
+    """Retry-Afterの秒数表現を安全に解析する。"""
+
+    assert (
+        JQuantsMinuteDownloader
+        ._parse_retry_after_seconds(value)
+        == expected
+    )

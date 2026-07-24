@@ -67,6 +67,8 @@ def test_settings_rejects_invalid_codes(
         ("cycle_interval_seconds", -1.0),
         ("maximum_cycles", 0),
         ("jquants_timeout_seconds", 0.0),
+        ("maximum_codes_per_poll", 0),
+        ("rate_limit_cooldown_seconds", -1.0),
         ("commission_per_order", -1.0),
         ("slippage_rate", -0.01),
     ],
@@ -102,6 +104,8 @@ def test_settings_accepts_safe_production_values(
         cycle_interval_seconds=30.0,
         maximum_cycles=10,
         jquants_timeout_seconds=20.0,
+        maximum_codes_per_poll=8,
+        rate_limit_cooldown_seconds=90.0,
         commission_per_order=100.0,
         slippage_rate=0.001,
         continue_on_cycle_error=True,
@@ -113,5 +117,7 @@ def test_settings_accepts_safe_production_values(
     assert settings.cycle_interval_seconds == 30.0
     assert settings.maximum_cycles == 10
     assert settings.jquants_timeout_seconds == 20.0
+    assert settings.maximum_codes_per_poll == 8
+    assert settings.rate_limit_cooldown_seconds == 90.0
     assert settings.commission_per_order == 100.0
     assert settings.slippage_rate == 0.001

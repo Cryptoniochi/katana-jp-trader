@@ -112,6 +112,8 @@ class PaperTradingProductionSettings:
     maximum_cycles: int | None = None
     jquants_api_key: str | None = None
     jquants_timeout_seconds: float = 30.0
+    maximum_codes_per_poll: int = 10
+    rate_limit_cooldown_seconds: float = 60.0
     commission_per_order: float = 0.0
     slippage_rate: float = 0.0
     continue_on_cycle_error: bool = True
@@ -171,6 +173,17 @@ class PaperTradingProductionSettings:
             raise ValueError(
                 "J-Quantsタイムアウト秒数は"
                 "0より大きい必要があります。"
+            )
+
+        if self.maximum_codes_per_poll <= 0:
+            raise ValueError(
+                "1回の最大取得銘柄数は"
+                "0より大きい必要があります。"
+            )
+
+        if self.rate_limit_cooldown_seconds < 0:
+            raise ValueError(
+                "レート制限待機秒数は0以上である必要があります。"
             )
 
         if self.commission_per_order < 0:
@@ -285,6 +298,12 @@ class PaperTradingComposition:
             session_service=market_session_service,
             interval_minutes=5,
             data_source="jquants-realtime",
+            maximum_codes_per_poll=(
+                settings.maximum_codes_per_poll
+            ),
+            rate_limit_cooldown_seconds=(
+                settings.rate_limit_cooldown_seconds
+            ),
         )
 
         signal_repository = SignalRepository(

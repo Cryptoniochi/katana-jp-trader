@@ -7,7 +7,8 @@ testing trading strategies, running recoverable paper-trading sessions, and
 progressively adding production-grade risk controls and operational safeguards
 before live brokerage integration.
 
-> **Current status:** Paper-trading runtime and external notifications are operational.  
+> **Current status:** v0.9 release candidate is operational and ready for the paper-trading trial.  
+> Windows Task Scheduler startup, market-session gating, and Discord/LINE runtime notifications are verified.  
 > **Live brokerage execution is not yet implemented.**
 
 ---
@@ -67,43 +68,64 @@ before connecting the system to a live brokerage account.
 - Paper-trading completion notifications
 - Paper-trading interruption and failure notifications
 - Notification-failure isolation from the trading runtime
-- Full regression test suite: **1,879 passing tests**
+- Windows Task Scheduler installation and removal CLI
+- Production-readiness check before scheduled execution
+- Tokyo-market business-day and session-time gating
+- Non-business-day, pre-open, and after-close skip notifications
+- Runtime notification delivery diagnostics by channel
+- Runtime notifications bypass quiet-hour suppression while ordinary notifications retain it
+- Discord and LINE delivery verified from the scheduled market-session path
+- Full regression test suite: **1,924 passing tests**
 
 ### Current milestone
 
-**Sprint 83 completed: Runtime notification integration**
+**Sprint 84 completed: v0.9 paper-trading trial preparation**
 
-The following notification path has been verified with real external services:
+The unattended startup path is now operational:
 
 ```text
-Paper Trading Runtime
+Windows Task Scheduler
         |
         v
-Notification Gateway
+Production Readiness Check
         |
-   +----+----+
-   |         |
-   v         v
-Discord     LINE
+        v
+Tokyo Market Session Decision
+        |
+   +----+-------------------+
+   |                        |
+   v                        v
+Run Paper Trading       Skip Safely
+                            |
+                            v
+                      Discord + LINE
 ```
 
-Verified results:
+Verified operational results:
 
 ```text
-Discord: HTTP 204
-LINE:    HTTP 200
+Production readiness: READY
+Scheduler result:      SUCCESS
+Discord delivery:      SUCCESS
+LINE delivery:         SUCCESS
+Regression suite:      1,924 passed, 1 warning
 ```
+
+Runtime notifications use a dedicated policy that bypasses quiet-hour
+suppression. Ordinary strategy and trading notifications continue to use the
+configured quiet-hour rules. Channel-level delivery outcomes are written to
+the runtime log for diagnosis.
 
 ### Next
 
-Sprint 84 will focus on operational preparation for the v0.9 paper-trading trial:
+The next step is the v0.9 release-candidate paper-trading trial:
 
-- Automatic weekday startup and safe shutdown
-- Daily trading-summary notifications
-- Trade and execution notifications
-- Operational log and report review
-- One-week paper-trading trial
-- v0.9 release decision
+- Run unattended paper trading across the next four Tokyo-market business days
+- Confirm scheduled startup, safe skip, and shutdown behavior
+- Review Discord and LINE notifications each day
+- Review runtime logs and daily summaries
+- Record warnings, failures, and operational observations
+- Decide whether to promote the release candidate to v0.9
 
 ### Planned
 
@@ -222,10 +244,19 @@ The paper-trading subsystem provides:
 - Safe-stop handling
 - Daily runtime results
 
-The production paper-trading launcher is:
+The production paper-trading launchers are:
 
 ```text
 app/run_paper_trading.py
+app/run_market_session.py
+app/scheduler.py
+```
+
+Windows Task Scheduler integration is managed with:
+
+```powershell
+python -m app.install_scheduler
+python -m app.uninstall_scheduler
 ```
 
 ### Runtime monitoring
@@ -256,6 +287,8 @@ Project KATANA supports external operational notifications through:
 - Rate limiting
 - Retry and exponential backoff
 - Failure isolation from the trading runtime
+- Channel-level delivery-result logging
+- Dedicated runtime policy that bypasses quiet hours
 
 Representative modules include:
 
@@ -382,7 +415,7 @@ python -m pytest -v
 Current verified result:
 
 ```text
-1879 passed, 1 warning
+1924 passed, 1 warning
 ```
 
 Run notification-related tests:
@@ -415,7 +448,13 @@ Run the external notification test:
 python -m app.notification_test
 ```
 
-Run paper trading using the configured watch list:
+Run the market-session-aware scheduler path:
+
+```powershell
+python -m app.scheduler
+```
+
+Run paper trading directly using the configured watch list:
 
 ```powershell
 python -m app.run_paper_trading
@@ -498,13 +537,16 @@ Sprint 83
 Runtime notification integration — completed
 
 Sprint 84
-v0.9 paper-trading trial preparation
+v0.9 paper-trading trial preparation — completed
+
+v0.9 release-candidate trial
+Four Tokyo-market business days of unattended operational validation
 
 v0.9
-One-week operational paper-trading validation
+Release decision after trial-log and notification review
 
 Later sprints
-Trade notifications, live brokerage integration,
+Extended validation, live brokerage integration,
 order reconciliation, and production safeguards
 ```
 

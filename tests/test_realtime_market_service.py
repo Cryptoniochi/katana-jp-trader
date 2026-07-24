@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from app.market.jquants_downloader import JQuantsDownloadError
 from app.market.models import StockPrice
 from app.market.realtime_market_service import (
     JST,
@@ -450,3 +451,186 @@ def test_session_service_rejects_naive_datetime() -> None:
         TokyoMarketSessionService().create_snapshot(
             datetime(2026, 7, 17, 9, 0)
         )
+
+
+
+def test_monitor_limits_codes_and_rotates_round_robin() -> None:
+    """取得上限に従い監視銘柄を順番に巡回する。"""
+
+    requested: list[str] = []
+
+    def provider(
+        code: str,
+        _target_date: date,
+    ) -> list[StockPrice]:
+        requested.append(code)
+        return []
+
+    monitor = RealtimeMarketMonitor(
+        repository=FakeRepository(),
+        bar_provider=provider,
+        session_service=TokyoMarketSessionService(
+            trading_day_predicate=lambda _date: True
+        ),
+        data_source="realtime-test",
+        maximum_codes_per_poll=2,
+    )
+    codes = ("1001", "1002", "1003", "1004", "1005")
+
+    for minute in (1, 2, 3):
+        monitor.poll(
+            codes=codes,
+            observed_at=datetime(
+                2026,
+                7,
+                17,
+                9,
+                minute,
+                tzinfo=JST,
+            ),
+        )
+
+    assert requested == [
+        "1001",
+        "1002",
+        "1003",
+        "1004",
+        "1005",
+        "1001",
+    ]
+
+
+def test_monitor_enters_cooldown_after_rate_limit() -> None:
+    """429後は指定時間Provider呼び出しを停止する。"""
+
+    call_count = 0
+
+    def provider(
+        _code: str,
+        _target_date: date,
+    ) -> list[StockPrice]:
+        nonlocal call_count
+        call_count += 1
+
+        if call_count == 1:
+            raise JQuantsDownloadError(
+                "rate limited",
+                status_code=429,
+                retry_after_seconds=60.0,
+            )
+
+        return []
+
+    monitor = RealtimeMarketMonitor(
+        repository=FakeRepository(),
+        bar_provider=provider,
+        session_service=TokyoMarketSessionService(
+            trading_day_predicate=lambda _date: True
+        ),
+        data_source="realtime-test",
+        maximum_codes_per_poll=1,
+        rate_limit_cooldown_seconds=30.0,
+    )
+
+    first = monitor.poll(
+        codes=("7203",),
+        observed_at=datetime(
+            2026,
+            7,
+            17,
+            9,
+            0,
+            tzinfo=JST,
+        ),
+    )
+    waiting = monitor.poll(
+        codes=("7203",),
+        observed_at=datetime(
+            2026,
+            7,
+            17,
+            9,
+            0,
+            30,
+            tzinfo=JST,
+        ),
+    )
+    resumed = monitor.poll(
+        codes=("7203",),
+        observed_at=datetime(
+            2026,
+            7,
+            17,
+            9,
+            1,
+            tzinfo=JST,
+        ),
+    )
+
+    assert first.decision is RealtimePollDecision.NO_NEW_BAR
+    assert waiting.decision is RealtimePollDecision.NO_NEW_BAR
+    assert waiting.code_count == 0
+    assert resumed.decision is RealtimePollDecision.NO_NEW_BAR
+    assert call_count == 2
+
+
+def test_monitor_reraises_non_rate_limit_download_error() -> None:
+    """429以外のDownloader例外は従来どおり上位へ返す。"""
+
+    def provider(
+        _code: str,
+        _target_date: date,
+    ) -> list[StockPrice]:
+        raise JQuantsDownloadError(
+            "server error",
+            status_code=500,
+        )
+
+    monitor = RealtimeMarketMonitor(
+        repository=FakeRepository(),
+        bar_provider=provider,
+        session_service=TokyoMarketSessionService(
+            trading_day_predicate=lambda _date: True
+        ),
+        data_source="realtime-test",
+    )
+
+    with pytest.raises(
+        JQuantsDownloadError,
+        match="server error",
+    ):
+        monitor.poll(
+            codes=("7203",),
+            observed_at=datetime(
+                2026,
+                7,
+                17,
+                9,
+                0,
+                tzinfo=JST,
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("maximum_codes_per_poll", 0),
+        ("rate_limit_cooldown_seconds", -1.0),
+    ],
+)
+def test_monitor_rejects_invalid_rate_limit_settings(
+    field_name: str,
+    field_value: object,
+) -> None:
+    """不正な取得制御設定を拒否する。"""
+
+    arguments: dict[str, object] = {
+        "repository": FakeRepository(),
+        "bar_provider": lambda _code, _date: [],
+        "data_source": "realtime-test",
+    }
+    arguments[field_name] = field_value
+
+    with pytest.raises(ValueError):
+        RealtimeMarketMonitor(**arguments)

@@ -7,6 +7,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
+from app.market.jquants_downloader import JQuantsDownloadError
 from app.market.models import StockPrice
 from app.market.realtime_models import (
     MarketSessionSnapshot,
@@ -139,12 +140,28 @@ class RealtimeMarketMonitor:
         session_service: TokyoMarketSessionService | None = None,
         interval_minutes: int = 5,
         data_source: str = "realtime",
+        maximum_codes_per_poll: int | None = None,
+        rate_limit_cooldown_seconds: float = 60.0,
     ) -> None:
         """Repository、Provider、監視設定を受け取る。"""
 
         if interval_minutes <= 0:
             raise ValueError(
                 "時間足の間隔は0より大きい必要があります。"
+            )
+
+        if (
+            maximum_codes_per_poll is not None
+            and maximum_codes_per_poll <= 0
+        ):
+            raise ValueError(
+                "1回の最大取得銘柄数は"
+                "0より大きい必要があります。"
+            )
+
+        if rate_limit_cooldown_seconds < 0:
+            raise ValueError(
+                "レート制限待機秒数は0以上である必要があります。"
             )
 
         normalized_source = data_source.strip()
@@ -163,6 +180,12 @@ class RealtimeMarketMonitor:
         )
         self.interval_minutes = interval_minutes
         self.data_source = normalized_source
+        self.maximum_codes_per_poll = maximum_codes_per_poll
+        self.rate_limit_cooldown_seconds = (
+            rate_limit_cooldown_seconds
+        )
+        self._next_code_index = 0
+        self._rate_limit_until: datetime | None = None
 
     def poll(
         self,
@@ -195,14 +218,51 @@ class RealtimeMarketMonitor:
                 code_count=len(normalized_codes),
             )
 
+        if self._is_rate_limit_cooldown_active(
+            session.observed_at
+        ):
+            return self._idle_result(
+                session=session,
+                decision=RealtimePollDecision.NO_NEW_BAR,
+                code_count=0,
+            )
+
+        selected_codes = self._select_codes(
+            normalized_codes
+        )
         fetched: list[StockPrice] = []
         new_bars: list[StockPrice] = []
 
-        for code in normalized_codes:
-            provider_bars = self.bar_provider(
-                code,
-                session.trading_date,
-            )
+        for code in selected_codes:
+            try:
+                provider_bars = self.bar_provider(
+                    code,
+                    session.trading_date,
+                )
+            except JQuantsDownloadError as error:
+                if not error.is_rate_limited:
+                    raise
+
+                cooldown_seconds = (
+                    error.retry_after_seconds
+                    if error.retry_after_seconds is not None
+                    else self.rate_limit_cooldown_seconds
+                )
+                self._rate_limit_until = (
+                    session.observed_at
+                    + timedelta(seconds=cooldown_seconds)
+                )
+
+                return RealtimeMarketPollResult(
+                    session=session,
+                    decision=RealtimePollDecision.NO_NEW_BAR,
+                    code_count=len(selected_codes),
+                    fetched_bar_count=len(fetched),
+                    new_bar_count=0,
+                    saved_bar_count=0,
+                    new_bars=(),
+                )
+
             fetched.extend(provider_bars)
 
             latest_saved = self.repository.latest_datetime(
@@ -237,7 +297,7 @@ class RealtimeMarketMonitor:
             return RealtimeMarketPollResult(
                 session=session,
                 decision=RealtimePollDecision.NO_NEW_BAR,
-                code_count=len(normalized_codes),
+                code_count=len(selected_codes),
                 fetched_bar_count=len(fetched),
                 new_bar_count=0,
                 saved_bar_count=0,
@@ -253,12 +313,57 @@ class RealtimeMarketMonitor:
         return RealtimeMarketPollResult(
             session=session,
             decision=RealtimePollDecision.NEW_BARS_SAVED,
-            code_count=len(normalized_codes),
+            code_count=len(selected_codes),
             fetched_bar_count=len(fetched),
             new_bar_count=len(ordered_new_bars),
             saved_bar_count=saved_count,
             new_bars=ordered_new_bars,
         )
+
+    def _select_codes(
+        self,
+        codes: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """取得上限に従い銘柄をラウンドロビン選択する。"""
+
+        limit = self.maximum_codes_per_poll
+
+        if limit is None or limit >= len(codes):
+            self._next_code_index = 0
+            return codes
+
+        start = self._next_code_index % len(codes)
+        selected = tuple(
+            codes[(start + offset) % len(codes)]
+            for offset in range(limit)
+        )
+        self._next_code_index = (
+            start + len(selected)
+        ) % len(codes)
+
+        return selected
+
+    def _is_rate_limit_cooldown_active(
+        self,
+        observed_at: datetime,
+    ) -> bool:
+        """429発生後のクールダウン中か返す。"""
+
+        if self._rate_limit_until is None:
+            return False
+
+        normalized_observed_at = self._normalize_datetime(
+            observed_at
+        )
+        normalized_limit = self._normalize_datetime(
+            self._rate_limit_until
+        )
+
+        if normalized_observed_at < normalized_limit:
+            return True
+
+        self._rate_limit_until = None
+        return False
 
     def _new_completed_bars(
         self,

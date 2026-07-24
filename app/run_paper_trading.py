@@ -6,6 +6,7 @@ import argparse
 import os
 import signal
 import sys
+from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -409,6 +410,7 @@ def create_runtime_notification_gateway(
         warning_channels=channel_names,
         error_channels=channel_names,
         critical_channels=channel_names,
+        quiet_hours_suppressed_severities=frozenset(),
         duplicate_cooldown_seconds=0,
     )
     bundle = NotificationComposition.create(
@@ -429,13 +431,13 @@ def _send_runtime_notification(
     event_type: str,
     error_output: TextIO,
 ) -> None:
-    """Runtime通知を送り、通知障害を取引処理から隔離する。"""
+    """Runtime通知を送り、チャネル別結果を運用ログへ出力する。"""
 
     if gateway is None:
         return
 
     try:
-        gateway.send(
+        result = gateway.send(
             NotificationGatewayRequest(
                 notification_id=(
                     f"paper-runtime-{uuid4().hex}"
@@ -467,6 +469,141 @@ def _send_runtime_notification(
             f" error={detail}",
             file=error_output,
         )
+        return
+
+    _print_runtime_notification_result(
+        result,
+        event_type=event_type,
+        output=error_output,
+    )
+
+
+def _print_runtime_notification_result(
+    result,
+    *,
+    event_type: str,
+    output: TextIO,
+) -> None:
+    """Gateway結果を安全に読み取り、通知診断ログを表示する。"""
+
+    routing_result = getattr(
+        result,
+        "routing_result",
+        None,
+    )
+
+    if routing_result is None:
+        print(
+            "外部通知を送信しました。"
+            f" event_type={event_type}"
+            " result=unavailable",
+            file=output,
+        )
+        return
+
+    routing = getattr(
+        routing_result,
+        "routing",
+        None,
+    )
+    delivery = getattr(
+        routing_result,
+        "delivery",
+        None,
+    )
+
+    if routing is None:
+        print(
+            "外部通知結果を取得できませんでした。"
+            f" event_type={event_type}",
+            file=output,
+        )
+        return
+
+    should_deliver = bool(
+        getattr(routing, "should_deliver", False)
+    )
+    channel_names = tuple(
+        getattr(routing, "channel_names", ())
+    )
+    reasons = tuple(
+        getattr(routing, "reasons", ())
+    )
+
+    if not should_deliver:
+        reason_text = ",".join(
+            getattr(reason, "value", str(reason))
+            for reason in reasons
+        ) or "unknown"
+        print(
+            "外部通知がルールにより抑止されました。"
+            f" event_type={event_type}"
+            f" reasons={reason_text}",
+            file=output,
+        )
+        return
+
+    channel_text = ",".join(channel_names) or "none"
+
+    if delivery is None:
+        print(
+            "外部通知の配信結果がありません。"
+            f" event_type={event_type}"
+            f" channels={channel_text}",
+            file=output,
+        )
+        return
+
+    decision = getattr(delivery, "decision", "unknown")
+    decision_text = getattr(decision, "value", str(decision))
+    channel_results = tuple(
+        getattr(delivery, "channels", ())
+    )
+
+    print(
+        "外部通知結果:"
+        f" event_type={event_type}"
+        f" decision={decision_text}"
+        f" channels={channel_text}",
+        file=output,
+    )
+
+    for channel_result in channel_results:
+        channel_name = getattr(
+            channel_result,
+            "channel_name",
+            "unknown",
+        )
+        delivered = bool(
+            getattr(channel_result, "delivered", False)
+        )
+        error_message = getattr(
+            channel_result,
+            "error_message",
+            None,
+        )
+
+        if delivered:
+            print(
+                "外部通知チャネル成功:"
+                f" event_type={event_type}"
+                f" channel={channel_name}",
+                file=output,
+            )
+            continue
+
+        detail = (
+            str(error_message).strip()
+            if error_message is not None
+            else "unknown"
+        ) or "unknown"
+        print(
+            "外部通知チャネル失敗:"
+            f" event_type={event_type}"
+            f" channel={channel_name}"
+            f" error={detail}",
+            file=output,
+        )
 
 
 def _startup_notification_message(
@@ -475,12 +612,12 @@ def _startup_notification_message(
     """開始通知本文を生成する。"""
 
     return (
-        "Paper Tradingを開始します。\\n"
-        f"監視銘柄数: {len(settings.codes)}\\n"
-        f"監視銘柄: {','.join(settings.codes)}\\n"
-        f"初期資金: {settings.initial_cash:,.0f}円\\n"
+        "Paper Tradingを開始します。\n"
+        f"監視銘柄数: {len(settings.codes)}\n"
+        f"監視銘柄: {','.join(settings.codes)}\n"
+        f"初期資金: {settings.initial_cash:,.0f}円\n"
         "実行間隔: "
-        f"{settings.cycle_interval_seconds:g}秒\\n"
+        f"{settings.cycle_interval_seconds:g}秒\n"
         f"最大サイクル数: {settings.maximum_cycles}"
     )
 
@@ -506,29 +643,97 @@ def _finished_notification_message(
         if result.error_message is not None
         else "なし"
     )
+    failure_diagnostics = _format_cycle_failure_diagnostics(
+        summary
+    )
 
     return (
-        "Paper Trading Daily Summary\\n"
-        f"取引日: {result.trading_date.isoformat()}\\n"
-        f"終了理由: {result.stop_reason.value}\\n"
-        f"Runtime状態: {summary.status.value}\\n"
-        f"実行時間: {duration_seconds:,.1f}秒\\n"
-        f"サイクル数: {summary.cycle_count}\\n"
+        "Paper Trading Daily Summary\n"
+        f"取引日: {result.trading_date.isoformat()}\n"
+        f"終了理由: {result.stop_reason.value}\n"
+        f"Runtime状態: {summary.status.value}\n"
+        f"実行時間: {duration_seconds:,.1f}秒\n"
+        f"サイクル数: {summary.cycle_count}\n"
         "成功サイクル: "
-        f"{summary.successful_cycle_count}\\n"
-        f"失敗サイクル: {summary.failed_cycle_count}\\n"
-        f"シグナル数: {summary.signal_count}\\n"
-        f"約定数: {summary.execution_count}\\n"
+        f"{summary.successful_cycle_count}\n"
+        f"失敗サイクル: {summary.failed_cycle_count}\n"
+        f"シグナル数: {summary.signal_count}\n"
+        f"約定数: {summary.execution_count}\n"
         "リスク判定済みサイクル: "
-        f"{summary.risk_evaluated_cycle_count}\\n"
+        f"{summary.risk_evaluated_cycle_count}\n"
         "リスク停止サイクル: "
-        f"{summary.risk_blocked_cycle_count}\\n"
-        f"初期純資産: {_format_money(summary.initial_equity)}\\n"
-        f"最終純資産: {_format_money(summary.final_equity)}\\n"
-        f"日次損益: {net_profit_loss}\\n"
-        f"日次収益率: {return_rate}\\n"
-        f"エラー: {error_message}"
+        f"{summary.risk_blocked_cycle_count}\n"
+        f"初期純資産: {_format_money(summary.initial_equity)}\n"
+        f"最終純資産: {_format_money(summary.final_equity)}\n"
+        f"日次損益: {net_profit_loss}\n"
+        f"日次収益率: {return_rate}\n"
+        f"Runtimeエラー: {error_message}"
+        f"{failure_diagnostics}"
     )
+
+
+def _format_cycle_failure_diagnostics(
+    summary,
+    *,
+    maximum_reasons: int = 3,
+) -> str:
+    """失敗サイクルの代表的な原因を通知向けに整形する。"""
+
+    reasons: list[str] = []
+
+    for record in getattr(summary, "records", ()):
+        cycle_result = getattr(
+            record,
+            "cycle_result",
+            None,
+        )
+
+        if cycle_result is None:
+            continue
+
+        if bool(
+            getattr(cycle_result, "is_successful", False)
+        ):
+            continue
+
+        raw_message = getattr(
+            cycle_result,
+            "error_message",
+            None,
+        )
+        message = (
+            str(raw_message).strip()
+            if raw_message is not None
+            else ""
+        )
+
+        if not message:
+            status = getattr(
+                cycle_result,
+                "status",
+                "unknown",
+            )
+            status_text = getattr(
+                status,
+                "value",
+                str(status),
+            )
+            message = f"詳細なし（status={status_text}）"
+
+        reasons.append(message)
+
+    if not reasons:
+        return "\nサイクル失敗原因: なし"
+
+    counts = Counter(reasons)
+    lines = ["", "サイクル失敗原因（上位）:"]
+
+    for reason, count in counts.most_common(
+        maximum_reasons
+    ):
+        lines.append(f"- {count}回: {reason}")
+
+    return "\n".join(lines)
 
 
 def _format_money(
@@ -1049,6 +1254,16 @@ def _print_result(
     if result.error_message is not None:
         print(
             f"error={result.error_message}",
+            file=output,
+        )
+
+    diagnostics = _format_cycle_failure_diagnostics(
+        result.summary
+    ).lstrip("\n")
+
+    if diagnostics:
+        print(
+            diagnostics,
             file=output,
         )
 
