@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from app.runtime.paper_trading_composition import (
+    PaperTradingComposition,
     PaperTradingProductionSettings,
 )
 
@@ -121,3 +122,16 @@ def test_settings_accepts_safe_production_values(
     assert settings.rate_limit_cooldown_seconds == 90.0
     assert settings.commission_per_order == 100.0
     assert settings.slippage_rate == 0.001
+
+def test_settings_uses_safe_polling_defaults(
+    tmp_path: Path,
+) -> None:
+    """本番既定値が100銘柄向けの安全な取得制御を保持する。"""
+
+    settings = PaperTradingProductionSettings(
+        database_path=tmp_path / "katana.db",
+        codes=("7203",),
+    )
+
+    assert settings.maximum_codes_per_poll == 10
+    assert settings.rate_limit_cooldown_seconds == 60.0

@@ -48,6 +48,9 @@ from app.runtime.production_readiness import (
 )
 from app.settings import ROOT_DIR, Settings
 from app.watchlist import load_watchlist
+from app.backtest.orb_signal_strategy import (
+    OrbSignalDiagnosticSnapshot,
+)
 
 
 DEFAULT_DATABASE_PATH = Path("data/katana.db")
@@ -624,6 +627,8 @@ def _startup_notification_message(
 
 def _finished_notification_message(
     result: PaperTradingDayResult,
+    *,
+    orb_diagnostics: OrbSignalDiagnosticSnapshot | None = None,
 ) -> str:
     """終了通知を日次サマリー形式で生成する。"""
 
@@ -645,6 +650,9 @@ def _finished_notification_message(
     )
     failure_diagnostics = _format_cycle_failure_diagnostics(
         summary
+    )
+    live_orb_diagnostics = _format_live_orb_diagnostics(
+        orb_diagnostics
     )
 
     return (
@@ -669,7 +677,76 @@ def _finished_notification_message(
         f"日次収益率: {return_rate}\n"
         f"Runtimeエラー: {error_message}"
         f"{failure_diagnostics}"
+        f"{live_orb_diagnostics}"
     )
+
+
+
+def _format_live_orb_diagnostics(
+    snapshot: OrbSignalDiagnosticSnapshot | None,
+) -> str:
+    """実運用ORBの判定カウンターを終了通知向けに整形する。"""
+
+    if snapshot is None:
+        return "\n\nORB Live Diagnostics\n診断情報: 利用不可"
+
+    counts = snapshot.counts
+
+    labels = (
+        ("opening_range", "Opening Range足"),
+        ("opening_range_missing", "Opening Range不足"),
+        ("opening_volume", "Opening出来高不足"),
+        ("opening_turnover", "Opening売買代金不足"),
+        ("no_price_breakout", "価格ブレイクなし"),
+        ("breakout_volume", "Breakout出来高不足"),
+        ("breakout_volume_ratio", "出来高倍率不足"),
+        ("breakout_turnover", "Breakout売買代金不足"),
+        ("price_range", "価格帯条件不適合"),
+        ("force_exit_time", "エントリー期限超過"),
+        ("already_entered", "当日エントリー済み"),
+        ("position_open", "ポジション保有中評価"),
+        ("buy_signal", "BUY生成"),
+    )
+
+    lines = [
+        "",
+        "",
+        "ORB Live Diagnostics",
+        f"評価記録数: {snapshot.evaluation_count}",
+    ]
+
+    for key, label in labels:
+        lines.append(
+            f"{label}: {counts.get(key, 0)}"
+        )
+
+    rejection_keys = (
+        "opening_range_missing",
+        "opening_volume",
+        "opening_turnover",
+        "no_price_breakout",
+        "breakout_volume",
+        "breakout_volume_ratio",
+        "breakout_turnover",
+        "price_range",
+        "force_exit_time",
+    )
+    rejection_counts = [
+        (key, counts.get(key, 0))
+        for key in rejection_keys
+        if counts.get(key, 0) > 0
+    ]
+    rejection_counts.sort(
+        key=lambda item: (-item[1], item[0])
+    )
+
+    if rejection_counts:
+        lines.append("主な見送り理由:")
+        for key, count in rejection_counts[:5]:
+            label = dict(labels)[key]
+            lines.append(f"- {label}: {count}")
+
+    return "\n".join(lines)
 
 
 def _format_cycle_failure_diagnostics(
@@ -769,6 +846,40 @@ def _format_percentage(
         else ""
     )
     return f"{sign}{percentage:,.4f}%"
+
+
+def _extract_live_orb_diagnostics(
+    bundle: PaperTradingApplicationBundle,
+) -> OrbSignalDiagnosticSnapshot | None:
+    """本番Bundleから実運用ORB診断集計を安全に取得する。"""
+
+    signal_engine = getattr(
+        bundle,
+        "signal_engine",
+        None,
+    )
+
+    if signal_engine is None:
+        return None
+
+    snapshot_provider = getattr(
+        signal_engine,
+        "diagnostic_snapshot",
+        None,
+    )
+
+    if not callable(snapshot_provider):
+        return None
+
+    snapshot = snapshot_provider()
+
+    if not isinstance(
+        snapshot,
+        OrbSignalDiagnosticSnapshot,
+    ):
+        return None
+
+    return snapshot
 
 
 def run(
@@ -896,11 +1007,22 @@ def run(
         )
 
         result = bundle.run()
+        live_orb_diagnostics = (
+            _extract_live_orb_diagnostics(bundle)
+        )
 
         _print_result(
             result,
             output=resolved_output,
         )
+
+        if live_orb_diagnostics is not None:
+            print(
+                _format_live_orb_diagnostics(
+                    live_orb_diagnostics
+                ).lstrip("\n"),
+                file=resolved_output,
+            )
 
         exit_code = _resolve_exit_code(result)
         _send_runtime_notification(
@@ -911,7 +1033,8 @@ def run(
                 else "Paper Trading Stopped"
             ),
             message=_finished_notification_message(
-                result
+                result,
+                orb_diagnostics=live_orb_diagnostics,
             ),
             severity=(
                 NotificationSeverity.INFO

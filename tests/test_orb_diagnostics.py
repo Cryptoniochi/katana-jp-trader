@@ -332,3 +332,31 @@ def test_diagnostic_creates_symbol_summary() -> None:
     assert summary.price_range_pass_count == 1
     assert summary.exit_available_count == 1
     assert summary.trade_candidate_count == 1
+
+
+def test_format_orb_diagnostic_report_summarizes_stages() -> None:
+    """通知向け診断サマリーに段階別件数を含める。"""
+
+    from app.strategy.orb_diagnostics import format_orb_diagnostic_report
+
+    report = OrbDiagnosticService(create_strategy()).run(create_prices())
+    message = format_orb_diagnostic_report(report)
+
+    assert "ORB Signal Diagnostics" in message
+    assert "診断対象: 1" in message
+    assert "価格ブレイク発生: 1" in message
+    assert "最終取引候補: 1" in message
+
+
+def test_format_orb_diagnostic_report_lists_rejection_reason() -> None:
+    """通知向け診断サマリーに除外理由を含める。"""
+
+    from app.strategy.orb_diagnostics import format_orb_diagnostic_report
+
+    report = OrbDiagnosticService(
+        create_strategy(min_opening_range_volume=300_000)
+    ).run(create_prices(opening_volume=100_000))
+    message = format_orb_diagnostic_report(report)
+
+    assert "主な除外理由:" in message
+    assert "- opening_volume: 1" in message

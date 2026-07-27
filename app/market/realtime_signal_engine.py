@@ -14,6 +14,7 @@ from app.backtest.historical_models import (
 )
 from app.backtest.market_replay import MarketReplayFrame
 from app.backtest.orb_signal_strategy import (
+    OrbSignalDiagnosticSnapshot,
     OrbSignalStrategy,
     OrbSignalStrategySettings,
 )
@@ -39,6 +40,10 @@ class RealtimeStrategy(Protocol):
 
     def reset(self) -> None:
         """内部状態を初期化する。"""
+
+
+    def diagnostic_snapshot(self) -> OrbSignalDiagnosticSnapshot:
+        """現在までの診断集計を返す。"""
 
 
 StrategyFactory = Callable[[str], RealtimeStrategy]
@@ -179,6 +184,48 @@ class RealtimeSignalEngine:
 
         self._bars_by_code.pop(normalized_code, None)
         self._last_processed_at.pop(normalized_code, None)
+
+    def diagnostic_snapshot(
+        self,
+        code: str | None = None,
+    ) -> OrbSignalDiagnosticSnapshot:
+        """全銘柄または指定銘柄のORB診断集計を返す。"""
+
+        if code is not None:
+            strategy = self._strategies.get(
+                self._normalize_code(code)
+            )
+            if strategy is None:
+                return OrbSignalDiagnosticSnapshot(
+                    evaluation_count=0,
+                    counts={},
+                )
+            getter = getattr(strategy, "diagnostic_snapshot", None)
+            if getter is None:
+                return OrbSignalDiagnosticSnapshot(
+                    evaluation_count=0,
+                    counts={},
+                )
+            return getter()
+
+        total_evaluations = 0
+        total_counts: dict[str, int] = defaultdict(int)
+
+        for strategy in self._strategies.values():
+            getter = getattr(strategy, "diagnostic_snapshot", None)
+            if getter is None:
+                continue
+
+            snapshot = getter()
+            total_evaluations += snapshot.evaluation_count
+
+            for reason, count in snapshot.counts.items():
+                total_counts[reason] += count
+
+        return OrbSignalDiagnosticSnapshot(
+            evaluation_count=total_evaluations,
+            counts=dict(total_counts),
+        )
 
     def last_processed_at(
         self,

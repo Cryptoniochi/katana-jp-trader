@@ -14,7 +14,9 @@ from app.run_paper_trading import (
     build_argument_parser,
     create_production_settings,
     create_runtime_notification_gateway,
+    _extract_live_orb_diagnostics,
     _finished_notification_message,
+    _format_live_orb_diagnostics,
     _format_money,
     _format_percentage,
     run,
@@ -781,3 +783,84 @@ def test_format_percentage(
     """比率を百分率表示へ整形する。"""
 
     assert _format_percentage(value) == expected
+
+
+def test_format_live_orb_diagnostics_includes_rejection_counts() -> None:
+    """実運用ORB診断を日次表示向けに整形する。"""
+
+    from app.backtest.orb_signal_strategy import (
+        OrbSignalDiagnosticSnapshot,
+    )
+
+    snapshot = OrbSignalDiagnosticSnapshot(
+        evaluation_count=120,
+        counts={
+            "opening_range": 40,
+            "no_price_breakout": 70,
+            "breakout_volume_ratio": 9,
+            "buy_signal": 1,
+        },
+    )
+
+    message = _format_live_orb_diagnostics(snapshot)
+
+    assert "ORB Live Diagnostics" in message
+    assert "評価記録数: 120" in message
+    assert "価格ブレイクなし: 70" in message
+    assert "出来高倍率不足: 9" in message
+    assert "BUY生成: 1" in message
+    assert "主な見送り理由:" in message
+
+
+def test_finished_notification_includes_live_orb_diagnostics() -> None:
+    """終了通知へ実運用ORB診断を含める。"""
+
+    from app.backtest.orb_signal_strategy import (
+        OrbSignalDiagnosticSnapshot,
+    )
+
+    message = _finished_notification_message(
+        FakeResult(),
+        orb_diagnostics=OrbSignalDiagnosticSnapshot(
+            evaluation_count=10,
+            counts={
+                "no_price_breakout": 9,
+                "buy_signal": 1,
+            },
+        ),
+    )
+
+    assert "ORB Live Diagnostics" in message
+    assert "価格ブレイクなし: 9" in message
+    assert "BUY生成: 1" in message
+
+
+def test_extract_live_orb_diagnostics_from_bundle() -> None:
+    """Bundleが保持するSignal Engineから診断集計を取得する。"""
+
+    from app.backtest.orb_signal_strategy import (
+        OrbSignalDiagnosticSnapshot,
+    )
+
+    expected = OrbSignalDiagnosticSnapshot(
+        evaluation_count=5,
+        counts={"no_price_breakout": 5},
+    )
+
+    class FakeSignalEngine:
+        def diagnostic_snapshot(self):
+            return expected
+
+    class Bundle:
+        signal_engine = FakeSignalEngine()
+
+    assert _extract_live_orb_diagnostics(Bundle()) == expected
+
+
+def test_extract_live_orb_diagnostics_returns_none_when_unavailable() -> None:
+    """旧Bundleなど診断未対応の場合は安全にNoneを返す。"""
+
+    class Bundle:
+        pass
+
+    assert _extract_live_orb_diagnostics(Bundle()) is None

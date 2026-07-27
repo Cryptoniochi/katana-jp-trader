@@ -241,3 +241,42 @@ def test_engine_accepts_naive_market_datetime_as_jst() -> None:
 
     assert result.processed_bar_count == 1
     assert engine.last_processed_at("7203").tzinfo == JST
+
+
+def test_engine_aggregates_orb_diagnostics() -> None:
+    """銘柄別ORB診断をEngine全体で集計する。"""
+
+    engine = RealtimeSignalEngine()
+    result = engine.process(
+        opening_and_breakout_prices("7203")
+        + opening_and_breakout_prices("6758")
+    )
+
+    assert result.signal_count == 2
+    snapshot = engine.diagnostic_snapshot()
+    assert snapshot.counts["opening_range"] == 8
+    assert snapshot.counts["buy_signal"] == 2
+    assert snapshot.buy_signal_count == 2
+
+
+def test_engine_returns_diagnostics_by_code() -> None:
+    """指定銘柄だけのORB診断を取得できる。"""
+
+    engine = RealtimeSignalEngine()
+    engine.process(
+        opening_and_breakout_prices("7203")
+        + opening_and_breakout_prices("6758")
+    )
+
+    snapshot = engine.diagnostic_snapshot("7203")
+    assert snapshot.counts["opening_range"] == 4
+    assert snapshot.counts["buy_signal"] == 1
+
+
+def test_engine_returns_empty_diagnostics_for_unknown_code() -> None:
+    """未処理銘柄の診断は空で返す。"""
+
+    snapshot = RealtimeSignalEngine().diagnostic_snapshot("7203")
+
+    assert snapshot.evaluation_count == 0
+    assert snapshot.counts == {}

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import date, time
 from enum import StrEnum
+from collections import Counter
 
 from app.backtest.historical_models import MarketTimeframe
 from app.backtest.market_replay import MarketReplayFrame
@@ -18,6 +19,38 @@ class OrbExitReason(StrEnum):
     STOP_LOSS = "stop_loss"
     TAKE_PROFIT = "take_profit"
     FORCE_EXIT = "force_exit"
+
+
+class OrbEntryDecision(StrEnum):
+    """ORBエントリー判定の結果。"""
+
+    OPENING_RANGE = "opening_range"
+    FORCE_EXIT_TIME = "force_exit_time"
+    OPENING_RANGE_MISSING = "opening_range_missing"
+    OPENING_VOLUME = "opening_volume"
+    OPENING_TURNOVER = "opening_turnover"
+    NO_PRICE_BREAKOUT = "no_price_breakout"
+    BREAKOUT_VOLUME = "breakout_volume"
+    BREAKOUT_VOLUME_RATIO = "breakout_volume_ratio"
+    BREAKOUT_TURNOVER = "breakout_turnover"
+    PRICE_RANGE = "price_range"
+    BUY_SIGNAL = "buy_signal"
+    ALREADY_ENTERED = "already_entered"
+    POSITION_OPEN = "position_open"
+
+
+@dataclass(frozen=True, slots=True)
+class OrbSignalDiagnosticSnapshot:
+    """1戦略インスタンスのORB診断集計。"""
+
+    evaluation_count: int
+    counts: dict[str, int]
+
+    @property
+    def buy_signal_count(self) -> int:
+        """BUY生成回数を返す。"""
+
+        return self.counts.get(OrbEntryDecision.BUY_SIGNAL.value, 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +159,8 @@ class OrbSignalStrategy:
             else OrbSignalStrategySettings()
         )
         self._state: _OrbDailyState | None = None
+        self._diagnostic_counts: Counter[str] = Counter()
+        self._diagnostic_evaluation_count = 0
 
     def evaluate(
         self,
@@ -153,10 +188,12 @@ class OrbSignalStrategy:
         current_time = current.opened_at.time()
 
         if current_time <= self.settings.opening_range_end:
+            self._record_diagnostic(OrbEntryDecision.OPENING_RANGE)
             self._update_opening_range(frame)
             return ()
 
         if state.position_open:
+            self._record_diagnostic(OrbEntryDecision.POSITION_OPEN)
             exit_signal = self._evaluate_exit(frame)
 
             if exit_signal is None:
@@ -168,6 +205,7 @@ class OrbSignalStrategy:
             return (exit_signal,)
 
         if state.entered:
+            self._record_diagnostic(OrbEntryDecision.ALREADY_ENTERED)
             return ()
 
         buy_signal = self._evaluate_entry(frame)
@@ -175,6 +213,7 @@ class OrbSignalStrategy:
         if buy_signal is None:
             return ()
 
+        self._record_diagnostic(OrbEntryDecision.BUY_SIGNAL)
         state.entered = True
         state.position_open = True
         state.entry_price = current.close_price
@@ -182,9 +221,28 @@ class OrbSignalStrategy:
         return (buy_signal,)
 
     def reset(self) -> None:
-        """内部状態を初期化する。"""
+        """内部状態と診断集計を初期化する。"""
 
         self._state = None
+        self._diagnostic_counts.clear()
+        self._diagnostic_evaluation_count = 0
+
+    def diagnostic_snapshot(self) -> OrbSignalDiagnosticSnapshot:
+        """現在までのORB診断集計を返す。"""
+
+        return OrbSignalDiagnosticSnapshot(
+            evaluation_count=self._diagnostic_evaluation_count,
+            counts=dict(self._diagnostic_counts),
+        )
+
+    def _record_diagnostic(
+        self,
+        decision: OrbEntryDecision,
+    ) -> None:
+        """ORB判定結果を集計する。"""
+
+        self._diagnostic_counts[decision.value] += 1
+        self._diagnostic_evaluation_count += 1
 
     def _update_opening_range(
         self,
@@ -215,7 +273,7 @@ class OrbSignalStrategy:
         self,
         frame: MarketReplayFrame,
     ) -> TradeSignal | None:
-        """ブレイク条件成立時にBUYシグナルを返す。"""
+        """ブレイク条件を評価し、見送り理由も診断集計する。"""
 
         assert self._state is not None
 
@@ -224,35 +282,68 @@ class OrbSignalStrategy:
         current_time = bar.opened_at.time()
 
         if current_time >= self.settings.force_exit_time:
+            self._record_diagnostic(OrbEntryDecision.FORCE_EXIT_TIME)
             return None
 
         if (
             state.opening_high is None
             or state.opening_bar_count <= 0
         ):
+            self._record_diagnostic(OrbEntryDecision.OPENING_RANGE_MISSING)
             return None
 
-        if not self._passes_opening_filters():
+        if (
+            self.settings.min_opening_range_volume is not None
+            and state.opening_volume
+            < self.settings.min_opening_range_volume
+        ):
+            self._record_diagnostic(OrbEntryDecision.OPENING_VOLUME)
+            return None
+
+        if (
+            self.settings.min_opening_range_turnover is not None
+            and state.opening_turnover
+            < self.settings.min_opening_range_turnover
+        ):
+            self._record_diagnostic(OrbEntryDecision.OPENING_TURNOVER)
             return None
 
         if bar.high_price <= state.opening_high:
+            self._record_diagnostic(OrbEntryDecision.NO_PRICE_BREAKOUT)
             return None
 
         average_opening_volume = (
-            state.opening_volume
-            / state.opening_bar_count
+            state.opening_volume / state.opening_bar_count
         )
 
-        if not self._passes_breakout_filters(
-            volume=bar.volume,
-            close_price=bar.close_price,
-            average_opening_volume=average_opening_volume,
+        if (
+            self.settings.min_breakout_volume is not None
+            and bar.volume < self.settings.min_breakout_volume
         ):
+            self._record_diagnostic(OrbEntryDecision.BREAKOUT_VOLUME)
             return None
 
-        if not self._passes_price_filter(
-            bar.close_price
+        if self.settings.breakout_volume_ratio is not None:
+            if (
+                average_opening_volume <= 0
+                or bar.volume / average_opening_volume
+                < self.settings.breakout_volume_ratio
+            ):
+                self._record_diagnostic(
+                    OrbEntryDecision.BREAKOUT_VOLUME_RATIO
+                )
+                return None
+
+        if (
+            self.settings.min_breakout_turnover is not None
+            and bar.close_price * bar.volume
+            < self.settings.min_breakout_turnover
         ):
+            self._record_diagnostic(OrbEntryDecision.BREAKOUT_TURNOVER)
+            return None
+
+        if not self._passes_price_filter(bar.close_price):
+            self._record_diagnostic(OrbEntryDecision.PRICE_RANGE)
             return None
 
         return TradeSignal(
@@ -270,9 +361,7 @@ class OrbSignalStrategy:
             metadata={
                 "opening_range_high": state.opening_high,
                 "breakout_high": bar.high_price,
-                "average_opening_volume": (
-                    average_opening_volume
-                ),
+                "average_opening_volume": average_opening_volume,
             },
         )
 

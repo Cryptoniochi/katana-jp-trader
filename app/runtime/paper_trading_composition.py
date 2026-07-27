@@ -217,6 +217,7 @@ class PaperTradingProductionBundle:
     trading_loop_component: TradingLoopComponent
     runtime_bundle: PaperTradingRuntimeBundle
     market_monitor: RealtimeMarketMonitor
+    signal_engine: RealtimeSignalEngine
     paper_broker: PaperBroker
     broker_recovery_result: PaperBrokerRecoveryResult
     portfolio_service: PortfolioService
@@ -473,9 +474,11 @@ class PaperTradingComposition:
             )
         )
 
+        signal_engine = RealtimeSignalEngine()
+
         realtime_paper_trading_service = (
             RealtimePaperTradingService(
-                signal_engine=RealtimeSignalEngine(),
+                signal_engine=signal_engine,
                 order_queue_service=order_queue_service,
                 queue_execution_service=(
                     queue_execution_service
@@ -556,6 +559,7 @@ class PaperTradingComposition:
             ),
             runtime_bundle=runtime_bundle,
             market_monitor=market_monitor,
+            signal_engine=signal_engine,
             paper_broker=paper_broker,
             broker_recovery_result=(
                 broker_recovery_result

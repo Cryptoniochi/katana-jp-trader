@@ -369,3 +369,61 @@ def test_orb_reset_clears_state() -> None:
     )
 
     assert first == second
+
+
+def test_orb_diagnostics_records_no_price_breakout() -> None:
+    """価格ブレイク未発生を診断集計できる。"""
+
+    strategy, result = run_strategy(
+        (
+            bar(9, 0, high_price=1000.0),
+            bar(9, 5, high_price=1000.0),
+            bar(9, 10, high_price=1000.0),
+            bar(9, 15, high_price=1000.0),
+            bar(9, 20, high_price=1000.0),
+        )
+    )
+
+    assert result.signal_count == 0
+    snapshot = strategy.diagnostic_snapshot()
+    assert snapshot.counts["opening_range"] == 4
+    assert snapshot.counts["no_price_breakout"] == 1
+    assert snapshot.buy_signal_count == 0
+
+
+def test_orb_diagnostics_records_buy_signal() -> None:
+    """BUY生成を診断集計できる。"""
+
+    strategy, result = run_strategy(
+        (
+            bar(9, 0, high_price=1000.0),
+            bar(9, 5, high_price=1000.0),
+            bar(9, 10, high_price=1000.0),
+            bar(9, 15, high_price=1000.0),
+            bar(9, 20, high_price=1010.0, close_price=1005.0),
+        )
+    )
+
+    assert result.signal_count == 1
+    snapshot = strategy.diagnostic_snapshot()
+    assert snapshot.counts["buy_signal"] == 1
+    assert snapshot.buy_signal_count == 1
+
+
+def test_orb_reset_clears_diagnostics() -> None:
+    """resetで診断集計も初期化する。"""
+
+    strategy, _result = run_strategy(
+        (
+            bar(9, 0, high_price=1000.0),
+            bar(9, 5, high_price=1000.0),
+            bar(9, 10, high_price=1000.0),
+            bar(9, 15, high_price=1000.0),
+            bar(9, 20, high_price=1000.0),
+        )
+    )
+
+    assert strategy.diagnostic_snapshot().evaluation_count > 0
+    strategy.reset()
+    assert strategy.diagnostic_snapshot().evaluation_count == 0
+    assert strategy.diagnostic_snapshot().counts == {}

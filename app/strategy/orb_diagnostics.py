@@ -655,3 +655,51 @@ class OrbDiagnosticWriter:
                 )
 
         return file_path
+
+
+def format_orb_diagnostic_report(
+    report: OrbDiagnosticReport,
+    *,
+    maximum_reasons: int = 5,
+) -> str:
+    """ORB診断報告をPaper Tradingの日次通知向けに整形する。"""
+
+    results = report.daily_results
+
+    if not results:
+        return (
+            "ORB Signal Diagnostics\n"
+            "診断対象: 0\n"
+            "診断データがありません。"
+        )
+
+    rejection_counts: dict[str, int] = defaultdict(int)
+    for result in results:
+        if result.rejection_reason:
+            rejection_counts[result.rejection_reason] += 1
+
+    lines = [
+        "ORB Signal Diagnostics",
+        f"診断対象: {len(results)}",
+        f"Opening Range形成: {sum(x.opening_range_available for x in results)}",
+        f"Opening出来高通過: {sum(x.opening_volume_passed for x in results)}",
+        f"Opening売買代金通過: {sum(x.opening_turnover_passed for x in results)}",
+        f"価格ブレイク発生: {sum(x.price_breakout_found for x in results)}",
+        f"Breakout出来高通過: {sum(x.breakout_volume_passed for x in results)}",
+        f"出来高倍率通過: {sum(x.breakout_volume_ratio_passed for x in results)}",
+        f"Breakout売買代金通過: {sum(x.breakout_turnover_passed for x in results)}",
+        f"価格帯条件通過: {sum(x.price_range_passed for x in results)}",
+        f"決済足あり: {sum(x.exit_available for x in results)}",
+        f"最終取引候補: {sum(x.trade_candidate for x in results)}",
+    ]
+
+    if rejection_counts:
+        lines.append("主な除外理由:")
+        ordered = sorted(
+            rejection_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+        for reason, count in ordered[:maximum_reasons]:
+            lines.append(f"- {reason}: {count}")
+
+    return "\n".join(lines)
