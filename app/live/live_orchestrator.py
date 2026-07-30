@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import sleep
 from typing import Protocol
@@ -20,6 +22,34 @@ from app.market.realtime_models import (
 from app.market.realtime_paper_trading_service import (
     RealtimePaperTradingResult,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class LiveMarketDataDiagnosticSnapshot:
+    """市場データからPaper Tradingまでの経路診断。"""
+
+    cycle_count: int
+    decision_counts: dict[str, int]
+    fetched_bar_count: int
+    new_bar_count: int
+    saved_bar_count: int
+    paper_trading_call_count: int
+    paper_trading_input_bar_count: int
+    signal_processed_bar_count: int
+    signal_skipped_duplicate_count: int
+    signal_count: int
+
+    @property
+    def new_bars_saved_cycle_count(self) -> int:
+        return self.decision_counts.get(
+            RealtimePollDecision.NEW_BARS_SAVED.value, 0
+        )
+
+    @property
+    def no_new_bar_cycle_count(self) -> int:
+        return self.decision_counts.get(
+            RealtimePollDecision.NO_NEW_BAR.value, 0
+        )
 
 
 class LiveMarketMonitor(Protocol):
@@ -78,6 +108,54 @@ class LiveTradingOrchestrator:
             if stop_requested is not None
             else lambda: False
         )
+        self._diagnostic_cycle_count = 0
+        self._diagnostic_decisions: Counter[str] = Counter()
+        self._diagnostic_fetched_bar_count = 0
+        self._diagnostic_new_bar_count = 0
+        self._diagnostic_saved_bar_count = 0
+        self._diagnostic_paper_call_count = 0
+        self._diagnostic_paper_input_bar_count = 0
+        self._diagnostic_signal_processed_bar_count = 0
+        self._diagnostic_signal_skipped_duplicate_count = 0
+        self._diagnostic_signal_count = 0
+
+    def diagnostic_snapshot(
+        self,
+    ) -> LiveMarketDataDiagnosticSnapshot:
+        """現在までの市場データ経路診断を返す。"""
+
+        return LiveMarketDataDiagnosticSnapshot(
+            cycle_count=self._diagnostic_cycle_count,
+            decision_counts=dict(self._diagnostic_decisions),
+            fetched_bar_count=self._diagnostic_fetched_bar_count,
+            new_bar_count=self._diagnostic_new_bar_count,
+            saved_bar_count=self._diagnostic_saved_bar_count,
+            paper_trading_call_count=self._diagnostic_paper_call_count,
+            paper_trading_input_bar_count=(
+                self._diagnostic_paper_input_bar_count
+            ),
+            signal_processed_bar_count=(
+                self._diagnostic_signal_processed_bar_count
+            ),
+            signal_skipped_duplicate_count=(
+                self._diagnostic_signal_skipped_duplicate_count
+            ),
+            signal_count=self._diagnostic_signal_count,
+        )
+
+    def reset_diagnostics(self) -> None:
+        """市場データ経路診断を初期化する。"""
+
+        self._diagnostic_cycle_count = 0
+        self._diagnostic_decisions.clear()
+        self._diagnostic_fetched_bar_count = 0
+        self._diagnostic_new_bar_count = 0
+        self._diagnostic_saved_bar_count = 0
+        self._diagnostic_paper_call_count = 0
+        self._diagnostic_paper_input_bar_count = 0
+        self._diagnostic_signal_processed_bar_count = 0
+        self._diagnostic_signal_skipped_duplicate_count = 0
+        self._diagnostic_signal_count = 0
 
     def run(
         self,
@@ -183,18 +261,24 @@ class LiveTradingOrchestrator:
                 codes=codes,
                 observed_at=started_at,
             )
+            self._record_market_result(market_result)
             paper_result = None
 
             if (
                 market_result.decision
                 is RealtimePollDecision.NEW_BARS_SAVED
             ):
+                self._diagnostic_paper_call_count += 1
+                self._diagnostic_paper_input_bar_count += len(
+                    market_result.new_bars
+                )
                 paper_result = (
                     self.paper_trading_service.process(
                         market_result.new_bars,
                         continue_on_error=continue_on_error,
                     )
                 )
+                self._record_paper_result(paper_result)
 
             return LiveCycleResult(
                 cycle_number=cycle_number,
@@ -219,6 +303,32 @@ class LiveTradingOrchestrator:
                 paper_trading_result=None,
                 error_message=str(error),
             )
+
+    def _record_market_result(
+        self,
+        result: RealtimeMarketPollResult,
+    ) -> None:
+        self._diagnostic_cycle_count += 1
+        self._diagnostic_decisions[result.decision.value] += 1
+        self._diagnostic_fetched_bar_count += result.fetched_bar_count
+        self._diagnostic_new_bar_count += result.new_bar_count
+        self._diagnostic_saved_bar_count += result.saved_bar_count
+
+    def _record_paper_result(
+        self,
+        result: RealtimePaperTradingResult,
+    ) -> None:
+        signal_result = result.signal_result
+        if signal_result is None:
+            return
+
+        self._diagnostic_signal_processed_bar_count += (
+            signal_result.processed_bar_count
+        )
+        self._diagnostic_signal_skipped_duplicate_count += (
+            signal_result.skipped_duplicate_count
+        )
+        self._diagnostic_signal_count += signal_result.signal_count
 
     def _current_time(self) -> datetime:
         """タイムゾーン付き現在日時を返す。"""

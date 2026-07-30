@@ -37,6 +37,22 @@ from app.trading.order_models import OrderType
 from app.trading.signal_models import TradeSignal
 
 
+@dataclass(frozen=True, slots=True)
+class RealtimePaperTradingDiagnosticSnapshot:
+    """Paper Tradingサービス内部のデータフロー診断。"""
+
+    process_call_count: int
+    input_bar_count: int
+    signal_engine_call_count: int
+    signal_processed_bar_count: int
+    signal_skipped_duplicate_count: int
+    signal_count: int
+    queue_count: int
+    execution_count: int
+    portfolio_update_count: int
+    failed_process_count: int
+
+
 class RealtimeRiskResultProvider(Protocol):
     """注文執行前に利用する最新Risk結果の取得処理。"""
 
@@ -216,6 +232,56 @@ class RealtimePaperTradingService:
             risk_aware_execution_service
         )
         self.risk_result_provider = risk_result_provider
+        self._diagnostic_process_call_count = 0
+        self._diagnostic_input_bar_count = 0
+        self._diagnostic_signal_engine_call_count = 0
+        self._diagnostic_signal_processed_bar_count = 0
+        self._diagnostic_signal_skipped_duplicate_count = 0
+        self._diagnostic_signal_count = 0
+        self._diagnostic_queue_count = 0
+        self._diagnostic_execution_count = 0
+        self._diagnostic_portfolio_update_count = 0
+        self._diagnostic_failed_process_count = 0
+
+    def diagnostic_snapshot(
+        self,
+    ) -> RealtimePaperTradingDiagnosticSnapshot:
+        """現在までのPaper Tradingデータフロー診断を返す。"""
+
+        return RealtimePaperTradingDiagnosticSnapshot(
+            process_call_count=self._diagnostic_process_call_count,
+            input_bar_count=self._diagnostic_input_bar_count,
+            signal_engine_call_count=(
+                self._diagnostic_signal_engine_call_count
+            ),
+            signal_processed_bar_count=(
+                self._diagnostic_signal_processed_bar_count
+            ),
+            signal_skipped_duplicate_count=(
+                self._diagnostic_signal_skipped_duplicate_count
+            ),
+            signal_count=self._diagnostic_signal_count,
+            queue_count=self._diagnostic_queue_count,
+            execution_count=self._diagnostic_execution_count,
+            portfolio_update_count=(
+                self._diagnostic_portfolio_update_count
+            ),
+            failed_process_count=self._diagnostic_failed_process_count,
+        )
+
+    def reset_diagnostics(self) -> None:
+        """Paper Tradingデータフロー診断を初期化する。"""
+
+        self._diagnostic_process_call_count = 0
+        self._diagnostic_input_bar_count = 0
+        self._diagnostic_signal_engine_call_count = 0
+        self._diagnostic_signal_processed_bar_count = 0
+        self._diagnostic_signal_skipped_duplicate_count = 0
+        self._diagnostic_signal_count = 0
+        self._diagnostic_queue_count = 0
+        self._diagnostic_execution_count = 0
+        self._diagnostic_portfolio_update_count = 0
+        self._diagnostic_failed_process_count = 0
 
     def process(
         self,
@@ -231,6 +297,9 @@ class RealtimePaperTradingService:
             raise ValueError(
                 "取得件数は0より大きい必要があります。"
             )
+
+        self._diagnostic_process_call_count += 1
+        self._diagnostic_input_bar_count += len(prices)
 
         try:
             ordered_prices = tuple(
@@ -269,8 +338,18 @@ class RealtimePaperTradingService:
                     float(price.close),
                 )
 
+                self._diagnostic_signal_engine_call_count += 1
                 single_signal_result = (
                     self.signal_engine.process((price,))
+                )
+                self._diagnostic_signal_processed_bar_count += (
+                    single_signal_result.processed_bar_count
+                )
+                self._diagnostic_signal_skipped_duplicate_count += (
+                    single_signal_result.skipped_duplicate_count
+                )
+                self._diagnostic_signal_count += (
+                    single_signal_result.signal_count
                 )
                 signal_results.append(
                     single_signal_result
@@ -285,6 +364,9 @@ class RealtimePaperTradingService:
                         )
                     )
                     queue_results.append(queue_result)
+                    self._diagnostic_queue_count += int(
+                        queue_result.was_enqueued
+                    )
 
                     if queue_result.is_failed:
                         if continue_on_error:
@@ -305,6 +387,10 @@ class RealtimePaperTradingService:
                     )
                     execution_items.extend(
                         execution_result.items
+                    )
+                    self._diagnostic_execution_count += sum(
+                        item.execution_record is not None
+                        for item in execution_result.items
                     )
 
                     if (
@@ -342,6 +428,9 @@ class RealtimePaperTradingService:
                     portfolio_items.extend(
                         portfolio_result.items
                     )
+                    self._diagnostic_portfolio_update_count += (
+                        portfolio_result.applied_count
+                    )
 
             combined_signal_result = (
                 self._combine_signal_results(
@@ -370,6 +459,8 @@ class RealtimePaperTradingService:
             )
 
         except Exception as error:
+            self._diagnostic_failed_process_count += 1
+
             if not continue_on_error:
                 raise
 

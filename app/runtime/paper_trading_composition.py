@@ -28,6 +28,22 @@ from app.live.live_orchestrator import (
     LiveTradingOrchestrator,
 )
 from app.market.bar_aggregator import StockPriceAggregator
+from app.market.kabu_station_client import (
+    KabuStationClient,
+    KabuStationClientSettings,
+)
+from app.market.kabu_station_completed_bar_provider import (
+    KabuStationCompletedBarProvider,
+)
+from app.market.kabu_station_realtime_provider import (
+    KabuStationRealtimeProvider,
+)
+from app.market.kabu_station_realtime_service import (
+    KabuStationRealtimeService,
+)
+from app.market.kabu_station_websocket import (
+    KabuStationWebSocketClient,
+)
 from app.notifications.execution_notification_service import (
     ExecutionNotificationService,
 )
@@ -45,6 +61,9 @@ from app.market.jquants_downloader import (
 from app.market.market_calendar import TokyoMarketCalendar
 from app.market.market_clock import TokyoMarketClock
 from app.market.models import StockPrice
+from app.market.previous_trading_day_replay_provider import (
+    PreviousTradingDayReplayProvider,
+)
 from app.market.realtime_market_service import (
     RealtimeMarketMonitor,
     TokyoMarketSessionService,
@@ -114,6 +133,15 @@ class PaperTradingProductionSettings:
     jquants_timeout_seconds: float = 30.0
     maximum_codes_per_poll: int = 10
     rate_limit_cooldown_seconds: float = 60.0
+    market_data_mode: str = "previous-day-replay"
+    replay_maximum_lookback_days: int = 14
+    kabu_station_api_password: str | None = None
+    kabu_station_base_url: str = (
+        "http://localhost:18080/kabusapi"
+    )
+    kabu_station_websocket_url: str = (
+        "ws://localhost:18080/kabusapi/websocket"
+    )
     commission_per_order: float = 0.0
     slippage_rate: float = 0.0
     continue_on_cycle_error: bool = True
@@ -186,6 +214,69 @@ class PaperTradingProductionSettings:
                 "レート制限待機秒数は0以上である必要があります。"
             )
 
+        normalized_market_data_mode = (
+            self.market_data_mode.strip().lower()
+        )
+
+        if normalized_market_data_mode not in {
+            "previous-day-replay",
+            "jquants-current-day",
+            "kabu-station-realtime",
+        }:
+            raise ValueError(
+                "市場データモードは"
+                "previous-day-replayまたは"
+                "jquants-current-day、または"
+                "kabu-station-realtimeを指定してください。"
+            )
+
+        if self.replay_maximum_lookback_days <= 0:
+            raise ValueError(
+                "リプレイ最大遡及日数は"
+                "0より大きい必要があります。"
+            )
+
+        normalized_kabu_base_url = (
+            self.kabu_station_base_url.strip().rstrip("/")
+        )
+        normalized_kabu_websocket_url = (
+            self.kabu_station_websocket_url.strip()
+        )
+
+        if not normalized_kabu_base_url:
+            raise ValueError(
+                "kabuステーションBase URLを指定してください。"
+            )
+
+        if not normalized_kabu_websocket_url:
+            raise ValueError(
+                "kabuステーションWebSocket URLを"
+                "指定してください。"
+            )
+
+        if (
+            normalized_market_data_mode
+            == "kabu-station-realtime"
+            and not (
+                self.kabu_station_api_password
+                and self.kabu_station_api_password.strip()
+            )
+        ):
+            raise ValueError(
+                "kabu-station-realtimeには環境変数"
+                "KABU_STATION_API_PASSWORDが必要です。"
+            )
+
+        if (
+            normalized_market_data_mode
+            == "kabu-station-realtime"
+            and len(normalized_codes) > 50
+        ):
+            raise ValueError(
+                "kabuステーションAPIの登録上限は"
+                "50銘柄です。"
+            )
+
         if self.commission_per_order < 0:
             raise ValueError(
                 "注文手数料は0以上である必要があります。"
@@ -206,6 +297,21 @@ class PaperTradingProductionSettings:
             "codes",
             normalized_codes,
         )
+        object.__setattr__(
+            self,
+            "market_data_mode",
+            normalized_market_data_mode,
+        )
+        object.__setattr__(
+            self,
+            "kabu_station_base_url",
+            normalized_kabu_base_url,
+        )
+        object.__setattr__(
+            self,
+            "kabu_station_websocket_url",
+            normalized_kabu_websocket_url,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,13 +323,24 @@ class PaperTradingProductionBundle:
     trading_loop_component: TradingLoopComponent
     runtime_bundle: PaperTradingRuntimeBundle
     market_monitor: RealtimeMarketMonitor
+    replay_provider: PreviousTradingDayReplayProvider | None
+    live_orchestrator: LiveTradingOrchestrator
+    realtime_paper_trading_service: RealtimePaperTradingService
     signal_engine: RealtimeSignalEngine
     paper_broker: PaperBroker
     broker_recovery_result: PaperBrokerRecoveryResult
     portfolio_service: PortfolioService
+    kabu_station_service: (
+        KabuStationRealtimeService | None
+    ) = None
 
     def run(self) -> PaperTradingDayResult:
         """Trading Loopを開始して終日運用を実行する。"""
+
+        if self.kabu_station_service is not None:
+            self.kabu_station_service.start(
+                self.settings.codes
+            )
 
         self.trading_loop_component.start()
 
@@ -232,6 +349,9 @@ class PaperTradingProductionBundle:
         finally:
             if self.trading_loop_component.is_running:
                 self.trading_loop_component.stop()
+
+            if self.kabu_station_service is not None:
+                self.kabu_station_service.stop()
 
 
 class PaperTradingComposition:
@@ -266,28 +386,113 @@ class PaperTradingComposition:
         market_bar_repository = MarketBarRepository(
             settings.database_path
         )
-        downloader = JQuantsMinuteDownloader(
-            api_key=settings.jquants_api_key,
-            timeout_seconds=(
-                settings.jquants_timeout_seconds
-            ),
-        )
-        aggregator = StockPriceAggregator()
-
-        def provide_five_minute_bars(
-            code: str,
-            target_date: date,
-        ) -> list[StockPrice]:
-            minute_bars = downloader.download(
-                code,
-                target_date.isoformat(),
-            )
-
-            return aggregator.aggregate_to_five_minutes(
-                minute_bars
-            )
-
         market_calendar = TokyoMarketCalendar()
+
+        replay_provider: (
+            PreviousTradingDayReplayProvider | None
+        ) = None
+        kabu_station_service: (
+            KabuStationRealtimeService | None
+        ) = None
+
+        if (
+            settings.market_data_mode
+            == "kabu-station-realtime"
+        ):
+            completed_bar_provider = (
+                KabuStationCompletedBarProvider()
+            )
+            kabu_client = KabuStationClient(
+                settings=KabuStationClientSettings(
+                    api_password=(
+                        settings.kabu_station_api_password
+                        or ""
+                    ),
+                    base_url=(
+                        settings.kabu_station_base_url
+                    ),
+                    maximum_registered_symbols=50,
+                )
+            )
+            kabu_provider = KabuStationRealtimeProvider(
+                client=kabu_client
+            )
+
+            def websocket_factory(**kwargs):
+                return KabuStationWebSocketClient(
+                    url=(
+                        settings.kabu_station_websocket_url
+                    ),
+                    **kwargs,
+                )
+
+            kabu_station_service = (
+                KabuStationRealtimeService(
+                    provider=kabu_provider,
+                    websocket_client_factory=(
+                        websocket_factory
+                    ),
+                    on_completed_bar=(
+                        completed_bar_provider.accept
+                    ),
+                    interval_minutes=5,
+                )
+            )
+            provide_five_minute_bars = (
+                completed_bar_provider
+            )
+            market_data_source = (
+                "kabu-station-realtime"
+            )
+        else:
+            downloader = JQuantsMinuteDownloader(
+                api_key=settings.jquants_api_key,
+                timeout_seconds=(
+                    settings.jquants_timeout_seconds
+                ),
+            )
+            aggregator = StockPriceAggregator()
+
+            if (
+                settings.market_data_mode
+                == "previous-day-replay"
+            ):
+                replay_provider = (
+                    PreviousTradingDayReplayProvider(
+                        downloader=downloader,
+                        aggregator=aggregator,
+                        trading_day_predicate=(
+                            market_calendar.is_business_day
+                        ),
+                        maximum_lookback_days=(
+                            settings.replay_maximum_lookback_days
+                        ),
+                    )
+                )
+                provide_five_minute_bars = replay_provider
+                market_data_source = (
+                    "jquants-previous-day-replay"
+                )
+            else:
+                def provide_five_minute_bars(
+                    code: str,
+                    target_date: date,
+                ) -> list[StockPrice]:
+                    minute_bars = downloader.download(
+                        code,
+                        target_date.isoformat(),
+                    )
+
+                    return (
+                        aggregator.aggregate_to_five_minutes(
+                            minute_bars
+                        )
+                    )
+
+                market_data_source = (
+                    "jquants-current-day"
+                )
+
         market_session_service = TokyoMarketSessionService(
             trading_day_predicate=(
                 market_calendar.is_business_day
@@ -298,7 +503,7 @@ class PaperTradingComposition:
             bar_provider=provide_five_minute_bars,
             session_service=market_session_service,
             interval_minutes=5,
-            data_source="jquants-realtime",
+            data_source=market_data_source,
             maximum_codes_per_poll=(
                 settings.maximum_codes_per_poll
             ),
@@ -559,10 +764,16 @@ class PaperTradingComposition:
             ),
             runtime_bundle=runtime_bundle,
             market_monitor=market_monitor,
+            replay_provider=replay_provider,
+            live_orchestrator=live_orchestrator,
+            realtime_paper_trading_service=(
+                realtime_paper_trading_service
+            ),
             signal_engine=signal_engine,
             paper_broker=paper_broker,
             broker_recovery_result=(
                 broker_recovery_result
             ),
             portfolio_service=portfolio_service,
+            kabu_station_service=kabu_station_service,
         )

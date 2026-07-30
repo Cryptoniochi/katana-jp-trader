@@ -15,8 +15,13 @@ from app.run_paper_trading import (
     create_production_settings,
     create_runtime_notification_gateway,
     _extract_live_orb_diagnostics,
+    _extract_replay_diagnostics,
+    _extract_market_data_diagnostics,
+    _extract_paper_service_diagnostics,
     _finished_notification_message,
     _format_live_orb_diagnostics,
+    _format_replay_diagnostics,
+    _format_market_data_diagnostics,
     _format_money,
     _format_percentage,
     run,
@@ -864,3 +869,292 @@ def test_extract_live_orb_diagnostics_returns_none_when_unavailable() -> None:
         pass
 
     assert _extract_live_orb_diagnostics(Bundle()) is None
+
+
+def test_format_market_data_diagnostics_includes_flow_counts() -> None:
+    """市場データ経路診断を終了通知向けに整形する。"""
+
+    from app.live.live_orchestrator import (
+        LiveMarketDataDiagnosticSnapshot,
+    )
+    from app.market.realtime_paper_trading_service import (
+        RealtimePaperTradingDiagnosticSnapshot,
+    )
+
+    market_snapshot = LiveMarketDataDiagnosticSnapshot(
+        cycle_count=643,
+        decision_counts={
+            "new_bars_saved": 12,
+            "no_new_bar": 631,
+        },
+        fetched_bar_count=5000,
+        new_bar_count=120,
+        saved_bar_count=120,
+        paper_trading_call_count=12,
+        paper_trading_input_bar_count=120,
+        signal_processed_bar_count=120,
+        signal_skipped_duplicate_count=0,
+        signal_count=2,
+    )
+    paper_snapshot = RealtimePaperTradingDiagnosticSnapshot(
+        process_call_count=12,
+        input_bar_count=120,
+        signal_engine_call_count=120,
+        signal_processed_bar_count=120,
+        signal_skipped_duplicate_count=0,
+        signal_count=2,
+        queue_count=2,
+        execution_count=2,
+        portfolio_update_count=2,
+        failed_process_count=0,
+    )
+
+    message = _format_market_data_diagnostics(
+        market_snapshot,
+        paper_snapshot,
+    )
+
+    assert "Market Data Diagnostics" in message
+    assert "市場監視サイクル: 643" in message
+    assert "NEW_BARS_SAVED: 12" in message
+    assert "取得足数: 5000" in message
+    assert "Paper Trading呼出: 12" in message
+    assert "Signal Engine呼出: 120" in message
+    assert "処理失敗: 0" in message
+
+
+def test_finished_notification_includes_market_data_diagnostics() -> None:
+    """終了通知へ市場データ経路診断を含める。"""
+
+    from app.live.live_orchestrator import (
+        LiveMarketDataDiagnosticSnapshot,
+    )
+
+    message = _finished_notification_message(
+        FakeResult(),
+        market_data_diagnostics=LiveMarketDataDiagnosticSnapshot(
+            cycle_count=1,
+            decision_counts={"no_new_bar": 1},
+            fetched_bar_count=10,
+            new_bar_count=0,
+            saved_bar_count=0,
+            paper_trading_call_count=0,
+            paper_trading_input_bar_count=0,
+            signal_processed_bar_count=0,
+            signal_skipped_duplicate_count=0,
+            signal_count=0,
+        ),
+    )
+
+    assert "Market Data Diagnostics" in message
+    assert "NO_NEW_BAR: 1" in message
+    assert "Paper Trading呼出: 0" in message
+
+
+def test_extract_market_and_paper_service_diagnostics() -> None:
+    """Bundleから両方のデータフロー診断を取得する。"""
+
+    from app.live.live_orchestrator import (
+        LiveMarketDataDiagnosticSnapshot,
+    )
+    from app.market.realtime_paper_trading_service import (
+        RealtimePaperTradingDiagnosticSnapshot,
+    )
+
+    market_expected = LiveMarketDataDiagnosticSnapshot(
+        cycle_count=1,
+        decision_counts={"no_new_bar": 1},
+        fetched_bar_count=0,
+        new_bar_count=0,
+        saved_bar_count=0,
+        paper_trading_call_count=0,
+        paper_trading_input_bar_count=0,
+        signal_processed_bar_count=0,
+        signal_skipped_duplicate_count=0,
+        signal_count=0,
+    )
+    paper_expected = RealtimePaperTradingDiagnosticSnapshot(
+        process_call_count=0,
+        input_bar_count=0,
+        signal_engine_call_count=0,
+        signal_processed_bar_count=0,
+        signal_skipped_duplicate_count=0,
+        signal_count=0,
+        queue_count=0,
+        execution_count=0,
+        portfolio_update_count=0,
+        failed_process_count=0,
+    )
+
+    class DiagnosticObject:
+        def __init__(self, snapshot):
+            self.snapshot = snapshot
+
+        def diagnostic_snapshot(self):
+            return self.snapshot
+
+    class Bundle:
+        live_orchestrator = DiagnosticObject(market_expected)
+        realtime_paper_trading_service = DiagnosticObject(
+            paper_expected
+        )
+
+    bundle = Bundle()
+
+    assert _extract_market_data_diagnostics(bundle) == market_expected
+    assert (
+        _extract_paper_service_diagnostics(bundle)
+        == paper_expected
+    )
+
+
+def test_parser_accepts_market_data_mode() -> None:
+    """市場データモードと遡及日数をCLIで指定できる。"""
+
+    arguments = build_argument_parser().parse_args(
+        [
+            "--code",
+            "7203",
+            "--market-data-mode",
+            "jquants-current-day",
+            "--replay-lookback-days",
+            "10",
+        ]
+    )
+
+    assert arguments.market_data_mode == "jquants-current-day"
+    assert arguments.replay_lookback_days == 10
+
+
+def test_settings_reads_replay_environment_values(
+    tmp_path: Path,
+) -> None:
+    """リプレイ設定を環境変数から読み込む。"""
+
+    watchlist_path = create_watchlist(tmp_path)
+    arguments = build_argument_parser().parse_args([])
+
+    settings = create_production_settings(
+        arguments,
+        environ={
+            "KATANA_WATCHLIST_PATH": str(watchlist_path),
+            "KATANA_MARKET_DATA_MODE": "jquants-current-day",
+            "KATANA_REPLAY_MAXIMUM_LOOKBACK_DAYS": "9",
+        },
+    )
+
+    assert settings.market_data_mode == "jquants-current-day"
+    assert settings.replay_maximum_lookback_days == 9
+
+
+def test_format_replay_diagnostics() -> None:
+    """リプレイ元日付と利用統計を整形する。"""
+
+    from datetime import date
+    from app.market.previous_trading_day_replay_provider import (
+        PreviousTradingDayReplayDiagnosticSnapshot,
+    )
+
+    message = _format_replay_diagnostics(
+        PreviousTradingDayReplayDiagnosticSnapshot(
+            request_count=20,
+            download_count=2,
+            cache_hit_count=18,
+            downloaded_minute_bar_count=480,
+            generated_five_minute_bar_count=96,
+            source_dates=(date(2026, 7, 28),),
+            target_dates=(date(2026, 7, 29),),
+            symbol_count=2,
+        )
+    )
+
+    assert "Replay Data Diagnostics" in message
+    assert "再生元営業日: 2026-07-28" in message
+    assert "再生対象日: 2026-07-29" in message
+    assert "キャッシュヒット率: 90.00%" in message
+    assert "生成5分足数: 96" in message
+
+
+def test_extract_replay_diagnostics_from_bundle() -> None:
+    """BundleからリプレイProvider診断を取得する。"""
+
+    from datetime import date
+    from app.market.previous_trading_day_replay_provider import (
+        PreviousTradingDayReplayDiagnosticSnapshot,
+    )
+
+    expected = PreviousTradingDayReplayDiagnosticSnapshot(
+        request_count=1,
+        download_count=1,
+        cache_hit_count=0,
+        downloaded_minute_bar_count=240,
+        generated_five_minute_bar_count=48,
+        source_dates=(date(2026, 7, 28),),
+        target_dates=(date(2026, 7, 29),),
+        symbol_count=1,
+    )
+
+    class ReplayProvider:
+        def diagnostic_snapshot(self):
+            return expected
+
+    class Bundle:
+        replay_provider = ReplayProvider()
+
+    assert _extract_replay_diagnostics(Bundle()) == expected
+
+
+def test_finished_notification_includes_replay_diagnostics() -> None:
+    """終了通知へリプレイ元情報を含める。"""
+
+    from datetime import date
+    from app.market.previous_trading_day_replay_provider import (
+        PreviousTradingDayReplayDiagnosticSnapshot,
+    )
+
+    message = _finished_notification_message(
+        FakeResult(),
+        replay_diagnostics=(
+            PreviousTradingDayReplayDiagnosticSnapshot(
+                request_count=1,
+                download_count=1,
+                cache_hit_count=0,
+                downloaded_minute_bar_count=240,
+                generated_five_minute_bar_count=48,
+                source_dates=(date(2026, 7, 28),),
+                target_dates=(date(2026, 7, 29),),
+                symbol_count=1,
+            )
+        ),
+    )
+
+    assert "Replay Data Diagnostics" in message
+    assert "再生元営業日: 2026-07-28" in message
+
+
+def test_settings_loads_kabu_station_environment(
+    tmp_path: Path,
+) -> None:
+    parser = build_argument_parser()
+    arguments = parser.parse_args(
+        [
+            "--code",
+            "7203",
+            "--market-data-mode",
+            "kabu-station-realtime",
+            "--database-path",
+            str(tmp_path / "katana.db"),
+        ]
+    )
+
+    settings = create_production_settings(
+        arguments,
+        environ={
+            "KABU_STATION_API_PASSWORD": "secret",
+        },
+    )
+
+    assert settings.market_data_mode == (
+        "kabu-station-realtime"
+    )
+    assert settings.kabu_station_api_password == "secret"

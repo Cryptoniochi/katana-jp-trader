@@ -51,6 +51,10 @@ def market_result(
     observed_at: datetime,
     *,
     decision: RealtimePollDecision,
+    fetched_bar_count: int = 0,
+    new_bar_count: int = 0,
+    saved_bar_count: int = 0,
+    new_bars=(),
 ) -> RealtimeMarketPollResult:
     """市場監視結果を作成する。"""
 
@@ -58,10 +62,10 @@ def market_result(
         session=session(observed_at),
         decision=decision,
         code_count=1,
-        fetched_bar_count=0,
-        new_bar_count=0,
-        saved_bar_count=0,
-        new_bars=(),
+        fetched_bar_count=fetched_bar_count,
+        new_bar_count=new_bar_count,
+        saved_bar_count=saved_bar_count,
+        new_bars=tuple(new_bars),
     )
 
 
@@ -386,3 +390,135 @@ def test_run_rejects_naive_clock() -> None:
             codes=("7203",),
             max_cycles=1,
         )
+
+
+def test_orchestrator_diagnostics_count_no_new_bar_cycles() -> None:
+    """NO_NEW_BARサイクルを市場データ診断へ集計する。"""
+
+    clock = FakeClock()
+    orchestrator = LiveTradingOrchestrator(
+        market_monitor=FakeMonitor(
+            RealtimePollDecision.NO_NEW_BAR
+        ),
+        paper_trading_service=FakePaperService(),
+        now_provider=clock.now,
+        sleeper=lambda _seconds: None,
+    )
+
+    orchestrator.run(
+        codes=("7203",),
+        max_cycles=3,
+    )
+
+    snapshot = orchestrator.diagnostic_snapshot()
+
+    assert snapshot.cycle_count == 3
+    assert snapshot.no_new_bar_cycle_count == 3
+    assert snapshot.new_bars_saved_cycle_count == 0
+    assert snapshot.paper_trading_call_count == 0
+
+
+def test_orchestrator_diagnostics_record_new_bar_flow() -> None:
+    """新規足保存からSignal Engine処理までを診断集計する。"""
+
+    from app.market.models import StockPrice
+
+    observed_at = datetime(
+        2026,
+        7,
+        17,
+        0,
+        0,
+        tzinfo=timezone.utc,
+    )
+    new_bar = StockPrice(
+        code="7203",
+        datetime=observed_at,
+        open=1000.0,
+        high=1010.0,
+        low=990.0,
+        close=1005.0,
+        volume=1000,
+    )
+
+    class NewBarMonitor:
+        def poll(self, *, codes, observed_at):
+            return market_result(
+                observed_at,
+                decision=RealtimePollDecision.NEW_BARS_SAVED,
+                fetched_bar_count=5,
+                new_bar_count=1,
+                saved_bar_count=1,
+                new_bars=(new_bar,),
+            )
+
+    class DiagnosticPaperService(FakePaperService):
+        def process(self, prices, *, continue_on_error=False):
+            self.calls += 1
+            return RealtimePaperTradingResult(
+                status=RealtimePaperTradingStatus.COMPLETED,
+                signal_result=RealtimeSignalProcessResult(
+                    decision=RealtimeSignalDecision.BAR_PROCESSED,
+                    input_bar_count=1,
+                    processed_bar_count=1,
+                    skipped_duplicate_count=0,
+                    signal_count=0,
+                    signals=(),
+                ),
+                queue_results=(),
+                execution_result=BacktestQueueExecutionBatchResult(
+                    items=()
+                ),
+                portfolio_result=BacktestPortfolioBatchUpdateResult(
+                    items=()
+                ),
+                error_message=None,
+            )
+
+    orchestrator = LiveTradingOrchestrator(
+        market_monitor=NewBarMonitor(),
+        paper_trading_service=DiagnosticPaperService(),
+        now_provider=lambda: observed_at,
+    )
+
+    result = orchestrator.run_cycle(
+        cycle_number=1,
+        codes=("7203",),
+    )
+
+    assert result.is_completed
+
+    snapshot = orchestrator.diagnostic_snapshot()
+    assert snapshot.cycle_count == 1
+    assert snapshot.new_bars_saved_cycle_count == 1
+    assert snapshot.fetched_bar_count == 5
+    assert snapshot.new_bar_count == 1
+    assert snapshot.saved_bar_count == 1
+    assert snapshot.paper_trading_call_count == 1
+    assert snapshot.paper_trading_input_bar_count == 1
+    assert snapshot.signal_processed_bar_count == 1
+
+
+def test_orchestrator_reset_diagnostics() -> None:
+    """市場データ診断を初期化できる。"""
+
+    clock = FakeClock()
+    orchestrator = LiveTradingOrchestrator(
+        market_monitor=FakeMonitor(
+            RealtimePollDecision.NO_NEW_BAR
+        ),
+        paper_trading_service=FakePaperService(),
+        now_provider=clock.now,
+    )
+
+    orchestrator.run_cycle(
+        cycle_number=1,
+        codes=("7203",),
+    )
+    assert orchestrator.diagnostic_snapshot().cycle_count == 1
+
+    orchestrator.reset_diagnostics()
+
+    snapshot = orchestrator.diagnostic_snapshot()
+    assert snapshot.cycle_count == 0
+    assert snapshot.decision_counts == {}

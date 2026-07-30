@@ -51,6 +51,15 @@ from app.watchlist import load_watchlist
 from app.backtest.orb_signal_strategy import (
     OrbSignalDiagnosticSnapshot,
 )
+from app.live.live_orchestrator import (
+    LiveMarketDataDiagnosticSnapshot,
+)
+from app.market.realtime_paper_trading_service import (
+    RealtimePaperTradingDiagnosticSnapshot,
+)
+from app.market.previous_trading_day_replay_provider import (
+    PreviousTradingDayReplayDiagnosticSnapshot,
+)
 
 
 DEFAULT_DATABASE_PATH = Path("data/katana.db")
@@ -209,6 +218,34 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--market-data-mode",
+        choices=(
+            "previous-day-replay",
+            "jquants-current-day",
+            "kabu-station-realtime",
+        ),
+        default=None,
+        help=(
+            "Paper Tradingの市場データモード。"
+            "未指定時は環境変数KATANA_MARKET_DATA_MODE、"
+            "またはprevious-day-replayを使用します。"
+            " 実市場ではkabu-station-realtimeを指定します。"
+        ),
+    )
+
+    parser.add_argument(
+        "--replay-lookback-days",
+        type=int,
+        default=None,
+        help=(
+            "前営業日リプレイで取引日を探す最大遡及日数。"
+            "未指定時は環境変数"
+            "KATANA_REPLAY_MAXIMUM_LOOKBACK_DAYS、"
+            "または14日を使用します。"
+        ),
+    )
+
+    parser.add_argument(
         "--commission-per-order",
         type=float,
         default=None,
@@ -337,6 +374,26 @@ def create_production_settings(
         ),
     )
 
+    market_data_mode = (
+        arguments.market_data_mode
+        if arguments.market_data_mode is not None
+        else resolved_environ.get(
+            "KATANA_MARKET_DATA_MODE",
+            "previous-day-replay",
+        )
+    )
+
+    replay_maximum_lookback_days = _resolve_int(
+        argument_value=arguments.replay_lookback_days,
+        environment_value=resolved_environ.get(
+            "KATANA_REPLAY_MAXIMUM_LOOKBACK_DAYS"
+        ),
+        default_value=14,
+        environment_name=(
+            "KATANA_REPLAY_MAXIMUM_LOOKBACK_DAYS"
+        ),
+    )
+
     commission_per_order = _resolve_float(
         argument_value=arguments.commission_per_order,
         environment_value=resolved_environ.get(
@@ -362,6 +419,22 @@ def create_production_settings(
         if arguments.jquants_api_key is not None
         else resolved_environ.get("JQUANTS_API_KEY")
     )
+    kabu_station_api_password = (
+        resolved_environ.get(
+            "KABU_STATION_API_PASSWORD"
+        )
+        or resolved_environ.get(
+            "KABUSTATION_API_PASSWORD"
+        )
+    )
+    kabu_station_base_url = resolved_environ.get(
+        "KABU_STATION_BASE_URL",
+        "http://localhost:18080/kabusapi",
+    )
+    kabu_station_websocket_url = resolved_environ.get(
+        "KABU_STATION_WEBSOCKET_URL",
+        "ws://localhost:18080/kabusapi/websocket",
+    )
 
     return PaperTradingProductionSettings(
         database_path=database_path,
@@ -374,6 +447,19 @@ def create_production_settings(
         jquants_api_key=api_key,
         jquants_timeout_seconds=(
             jquants_timeout_seconds
+        ),
+        market_data_mode=market_data_mode,
+        replay_maximum_lookback_days=(
+            replay_maximum_lookback_days
+        ),
+        kabu_station_api_password=(
+            kabu_station_api_password
+        ),
+        kabu_station_base_url=(
+            kabu_station_base_url
+        ),
+        kabu_station_websocket_url=(
+            kabu_station_websocket_url
         ),
         commission_per_order=commission_per_order,
         slippage_rate=slippage_rate,
@@ -619,6 +705,9 @@ def _startup_notification_message(
         f"監視銘柄数: {len(settings.codes)}\n"
         f"監視銘柄: {','.join(settings.codes)}\n"
         f"初期資金: {settings.initial_cash:,.0f}円\n"
+        f"市場データモード: {settings.market_data_mode}\n"
+        "リプレイ最大遡及日数: "
+        f"{settings.replay_maximum_lookback_days}\n"
         "実行間隔: "
         f"{settings.cycle_interval_seconds:g}秒\n"
         f"最大サイクル数: {settings.maximum_cycles}"
@@ -629,6 +718,15 @@ def _finished_notification_message(
     result: PaperTradingDayResult,
     *,
     orb_diagnostics: OrbSignalDiagnosticSnapshot | None = None,
+    market_data_diagnostics: (
+        LiveMarketDataDiagnosticSnapshot | None
+    ) = None,
+    paper_service_diagnostics: (
+        RealtimePaperTradingDiagnosticSnapshot | None
+    ) = None,
+    replay_diagnostics: (
+        PreviousTradingDayReplayDiagnosticSnapshot | None
+    ) = None,
 ) -> str:
     """終了通知を日次サマリー形式で生成する。"""
 
@@ -650,6 +748,15 @@ def _finished_notification_message(
     )
     failure_diagnostics = _format_cycle_failure_diagnostics(
         summary
+    )
+    replay_summary = _format_replay_diagnostics(
+        replay_diagnostics
+    )
+    market_flow_diagnostics = (
+        _format_market_data_diagnostics(
+            market_data_diagnostics,
+            paper_service_diagnostics,
+        )
     )
     live_orb_diagnostics = _format_live_orb_diagnostics(
         orb_diagnostics
@@ -677,9 +784,129 @@ def _finished_notification_message(
         f"日次収益率: {return_rate}\n"
         f"Runtimeエラー: {error_message}"
         f"{failure_diagnostics}"
+        f"{replay_summary}"
+        f"{market_flow_diagnostics}"
         f"{live_orb_diagnostics}"
     )
 
+
+
+def _format_replay_diagnostics(
+    snapshot: PreviousTradingDayReplayDiagnosticSnapshot | None,
+) -> str:
+    """前営業日リプレイの利用状況を終了通知向けに整形する。"""
+
+    if snapshot is None:
+        return (
+            "\n\nReplay Data Diagnostics"
+            "\nモード: 非リプレイまたは利用不可"
+        )
+
+    source_dates = ",".join(
+        value.isoformat()
+        for value in snapshot.source_dates
+    ) or "なし"
+    target_dates = ",".join(
+        value.isoformat()
+        for value in snapshot.target_dates
+    ) or "なし"
+
+    return (
+        "\n\nReplay Data Diagnostics\n"
+        "モード: previous-day-replay\n"
+        f"再生元営業日: {source_dates}\n"
+        f"再生対象日: {target_dates}\n"
+        f"対象銘柄数: {snapshot.symbol_count}\n"
+        f"Provider要求回数: {snapshot.request_count}\n"
+        f"J-Quants取得回数: {snapshot.download_count}\n"
+        f"キャッシュヒット: {snapshot.cache_hit_count}\n"
+        "キャッシュヒット率: "
+        f"{snapshot.cache_hit_rate * 100.0:.2f}%\n"
+        "取得1分足数: "
+        f"{snapshot.downloaded_minute_bar_count}\n"
+        "生成5分足数: "
+        f"{snapshot.generated_five_minute_bar_count}"
+    )
+
+
+def _format_market_data_diagnostics(
+    market_snapshot: LiveMarketDataDiagnosticSnapshot | None,
+    paper_snapshot: RealtimePaperTradingDiagnosticSnapshot | None,
+) -> str:
+    """市場データからSignal Engineまでの経路診断を整形する。"""
+
+    if market_snapshot is None:
+        return (
+            "\n\nMarket Data Diagnostics"
+            "\n診断情報: 利用不可"
+        )
+
+    decision_lines = [
+        (
+            f"{decision}: {count}"
+        )
+        for decision, count in sorted(
+            market_snapshot.decision_counts.items()
+        )
+    ]
+
+    lines = [
+        "",
+        "",
+        "Market Data Diagnostics",
+        f"市場監視サイクル: {market_snapshot.cycle_count}",
+        "NEW_BARS_SAVED: "
+        f"{market_snapshot.new_bars_saved_cycle_count}",
+        "NO_NEW_BAR: "
+        f"{market_snapshot.no_new_bar_cycle_count}",
+        f"取得足数: {market_snapshot.fetched_bar_count}",
+        f"新規足数: {market_snapshot.new_bar_count}",
+        f"保存足数: {market_snapshot.saved_bar_count}",
+        "Paper Trading呼出: "
+        f"{market_snapshot.paper_trading_call_count}",
+        "Paper Trading入力足: "
+        f"{market_snapshot.paper_trading_input_bar_count}",
+        "Signal Engine処理足: "
+        f"{market_snapshot.signal_processed_bar_count}",
+        "Signal重複スキップ: "
+        f"{market_snapshot.signal_skipped_duplicate_count}",
+        f"Signal生成: {market_snapshot.signal_count}",
+    ]
+
+    if decision_lines:
+        lines.append("Poll Decision内訳:")
+        lines.extend(
+            f"- {line}"
+            for line in decision_lines
+        )
+
+    if paper_snapshot is None:
+        lines.append("Paper Service Diagnostics: 利用不可")
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            "Paper Service Diagnostics",
+            "process呼出: "
+            f"{paper_snapshot.process_call_count}",
+            f"入力足: {paper_snapshot.input_bar_count}",
+            "Signal Engine呼出: "
+            f"{paper_snapshot.signal_engine_call_count}",
+            "Signal処理足: "
+            f"{paper_snapshot.signal_processed_bar_count}",
+            "Signal重複スキップ: "
+            f"{paper_snapshot.signal_skipped_duplicate_count}",
+            f"Signal生成: {paper_snapshot.signal_count}",
+            f"注文キュー: {paper_snapshot.queue_count}",
+            f"約定: {paper_snapshot.execution_count}",
+            "Portfolio更新: "
+            f"{paper_snapshot.portfolio_update_count}",
+            "処理失敗: "
+            f"{paper_snapshot.failed_process_count}",
+        ]
+    )
+
+    return "\n".join(lines)
 
 
 def _format_live_orb_diagnostics(
@@ -848,6 +1075,108 @@ def _format_percentage(
     return f"{sign}{percentage:,.4f}%"
 
 
+def _extract_replay_diagnostics(
+    bundle: PaperTradingApplicationBundle,
+) -> PreviousTradingDayReplayDiagnosticSnapshot | None:
+    """BundleからリプレイProvider診断を安全に取得する。"""
+
+    replay_provider = getattr(
+        bundle,
+        "replay_provider",
+        None,
+    )
+
+    if replay_provider is None:
+        return None
+
+    provider = getattr(
+        replay_provider,
+        "diagnostic_snapshot",
+        None,
+    )
+
+    if not callable(provider):
+        return None
+
+    snapshot = provider()
+
+    if not isinstance(
+        snapshot,
+        PreviousTradingDayReplayDiagnosticSnapshot,
+    ):
+        return None
+
+    return snapshot
+
+
+def _extract_market_data_diagnostics(
+    bundle: PaperTradingApplicationBundle,
+) -> LiveMarketDataDiagnosticSnapshot | None:
+    """Bundleから市場データ経路診断を安全に取得する。"""
+
+    orchestrator = getattr(
+        bundle,
+        "live_orchestrator",
+        None,
+    )
+
+    if orchestrator is None:
+        return None
+
+    provider = getattr(
+        orchestrator,
+        "diagnostic_snapshot",
+        None,
+    )
+
+    if not callable(provider):
+        return None
+
+    snapshot = provider()
+
+    if not isinstance(
+        snapshot,
+        LiveMarketDataDiagnosticSnapshot,
+    ):
+        return None
+
+    return snapshot
+
+
+def _extract_paper_service_diagnostics(
+    bundle: PaperTradingApplicationBundle,
+) -> RealtimePaperTradingDiagnosticSnapshot | None:
+    """BundleからPaper Tradingサービス診断を安全に取得する。"""
+
+    service = getattr(
+        bundle,
+        "realtime_paper_trading_service",
+        None,
+    )
+
+    if service is None:
+        return None
+
+    provider = getattr(
+        service,
+        "diagnostic_snapshot",
+        None,
+    )
+
+    if not callable(provider):
+        return None
+
+    snapshot = provider()
+
+    if not isinstance(
+        snapshot,
+        RealtimePaperTradingDiagnosticSnapshot,
+    ):
+        return None
+
+    return snapshot
+
+
 def _extract_live_orb_diagnostics(
     bundle: PaperTradingApplicationBundle,
 ) -> OrbSignalDiagnosticSnapshot | None:
@@ -1007,6 +1336,15 @@ def run(
         )
 
         result = bundle.run()
+        replay_diagnostics = (
+            _extract_replay_diagnostics(bundle)
+        )
+        market_data_diagnostics = (
+            _extract_market_data_diagnostics(bundle)
+        )
+        paper_service_diagnostics = (
+            _extract_paper_service_diagnostics(bundle)
+        )
         live_orb_diagnostics = (
             _extract_live_orb_diagnostics(bundle)
         )
@@ -1015,6 +1353,23 @@ def run(
             result,
             output=resolved_output,
         )
+
+        if replay_diagnostics is not None:
+            print(
+                _format_replay_diagnostics(
+                    replay_diagnostics
+                ).lstrip("\n"),
+                file=resolved_output,
+            )
+
+        if market_data_diagnostics is not None:
+            print(
+                _format_market_data_diagnostics(
+                    market_data_diagnostics,
+                    paper_service_diagnostics,
+                ).lstrip("\n"),
+                file=resolved_output,
+            )
 
         if live_orb_diagnostics is not None:
             print(
@@ -1035,6 +1390,13 @@ def run(
             message=_finished_notification_message(
                 result,
                 orb_diagnostics=live_orb_diagnostics,
+                market_data_diagnostics=(
+                    market_data_diagnostics
+                ),
+                paper_service_diagnostics=(
+                    paper_service_diagnostics
+                ),
+                replay_diagnostics=replay_diagnostics,
             ),
             severity=(
                 NotificationSeverity.INFO
@@ -1155,6 +1517,36 @@ def _resolve_path(
     return Path(default_value)
 
 
+def _resolve_int(
+    *,
+    argument_value: int | None,
+    environment_value: str | None,
+    default_value: int,
+    environment_name: str,
+) -> int:
+    """CLI・環境変数・既定値の順で整数を決定する。"""
+
+    if argument_value is not None:
+        return int(argument_value)
+
+    if environment_value is None:
+        return default_value
+
+    normalized = environment_value.strip()
+
+    if not normalized:
+        return default_value
+
+    try:
+        return int(normalized)
+    except ValueError as error:
+        raise ValueError(
+            "環境変数を整数へ変換できません。 "
+            f"name={environment_name} "
+            f"value={normalized}"
+        ) from error
+
+
 def _resolve_float(
     *,
     argument_value: float | None,
@@ -1265,6 +1657,16 @@ def _print_startup_information(
     )
     print(
         f"initial_cash={settings.initial_cash:.2f}",
+        file=output,
+    )
+    print(
+        "market_data_mode="
+        f"{settings.market_data_mode}",
+        file=output,
+    )
+    print(
+        "replay_maximum_lookback_days="
+        f"{settings.replay_maximum_lookback_days}",
         file=output,
     )
     print(

@@ -526,3 +526,67 @@ def test_service_returns_safe_empty_result() -> None:
     assert result.portfolio_update_count == 0
     assert result.queue_results == ()
     assert result.risk_execution_results == ()
+
+
+def test_service_diagnostics_record_signal_flow() -> None:
+    """入力足からSignal Engineまでの処理件数を集計する。"""
+
+    service, *_ = create_service()
+
+    result = service.process(bars())
+
+    assert result.is_completed
+
+    snapshot = service.diagnostic_snapshot()
+    assert snapshot.process_call_count == 1
+    assert snapshot.input_bar_count == 5
+    assert snapshot.signal_engine_call_count == 5
+    assert snapshot.signal_processed_bar_count == 5
+    assert snapshot.signal_skipped_duplicate_count == 0
+    assert snapshot.signal_count == 1
+    assert snapshot.queue_count == 1
+
+
+def test_service_diagnostics_record_duplicate_bars() -> None:
+    """重複足のスキップ件数を診断集計する。"""
+
+    service, *_ = create_service()
+
+    service.process(bars())
+    service.process(bars())
+
+    snapshot = service.diagnostic_snapshot()
+    assert snapshot.process_call_count == 2
+    assert snapshot.input_bar_count == 10
+    assert snapshot.signal_engine_call_count == 10
+    assert snapshot.signal_processed_bar_count == 5
+    assert snapshot.signal_skipped_duplicate_count == 5
+    assert snapshot.signal_count == 1
+
+
+def test_service_diagnostics_record_failed_process() -> None:
+    """処理例外を診断集計する。"""
+
+    service, queue, *_ = create_service()
+    queue.fail = True
+
+    with pytest.raises(RuntimeError):
+        service.process(bars())
+
+    snapshot = service.diagnostic_snapshot()
+    assert snapshot.failed_process_count == 1
+
+
+def test_service_reset_diagnostics() -> None:
+    """Paper Trading診断を初期化できる。"""
+
+    service, *_ = create_service()
+    service.process(())
+
+    assert service.diagnostic_snapshot().process_call_count == 1
+
+    service.reset_diagnostics()
+
+    snapshot = service.diagnostic_snapshot()
+    assert snapshot.process_call_count == 0
+    assert snapshot.input_bar_count == 0
