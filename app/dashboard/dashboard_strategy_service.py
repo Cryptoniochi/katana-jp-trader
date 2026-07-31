@@ -62,6 +62,7 @@ class DashboardStrategyPayload:
     trading_date: date
     strategies: tuple[DashboardStrategyRow, ...]
     recent_trades: tuple[DashboardRecentTrade, ...]
+    recent_completed_trades: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -74,6 +75,10 @@ class DashboardStrategyPayload:
             "recent_trades": [
                 item.to_dict()
                 for item in self.recent_trades
+            ],
+            "recent_completed_trades": [
+                dict(item)
+                for item in self.recent_completed_trades
             ],
         }
 
@@ -157,6 +162,11 @@ class DashboardStrategyService:
             recent_trades = self._load_recent_trades(
                 connection,
             )
+            recent_completed_trades = (
+                self._load_recent_completed_trades(
+                    connection,
+                )
+            )
 
         rows = []
 
@@ -230,6 +240,9 @@ class DashboardStrategyService:
             trading_date=target_date,
             strategies=tuple(rows),
             recent_trades=recent_trades,
+            recent_completed_trades=(
+                recent_completed_trades
+            ),
         )
 
     @classmethod
@@ -554,6 +567,77 @@ class DashboardStrategyService:
                 commission=float(row[6]),
                 slippage=float(row[7]),
             )
+            for row in rows
+        )
+
+    def _load_recent_completed_trades(
+        self,
+        connection: sqlite3.Connection,
+    ) -> tuple[dict[str, Any], ...]:
+        if not self._table_exists(
+            connection,
+            "trade_journal",
+        ):
+            return ()
+
+        rows = connection.execute(
+            """
+            SELECT
+                trade_id,
+                strategy_name,
+                code,
+                entry_at,
+                exit_at,
+                entry_price,
+                exit_price,
+                quantity,
+                realized_profit_loss,
+                return_rate,
+                holding_minutes,
+                exit_reason,
+                maximum_favorable_excursion_rate,
+                maximum_adverse_excursion_rate
+            FROM trade_journal
+            ORDER BY exit_at DESC, id DESC
+            LIMIT ?
+            """,
+            (self.recent_trade_limit,),
+        ).fetchall()
+
+        return tuple(
+            {
+                "trade_id": str(row[0]),
+                "strategy_name": (
+                    self.DISPLAY_NAMES.get(
+                        str(row[1]),
+                        str(row[1]),
+                    )
+                ),
+                "code": str(row[2]),
+                "entry_at": str(row[3]),
+                "exit_at": str(row[4]),
+                "entry_price": float(row[5]),
+                "exit_price": float(row[6]),
+                "quantity": int(row[7]),
+                "realized_profit_loss": float(row[8]),
+                "return_rate": float(row[9]),
+                "holding_minutes": float(row[10]),
+                "exit_reason": (
+                    str(row[11])
+                    if row[11] is not None
+                    else None
+                ),
+                "maximum_favorable_excursion_rate": (
+                    float(row[12])
+                    if row[12] is not None
+                    else None
+                ),
+                "maximum_adverse_excursion_rate": (
+                    float(row[13])
+                    if row[13] is not None
+                    else None
+                ),
+            }
             for row in rows
         )
 

@@ -170,3 +170,70 @@ def test_service_returns_empty_rows_without_database(
 
     assert len(payload.strategies) == 3
     assert payload.recent_trades == ()
+
+
+
+def test_service_loads_recent_completed_trades(
+    tmp_path: Path,
+) -> None:
+    path = create_database(tmp_path)
+
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE trade_journal (
+                id INTEGER PRIMARY KEY,
+                trade_id TEXT,
+                strategy_name TEXT,
+                code TEXT,
+                entry_at TEXT,
+                exit_at TEXT,
+                entry_price REAL,
+                exit_price REAL,
+                quantity INTEGER,
+                realized_profit_loss REAL,
+                return_rate REAL,
+                holding_minutes REAL,
+                exit_reason TEXT,
+                maximum_favorable_excursion_rate REAL,
+                maximum_adverse_excursion_rate REAL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO trade_journal
+            VALUES (
+                1,
+                'journal-001',
+                'opening-range-breakout-v2',
+                '7203',
+                '2026-08-03T09:30:00+00:00',
+                '2026-08-03T10:00:00+00:00',
+                1000,
+                1020,
+                100,
+                1800,
+                0.018,
+                30,
+                'take_profit',
+                0.025,
+                -0.005
+            )
+            """
+        )
+        connection.commit()
+
+    payload = DashboardStrategyService(
+        path,
+        now_provider=lambda: NOW,
+    ).create_payload(
+        trading_date=NOW.date()
+    )
+
+    assert len(
+        payload.recent_completed_trades
+    ) == 1
+    assert payload.recent_completed_trades[0][
+        "strategy_name"
+    ] == "ORB"

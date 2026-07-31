@@ -72,3 +72,16 @@ def test_strategy_api_is_exposed() -> None:
     assert response.json()["strategies"][0][
         "strategy_name"
     ] == "ORB"
+
+
+
+def test_strategy_api_contains_completed_trade_key() -> None:
+    app = create_dashboard_app(
+        service=FakeDashboardService(),
+        strategy_service=FakeStrategyService(),
+    )
+    payload = TestClient(app).get(
+        "/api/dashboard/strategies"
+    ).json()
+
+    assert "recent_completed_trades" in payload

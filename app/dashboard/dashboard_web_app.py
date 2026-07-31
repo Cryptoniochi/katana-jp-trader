@@ -136,6 +136,7 @@ def create_dashboard_app(
                 "trading_date": None,
                 "strategies": [],
                 "recent_trades": [],
+                "recent_completed_trades": [],
             }
 
         return strategy_service.create_payload().to_dict()

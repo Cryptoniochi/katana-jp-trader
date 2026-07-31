@@ -3,7 +3,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 
 def initialize_database(
@@ -68,6 +68,9 @@ def initialize_database(
 
         _create_high_breakout_candidates_table(connection)
         _create_high_breakout_candidate_indexes(connection)
+
+        _create_trade_journal_table(connection)
+        _create_trade_journal_indexes(connection)
 
         _update_schema_version(connection)
 
@@ -1448,6 +1451,102 @@ def _create_high_breakout_candidate_indexes(
         ON high_breakout_candidates (
             code,
             trading_date DESC
+        )
+        """
+    )
+
+
+
+def _create_trade_journal_table(
+    connection: sqlite3.Connection,
+) -> None:
+    """完了したトレードを保存するジャーナルテーブルを作成する。"""
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trade_journal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id TEXT NOT NULL UNIQUE,
+            strategy_name TEXT NOT NULL,
+            code TEXT NOT NULL,
+            entry_signal_id TEXT NOT NULL,
+            exit_signal_id TEXT NOT NULL,
+            entry_execution_id TEXT NOT NULL,
+            exit_execution_id TEXT NOT NULL,
+            entry_at TEXT NOT NULL,
+            exit_at TEXT NOT NULL,
+            entry_price REAL NOT NULL,
+            exit_price REAL NOT NULL,
+            quantity INTEGER NOT NULL,
+            entry_cost REAL NOT NULL DEFAULT 0,
+            exit_cost REAL NOT NULL DEFAULT 0,
+            realized_profit_loss REAL NOT NULL,
+            return_rate REAL NOT NULL,
+            holding_minutes REAL NOT NULL,
+            exit_reason TEXT,
+            maximum_favorable_excursion REAL,
+            maximum_adverse_excursion REAL,
+            maximum_favorable_excursion_rate REAL,
+            maximum_adverse_excursion_rate REAL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(entry_signal_id)
+                REFERENCES trade_signals(signal_id),
+            FOREIGN KEY(exit_signal_id)
+                REFERENCES trade_signals(signal_id),
+            FOREIGN KEY(entry_execution_id)
+                REFERENCES trade_executions(execution_id),
+            FOREIGN KEY(exit_execution_id)
+                REFERENCES trade_executions(execution_id)
+        )
+        """
+    )
+
+
+def _create_trade_journal_indexes(
+    connection: sqlite3.Connection,
+) -> None:
+    """Trade Journal検索用のインデックスを作成する。"""
+
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_trade_journal_trade_id
+        ON trade_journal (
+            trade_id
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_trade_journal_strategy_exit_at
+        ON trade_journal (
+            strategy_name,
+            exit_at DESC
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_trade_journal_code_exit_at
+        ON trade_journal (
+            code,
+            exit_at DESC
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_trade_journal_exit_at
+        ON trade_journal (
+            exit_at DESC
         )
         """
     )
