@@ -20,10 +20,12 @@
         <h1>Operations Dashboard</h1>
         <p id="updated-at" class="muted">Loading...</p>
       </div>
-      <div id="system-status" class="status-card">UNKNOWN</div>
+      <div id="system-status" class="status-card">
+        UNKNOWN
+      </div>
     </header>
 
-    <section class="metrics" aria-label="主要指標">
+    <section class="metrics">
       <article class="metric">
         <span>Today's P/L</span>
         <strong id="today-pl">—</strong>
@@ -58,192 +60,65 @@
       </article>
     </section>
 
+    <section class="panel">
+      <div class="panel-heading">
+        <div>
+          <h2>Strategy Summary</h2>
+          <span class="muted">
+            Signals, executions and realized performance
+          </span>
+        </div>
+        <span id="strategy-date" class="muted">—</span>
+      </div>
+      <div class="strategy-grid" id="strategy-grid"></div>
+    </section>
+
     <section class="chart-grid">
       <article class="panel">
         <div class="panel-heading">
           <h2>Equity Curve</h2>
-          <span class="muted">Final equity by day</span>
         </div>
         <div id="equity-chart" class="chart"></div>
       </article>
-
       <article class="panel">
         <div class="panel-heading">
           <h2>Daily P/L</h2>
-          <span class="muted">Profit and loss by day</span>
         </div>
         <div id="daily-pl-chart" class="chart"></div>
       </article>
-
       <article class="panel">
         <div class="panel-heading">
           <h2>Cumulative P/L</h2>
-          <span class="muted">Accumulated result</span>
         </div>
         <div id="cumulative-pl-chart" class="chart"></div>
       </article>
-
       <article class="panel">
         <div class="panel-heading">
           <h2>Drawdown</h2>
-          <span class="muted">Decline from equity peak</span>
         </div>
         <div id="drawdown-chart" class="chart"></div>
       </article>
     </section>
 
-    <section class="panel recovery-panel">
+    <section class="panel">
       <div class="panel-heading">
-        <div>
-          <h2>Recovery</h2>
-          <span class="muted">
-            Broker and runtime self-healing activity
-          </span>
-        </div>
-        <div
-          id="recovery-status"
-          class="recovery-status"
-          data-status="unknown"
-        >
-          UNKNOWN
-        </div>
+        <h2>Recent Trades</h2>
       </div>
-
-      <div class="recovery-grid">
-        <article class="recovery-component">
-          <div class="recovery-component-heading">
-            <div>
-              <span class="recovery-label">COMPONENT</span>
-              <h3>Broker</h3>
-            </div>
-            <span
-              id="broker-recovery-health"
-              class="component-health"
-            >
-              —
-            </span>
-          </div>
-
-          <dl class="recovery-statistics">
-            <div>
-              <dt>Attempts</dt>
-              <dd id="broker-recovery-attempts">—</dd>
-            </div>
-            <div>
-              <dt>Successes</dt>
-              <dd
-                id="broker-recovery-successes"
-                class="recovery-success"
-              >
-                —
-              </dd>
-            </div>
-            <div>
-              <dt>Failures</dt>
-              <dd
-                id="broker-recovery-failures"
-                class="recovery-failure"
-              >
-                —
-              </dd>
-            </div>
-          </dl>
-
-          <div class="recovery-last">
-            <span>Last Recovery</span>
-            <strong id="last-broker-recovery">—</strong>
-          </div>
-        </article>
-
-        <article class="recovery-component">
-          <div class="recovery-component-heading">
-            <div>
-              <span class="recovery-label">COMPONENT</span>
-              <h3>Runtime</h3>
-            </div>
-            <span
-              id="runtime-recovery-health"
-              class="component-health"
-            >
-              —
-            </span>
-          </div>
-
-          <dl class="recovery-statistics">
-            <div>
-              <dt>Attempts</dt>
-              <dd id="runtime-recovery-attempts">—</dd>
-            </div>
-            <div>
-              <dt>Successes</dt>
-              <dd
-                id="runtime-recovery-successes"
-                class="recovery-success"
-              >
-                —
-              </dd>
-            </div>
-            <div>
-              <dt>Failures</dt>
-              <dd
-                id="runtime-recovery-failures"
-                class="recovery-failure"
-              >
-                —
-              </dd>
-            </div>
-          </dl>
-
-          <div class="recovery-last">
-            <span>Last Recovery</span>
-            <strong id="last-runtime-recovery">—</strong>
-          </div>
-        </article>
-
-        <article class="recovery-component recovery-overall">
-          <div class="recovery-component-heading">
-            <div>
-              <span class="recovery-label">AGGREGATE</span>
-              <h3>Overall</h3>
-            </div>
-            <span
-              id="recovery-health"
-              class="component-health"
-            >
-              —
-            </span>
-          </div>
-
-          <dl class="recovery-statistics">
-            <div>
-              <dt>Total Attempts</dt>
-              <dd id="recovery-total-attempts">—</dd>
-            </div>
-            <div>
-              <dt>Total Failures</dt>
-              <dd
-                id="recovery-total-failures"
-                class="recovery-failure"
-              >
-                —
-              </dd>
-            </div>
-            <div>
-              <dt>Success Rate</dt>
-              <dd
-                id="recovery-success-rate"
-                class="recovery-success"
-              >
-                —
-              </dd>
-            </div>
-          </dl>
-
-          <div class="recovery-last">
-            <span>Summary Generated</span>
-            <strong id="recovery-generated-at">—</strong>
-          </div>
-        </article>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Executed</th>
+              <th>Strategy</th>
+              <th>Code</th>
+              <th>Side</th>
+              <th>Quantity</th>
+              <th>Price</th>
+              <th>Costs</th>
+            </tr>
+          </thead>
+          <tbody id="recent-trades-body"></tbody>
+        </table>
       </div>
     </section>
 
@@ -289,27 +164,8 @@
       "ja-JP",
       {
         style: "percent",
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2
-      }
-    );
-    const recoveryPercent = new Intl.NumberFormat(
-      "ja-JP",
-      {
-        style: "percent",
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2
-      }
-    );
-    const dateTime = new Intl.DateTimeFormat(
-      "ja-JP",
-      {
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit"
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1
       }
     );
 
@@ -319,37 +175,22 @@
         : formatter(value);
     }
 
-    function formatDateTime(value) {
-      if (value === null || value === undefined) {
-        return "—";
-      }
-
-      const parsed = new Date(value);
-
-      if (Number.isNaN(parsed.getTime())) {
-        return String(value);
-      }
-
-      return dateTime.format(parsed);
-    }
-
-    function formatRecoveryRate(value) {
-      if (value === null || value === undefined) {
-        return "—";
-      }
-
-      return recoveryPercent.format(value / 100);
-    }
-
     function emptyChart(element, message) {
-      element.innerHTML = `<p class="chart-empty">${message}</p>`;
+      element.innerHTML =
+        `<p class="chart-empty">${message}</p>`;
     }
 
-    function lineChart(elementId, points, valueKey, formatter) {
-      const element = document.getElementById(elementId);
+    function lineChart(
+      elementId,
+      points,
+      valueKey,
+      formatter
+    ) {
+      const element = document.getElementById(
+        elementId
+      );
       const data = points
         .map(point => ({
-          label: point.trading_date,
           value: point[valueKey]
         }))
         .filter(point => point.value !== null);
@@ -362,26 +203,35 @@
       const values = data.map(point => point.value);
       const minimum = Math.min(...values);
       const maximum = Math.max(...values);
-      const range = Math.max(maximum - minimum, 1);
+      const range = Math.max(
+        maximum - minimum,
+        1
+      );
       const width = 820;
       const height = 230;
       const padding = 24;
-      const coordinates = data.map((point, index) => {
-        const x = padding + (
-          index * (width - padding * 2) /
-          Math.max(data.length - 1, 1)
-        );
-        const y = height - padding - (
-          (point.value - minimum) /
-          range *
-          (height - padding * 2)
-        );
-        return `${x},${y}`;
-      }).join(" ");
+      const coordinates = data.map(
+        (point, index) => {
+          const x = padding + (
+            index
+            * (width - padding * 2)
+            / Math.max(data.length - 1, 1)
+          );
+          const y = height - padding - (
+            (point.value - minimum)
+            / range
+            * (height - padding * 2)
+          );
+          return `${x},${y}`;
+        }
+      ).join(" ");
 
       element.innerHTML = `
-        <svg viewBox="0 0 ${width} ${height}" role="img">
-          <polyline class="line-series" points="${coordinates}" />
+        <svg viewBox="0 0 ${width} ${height}">
+          <polyline
+            class="line-series"
+            points="${coordinates}"
+          />
         </svg>
         <div class="chart-range">
           <span>${formatter(minimum)}</span>
@@ -390,58 +240,57 @@
       `;
     }
 
-    function barChart(elementId, points, valueKey, formatter) {
-      const element = document.getElementById(elementId);
-      const data = points
-        .map(point => ({
-          label: point.trading_date,
-          value: point[valueKey]
-        }))
-        .filter(point => point.value !== null);
+    function barChart(
+      elementId,
+      points,
+      valueKey,
+      formatter
+    ) {
+      const element = document.getElementById(
+        elementId
+      );
+      const values = points
+        .map(point => point[valueKey])
+        .filter(value => value !== null);
 
-      if (data.length === 0) {
+      if (values.length === 0) {
         emptyChart(element, "No data yet.");
         return;
       }
 
-      const maximumAbsolute = Math.max(
-        ...data.map(point => Math.abs(point.value)),
+      const maximum = Math.max(
+        ...values.map(Math.abs),
         1
       );
 
       element.innerHTML = `
         <div class="bar-chart">
-          ${data.map(point => {
-            const height = (
-              Math.abs(point.value) /
-              maximumAbsolute *
-              100
-            );
-            const className = point.value >= 0
-              ? "bar positive"
-              : "bar negative";
-            return `
+          ${values.map(value => `
+            <div class="bar-column">
               <div
-                class="bar-column"
-                title="${point.label}: ${formatter(point.value)}"
-              >
-                <div
-                  class="${className}"
-                  style="height:${height}%"
-                ></div>
-              </div>
-            `;
-          }).join("")}
+                class="bar ${
+                  value >= 0
+                    ? "positive"
+                    : "negative"
+                }"
+                style="height:${
+                  Math.abs(value) / maximum * 100
+                }%"
+              ></div>
+            </div>
+          `).join("")}
         </div>
         <div class="chart-range">
-          <span>${formatter(-maximumAbsolute)}</span>
-          <span>${formatter(maximumAbsolute)}</span>
+          <span>${formatter(-maximum)}</span>
+          <span>${formatter(maximum)}</span>
         </div>
       `;
     }
 
     function renderPositions(positions) {
-      const body = document.getElementById("positions-body");
+      const body = document.getElementById(
+        "positions-body"
+      );
       body.innerHTML = "";
 
       if (positions.length === 0) {
@@ -463,139 +312,141 @@
           <td>${position.quantity}</td>
           <td>${yen.format(position.average_cost)}</td>
           <td>${yen.format(position.market_price)}</td>
-          <td>${yen.format(position.unrealized_profit_loss)}</td>
+          <td>${
+            yen.format(
+              position.unrealized_profit_loss
+            )
+          }</td>
         `;
         body.appendChild(row);
       }
     }
 
-    function componentHealth(component) {
-      if (component.failures > 0) {
-        return "FAILURE";
+    function renderStrategies(payload) {
+      document.getElementById(
+        "strategy-date"
+      ).textContent = payload.trading_date ?? "—";
+
+      const grid = document.getElementById(
+        "strategy-grid"
+      );
+      grid.innerHTML = "";
+
+      for (const strategy of payload.strategies) {
+        const card = document.createElement("article");
+        card.className = "strategy-card";
+        card.innerHTML = `
+          <div class="strategy-title">
+            <h3>${strategy.strategy_name}</h3>
+            <strong>${
+              yen.format(
+                strategy.net_profit_loss
+              )
+            }</strong>
+          </div>
+          <dl>
+            <div>
+              <dt>Signals</dt>
+              <dd>${strategy.signal_count}</dd>
+            </div>
+            <div>
+              <dt>Executions</dt>
+              <dd>${strategy.execution_count}</dd>
+            </div>
+            <div>
+              <dt>Trades</dt>
+              <dd>${strategy.completed_trade_count}</dd>
+            </div>
+            <div>
+              <dt>Win Rate</dt>
+              <dd>${
+                valueOrDash(
+                  strategy.win_rate,
+                  percent.format
+                )
+              }</dd>
+            </div>
+            <div>
+              <dt>Profit Factor</dt>
+              <dd>${
+                strategy.profit_factor === null
+                  ? "—"
+                  : (
+                    Number.isFinite(
+                      strategy.profit_factor
+                    )
+                      ? strategy.profit_factor.toFixed(2)
+                      : "∞"
+                  )
+              }</dd>
+            </div>
+            <div>
+              <dt>Candidates</dt>
+              <dd>${strategy.candidate_count}</dd>
+            </div>
+          </dl>
+        `;
+        grid.appendChild(card);
+      }
+    }
+
+    function renderRecentTrades(trades) {
+      const body = document.getElementById(
+        "recent-trades-body"
+      );
+      body.innerHTML = "";
+
+      if (trades.length === 0) {
+        body.innerHTML = `
+          <tr>
+            <td colspan="7" class="muted">
+              No executions yet.
+            </td>
+          </tr>
+        `;
+        return;
       }
 
-      if (component.attempts > 0) {
-        return "SUCCESS";
+      for (const trade of trades) {
+        const row = document.createElement("tr");
+        row.innerHTML = `
+          <td>${trade.executed_at}</td>
+          <td>${trade.strategy_name}</td>
+          <td>${trade.code}</td>
+          <td>${trade.side}</td>
+          <td>${trade.quantity}</td>
+          <td>${yen.format(trade.execution_price)}</td>
+          <td>${
+            yen.format(
+              trade.commission + trade.slippage
+            )
+          }</td>
+        `;
+        body.appendChild(row);
       }
-
-      return "IDLE";
     }
 
-    function renderComponentHealth(elementId, component) {
-      const element = document.getElementById(elementId);
-      const health = componentHealth(component);
+    async function refreshDashboard() {
+      const [
+        summaryResponse,
+        strategyResponse
+      ] = await Promise.all([
+        fetch("/api/dashboard/summary"),
+        fetch("/api/dashboard/strategies")
+      ]);
 
-      element.textContent = health;
-      element.dataset.status = health.toLowerCase();
-    }
-
-    function renderRecovery(data) {
-      document.getElementById(
-        "broker-recovery-attempts"
-      ).textContent = data.broker.attempts;
-      document.getElementById(
-        "broker-recovery-successes"
-      ).textContent = data.broker.successes;
-      document.getElementById(
-        "broker-recovery-failures"
-      ).textContent = data.broker.failures;
-      document.getElementById(
-        "last-broker-recovery"
-      ).textContent = formatDateTime(
-        data.broker.last_recovery
-      );
-
-      document.getElementById(
-        "runtime-recovery-attempts"
-      ).textContent = data.runtime.attempts;
-      document.getElementById(
-        "runtime-recovery-successes"
-      ).textContent = data.runtime.successes;
-      document.getElementById(
-        "runtime-recovery-failures"
-      ).textContent = data.runtime.failures;
-      document.getElementById(
-        "last-runtime-recovery"
-      ).textContent = formatDateTime(
-        data.runtime.last_recovery
-      );
-
-      document.getElementById(
-        "recovery-total-attempts"
-      ).textContent = data.aggregate.total_attempts;
-      document.getElementById(
-        "recovery-total-failures"
-      ).textContent = data.aggregate.total_failures;
-      document.getElementById(
-        "recovery-success-rate"
-      ).textContent = formatRecoveryRate(
-        data.aggregate.success_rate
-      );
-      document.getElementById(
-        "recovery-generated-at"
-      ).textContent = formatDateTime(
-        data.generated_at
-      );
-
-      renderComponentHealth(
-        "broker-recovery-health",
-        data.broker
-      );
-      renderComponentHealth(
-        "runtime-recovery-health",
-        data.runtime
-      );
-
-      const statusElement = document.getElementById(
-        "recovery-status"
-      );
-      statusElement.textContent =
-        data.recovery_status.toUpperCase();
-      statusElement.dataset.status = data.recovery_status;
-
-      const healthElement = document.getElementById(
-        "recovery-health"
-      );
-      healthElement.textContent = data.is_healthy
-        ? "HEALTHY"
-        : "ATTENTION";
-      healthElement.dataset.status = data.is_healthy
-        ? "success"
-        : "failure";
-    }
-
-    function renderRecoveryError(error) {
-      const statusElement = document.getElementById(
-        "recovery-status"
-      );
-      statusElement.textContent = "UNAVAILABLE";
-      statusElement.dataset.status = "failed";
-
-      const healthElement = document.getElementById(
-        "recovery-health"
-      );
-      healthElement.textContent = "ERROR";
-      healthElement.dataset.status = "failure";
-
-      console.error("Recovery dashboard refresh failed", error);
-    }
-
-    async function fetchJson(url, errorPrefix) {
-      const response = await fetch(url);
-
-      if (!response.ok) {
+      if (
+        !summaryResponse.ok
+        || !strategyResponse.ok
+      ) {
         throw new Error(
-          `${errorPrefix}: ${response.status}`
+          "Dashboard API request failed."
         );
       }
 
-      return response.json();
-    }
-
-    async function refreshDashboardSummary() {
-      const data = await fetchJson(
-        "/api/dashboard/summary",
-        "Dashboard API error"
+      const data = await summaryResponse.json();
+      const strategyData = (
+        await strategyResponse.json()
       );
       const snapshot = data.snapshot;
       const daily = data.daily_history;
@@ -607,27 +458,58 @@
       const live = snapshot.live_summary;
       const health = snapshot.system_health;
 
-      document.getElementById("updated-at").textContent =
-        `Updated: ${formatDateTime(data.generated_at)}`;
-      document.getElementById("today-pl").textContent =
-        valueOrDash(today?.net_profit_loss, yen.format);
-      document.getElementById("cumulative-pl").textContent =
-        yen.format(data.cumulative_profit_loss);
-      document.getElementById("daily-win-rate").textContent =
-        valueOrDash(analytics.daily_win_rate, percent.format);
-      document.getElementById("maximum-drawdown").textContent =
-        valueOrDash(analytics.maximum_drawdown, percent.format);
-      document.getElementById("signal-count").textContent =
-        valueOrDash(live?.signal_count);
-      document.getElementById("execution-count").textContent =
-        valueOrDash(live?.execution_count);
-      document.getElementById("broker-equity").textContent =
-        valueOrDash(portfolio?.broker_equity, yen.format);
-      document.getElementById("position-count").textContent =
-        valueOrDash(portfolio?.position_count);
+      document.getElementById(
+        "updated-at"
+      ).textContent = `Updated: ${data.generated_at}`;
+      document.getElementById(
+        "today-pl"
+      ).textContent = valueOrDash(
+        today?.net_profit_loss,
+        yen.format
+      );
+      document.getElementById(
+        "cumulative-pl"
+      ).textContent = yen.format(
+        data.cumulative_profit_loss
+      );
+      document.getElementById(
+        "daily-win-rate"
+      ).textContent = valueOrDash(
+        analytics.daily_win_rate,
+        percent.format
+      );
+      document.getElementById(
+        "maximum-drawdown"
+      ).textContent = valueOrDash(
+        analytics.maximum_drawdown,
+        percent.format
+      );
+      document.getElementById(
+        "signal-count"
+      ).textContent = valueOrDash(
+        live?.signal_count
+      );
+      document.getElementById(
+        "execution-count"
+      ).textContent = valueOrDash(
+        live?.execution_count
+      );
+      document.getElementById(
+        "broker-equity"
+      ).textContent = valueOrDash(
+        portfolio?.broker_equity,
+        yen.format
+      );
+      document.getElementById(
+        "position-count"
+      ).textContent = valueOrDash(
+        portfolio?.position_count
+      );
 
       const status = health?.status ?? (
-        snapshot.partial ? "partial" : "available"
+        snapshot.partial
+          ? "partial"
+          : "available"
       );
       const statusElement = document.getElementById(
         "system-status"
@@ -635,7 +517,13 @@
       statusElement.textContent = status.toUpperCase();
       statusElement.dataset.status = status;
 
-      renderPositions(portfolio?.positions ?? []);
+      renderStrategies(strategyData);
+      renderRecentTrades(
+        strategyData.recent_trades
+      );
+      renderPositions(
+        portfolio?.positions ?? []
+      );
       lineChart(
         "equity-chart",
         daily,
@@ -661,52 +549,36 @@
         percent.format
       );
 
-      document.getElementById("system-details").textContent =
-        JSON.stringify(
-          {
-            broker: snapshot.broker,
-            runtime_resource: snapshot.runtime_resource,
-            analytics,
-            errors: snapshot.errors
-          },
-          null,
-          2
-        );
-    }
-
-    async function refreshRecovery() {
-      const data = await fetchJson(
-        "/api/dashboard/recovery",
-        "Recovery API error"
+      document.getElementById(
+        "system-details"
+      ).textContent = JSON.stringify(
+        {
+          broker: snapshot.broker,
+          runtime_resource: (
+            snapshot.runtime_resource
+          ),
+          analytics,
+          errors: snapshot.errors
+        },
+        null,
+        2
       );
-
-      renderRecovery(data);
     }
 
-    async function refreshDashboard() {
-      const results = await Promise.allSettled([
-        refreshDashboardSummary(),
-        refreshRecovery()
-      ]);
+    refreshDashboard().catch(error => {
+      document.getElementById(
+        "system-details"
+      ).textContent = (
+        error instanceof Error
+          ? error.message
+          : String(error)
+      );
+    });
 
-      const dashboardResult = results[0];
-      const recoveryResult = results[1];
-
-      if (dashboardResult.status === "rejected") {
-        document.getElementById("system-details").textContent =
-          dashboardResult.reason instanceof Error
-            ? dashboardResult.reason.message
-            : String(dashboardResult.reason);
-      }
-
-      if (recoveryResult.status === "rejected") {
-        renderRecoveryError(recoveryResult.reason);
-      }
-    }
-
-    refreshDashboard();
-
-    window.setInterval(refreshDashboard, 30000);
+    window.setInterval(
+      refreshDashboard,
+      30000
+    );
   </script>
 </body>
 </html>

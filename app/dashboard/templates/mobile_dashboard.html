@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover"
+  >
+  <meta name="theme-color" content="#071219">
+  <title>{{ page_title }}</title>
+  <link
+    rel="stylesheet"
+    href="{{ url_for('static', path='/dashboard.css') }}"
+  >
+</head>
+<body class="mobile-body">
+  <main class="mobile-page">
+    <header class="mobile-header">
+      <div>
+        <p class="eyebrow">PROJECT KATANA</p>
+        <h1>Mobile Monitor</h1>
+      </div>
+      <div id="mobile-status" class="status-pill">
+        UNKNOWN
+      </div>
+    </header>
+
+    <p id="mobile-updated-at" class="muted">
+      Loading...
+    </p>
+
+    <section class="mobile-primary-grid">
+      <article class="mobile-primary-card">
+        <span>Today's P/L</span>
+        <strong id="mobile-today-pl">—</strong>
+      </article>
+      <article class="mobile-primary-card">
+        <span>Positions</span>
+        <strong id="mobile-position-count">—</strong>
+      </article>
+      <article class="mobile-primary-card">
+        <span>Signals</span>
+        <strong id="mobile-signal-count">—</strong>
+      </article>
+      <article class="mobile-primary-card">
+        <span>Executions</span>
+        <strong id="mobile-execution-count">—</strong>
+      </article>
+    </section>
+
+    <section>
+      <div class="mobile-section-title">
+        <h2>Strategies</h2>
+        <span id="mobile-strategy-date" class="muted">—</span>
+      </div>
+      <div id="mobile-strategy-list" class="mobile-card-list"></div>
+    </section>
+
+    <section>
+      <div class="mobile-section-title">
+        <h2>Recent Trades</h2>
+      </div>
+      <div id="mobile-recent-trades" class="mobile-card-list"></div>
+    </section>
+
+    <section>
+      <div class="mobile-section-title">
+        <h2>Open Positions</h2>
+      </div>
+      <div id="mobile-positions" class="mobile-card-list"></div>
+    </section>
+
+    <footer class="mobile-footer">
+      <a href="/">Desktop View</a>
+    </footer>
+  </main>
+
+  <script>
+    const yen = new Intl.NumberFormat(
+      "ja-JP",
+      {
+        style: "currency",
+        currency: "JPY",
+        maximumFractionDigits: 0
+      }
+    );
+
+    const percent = new Intl.NumberFormat(
+      "ja-JP",
+      {
+        style: "percent",
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1
+      }
+    );
+
+    function renderStrategies(payload) {
+      const list = document.getElementById(
+        "mobile-strategy-list"
+      );
+      document.getElementById(
+        "mobile-strategy-date"
+      ).textContent = payload.trading_date ?? "—";
+      list.innerHTML = "";
+
+      for (const strategy of payload.strategies) {
+        const element = document.createElement("article");
+        element.className = "mobile-detail-card";
+        element.innerHTML = `
+          <div class="mobile-card-heading">
+            <strong>${strategy.strategy_name}</strong>
+            <span>${yen.format(strategy.net_profit_loss)}</span>
+          </div>
+          <div class="mobile-detail-grid">
+            <div><span>Signals</span><b>${strategy.signal_count}</b></div>
+            <div><span>Executions</span><b>${strategy.execution_count}</b></div>
+            <div><span>Trades</span><b>${strategy.completed_trade_count}</b></div>
+            <div><span>Win Rate</span><b>${
+              strategy.win_rate === null
+                ? "—"
+                : percent.format(strategy.win_rate)
+            }</b></div>
+            <div><span>PF</span><b>${
+              strategy.profit_factor === null
+                ? "—"
+                : (
+                  Number.isFinite(strategy.profit_factor)
+                    ? strategy.profit_factor.toFixed(2)
+                    : "∞"
+                )
+            }</b></div>
+            <div><span>Candidates</span><b>${strategy.candidate_count}</b></div>
+          </div>
+        `;
+        list.appendChild(element);
+      }
+    }
+
+    function renderTrades(trades) {
+      const list = document.getElementById(
+        "mobile-recent-trades"
+      );
+      list.innerHTML = "";
+
+      if (trades.length === 0) {
+        list.innerHTML = `
+          <article class="mobile-empty-card">
+            No executions yet.
+          </article>
+        `;
+        return;
+      }
+
+      for (const trade of trades.slice(0, 10)) {
+        const element = document.createElement("article");
+        element.className = "mobile-detail-card";
+        element.innerHTML = `
+          <div class="mobile-card-heading">
+            <strong>${trade.strategy_name}</strong>
+            <span>${trade.side}</span>
+          </div>
+          <div class="mobile-trade-row">
+            <span>${trade.code}</span>
+            <span>${trade.quantity} shares</span>
+            <span>${yen.format(trade.execution_price)}</span>
+          </div>
+          <small>${trade.executed_at}</small>
+        `;
+        list.appendChild(element);
+      }
+    }
+
+    function renderPositions(positions) {
+      const list = document.getElementById(
+        "mobile-positions"
+      );
+      list.innerHTML = "";
+
+      if (positions.length === 0) {
+        list.innerHTML = `
+          <article class="mobile-empty-card">
+            No open positions.
+          </article>
+        `;
+        return;
+      }
+
+      for (const position of positions) {
+        const element = document.createElement("article");
+        element.className = "mobile-detail-card";
+        element.innerHTML = `
+          <div class="mobile-card-heading">
+            <strong>${position.code}</strong>
+            <span>${position.side}</span>
+          </div>
+          <div class="mobile-detail-grid">
+            <div><span>Quantity</span><b>${position.quantity}</b></div>
+            <div><span>Average</span><b>${yen.format(position.average_cost)}</b></div>
+            <div><span>Market</span><b>${yen.format(position.market_price)}</b></div>
+            <div><span>Unrealized</span><b>${yen.format(position.unrealized_profit_loss)}</b></div>
+          </div>
+        `;
+        list.appendChild(element);
+      }
+    }
+
+    async function refreshMobileDashboard() {
+      const [
+        summaryResponse,
+        strategyResponse
+      ] = await Promise.all([
+        fetch("/api/dashboard/summary"),
+        fetch("/api/dashboard/strategies")
+      ]);
+
+      if (
+        !summaryResponse.ok
+        || !strategyResponse.ok
+      ) {
+        throw new Error(
+          "Dashboard API request failed."
+        );
+      }
+
+      const summary = await summaryResponse.json();
+      const strategies = await strategyResponse.json();
+      const snapshot = summary.snapshot;
+      const daily = summary.daily_history;
+      const today = daily.length > 0
+        ? daily[daily.length - 1]
+        : null;
+      const portfolio = snapshot.portfolio;
+      const live = snapshot.live_summary;
+      const health = snapshot.system_health;
+      const status = health?.status ?? (
+        snapshot.partial
+          ? "partial"
+          : "available"
+      );
+
+      document.getElementById(
+        "mobile-updated-at"
+      ).textContent = `Updated: ${summary.generated_at}`;
+
+      document.getElementById(
+        "mobile-today-pl"
+      ).textContent = today?.net_profit_loss === undefined
+        || today?.net_profit_loss === null
+        ? "—"
+        : yen.format(today.net_profit_loss);
+
+      document.getElementById(
+        "mobile-position-count"
+      ).textContent = portfolio?.position_count ?? "—";
+
+      document.getElementById(
+        "mobile-signal-count"
+      ).textContent = live?.signal_count ?? "—";
+
+      document.getElementById(
+        "mobile-execution-count"
+      ).textContent = live?.execution_count ?? "—";
+
+      const statusElement = document.getElementById(
+        "mobile-status"
+      );
+      statusElement.textContent = status.toUpperCase();
+      statusElement.dataset.status = status;
+
+      renderStrategies(strategies);
+      renderTrades(strategies.recent_trades);
+      renderPositions(portfolio?.positions ?? []);
+    }
+
+    refreshMobileDashboard().catch(error => {
+      document.getElementById(
+        "mobile-updated-at"
+      ).textContent = (
+        error instanceof Error
+          ? error.message
+          : String(error)
+      );
+    });
+
+    window.setInterval(
+      refreshMobileDashboard,
+      30000
+    );
+  </script>
+</body>
+</html>
