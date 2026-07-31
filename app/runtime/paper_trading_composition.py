@@ -23,11 +23,20 @@ from app.backtest.order_queue_service import (
 from app.backtest.queue_execution_service import (
     BacktestQueueExecutionService,
 )
+from app.risk.risk_aware_queue_execution_service import (
+    RiskAwareQueueExecutionService,
+)
+from app.risk.paper_trading_pretrade_risk import (
+    PaperTradingPreTradeRiskProvider,
+    PaperTradingRiskLimits,
+)
+from app.risk.paper_trading_trace import (
+    PaperTradingTraceRecorder,
+)
 from app.database import initialize_database
 from app.live.live_orchestrator import (
     LiveTradingOrchestrator,
 )
-from app.market.bar_aggregator import StockPriceAggregator
 from app.market.kabu_station_client import (
     KabuStationClient,
     KabuStationClientSettings,
@@ -55,21 +64,17 @@ from app.notifications.notification_rule_models import (
 )
 from app.settings import ROOT_DIR, Settings
 from app.market.bar_repository import MarketBarRepository
-from app.market.jquants_downloader import (
-    JQuantsMinuteDownloader,
-)
 from app.market.market_calendar import TokyoMarketCalendar
 from app.market.market_clock import TokyoMarketClock
-from app.market.models import StockPrice
-from app.market.previous_trading_day_replay_provider import (
-    PreviousTradingDayReplayProvider,
-)
 from app.market.realtime_market_service import (
     RealtimeMarketMonitor,
     TokyoMarketSessionService,
 )
 from app.market.realtime_paper_trading_service import (
     RealtimePaperTradingService,
+)
+from app.market.high_breakout_candidate_provider import (
+    RepositoryHighBreakoutCandidateProvider,
 )
 from app.market.realtime_signal_engine import (
     RealtimeSignalEngine,
@@ -129,12 +134,10 @@ class PaperTradingProductionSettings:
     initial_cash: float = 10_000_000.0
     cycle_interval_seconds: float = 30.0
     maximum_cycles: int | None = None
-    jquants_api_key: str | None = None
-    jquants_timeout_seconds: float = 30.0
+    enabled_strategy_names: tuple[str, ...] = ("orb",)
     maximum_codes_per_poll: int = 10
     rate_limit_cooldown_seconds: float = 60.0
-    market_data_mode: str = "previous-day-replay"
-    replay_maximum_lookback_days: int = 14
+    market_data_mode: str = "kabu-station-realtime"
     kabu_station_api_password: str | None = None
     kabu_station_base_url: str = (
         "http://localhost:18080/kabusapi"
@@ -147,6 +150,16 @@ class PaperTradingProductionSettings:
     continue_on_cycle_error: bool = True
     stop_on_cycle_failure: bool = False
     stop_on_resource_critical: bool = True
+    max_position_count: int = 5
+    max_position_value: float = 1_000_000.0
+    max_total_exposure: float = 5_000_000.0
+    minimum_cash_balance: float = 500_000.0
+    max_daily_loss: float = 100_000.0
+    max_daily_entries: int = 5
+    risk_trace_enabled: bool = True
+    risk_trace_path: Path = Path(
+        "logs/risk/paper_trading_trace.jsonl"
+    )
 
     def __post_init__(self) -> None:
         """設定値を正規化して検証する。"""
@@ -179,6 +192,31 @@ class PaperTradingProductionSettings:
                     f"value={code}"
                 )
 
+        normalized_strategy_names = tuple(
+            dict.fromkeys(
+                name.strip().lower()
+                for name in self.enabled_strategy_names
+                if name.strip()
+            )
+        )
+
+        if not normalized_strategy_names:
+            raise ValueError(
+                "有効戦略を1件以上指定してください。"
+            )
+
+        unknown_strategies = tuple(
+            name
+            for name in normalized_strategy_names
+            if name not in {"orb", "pullback", "high-breakout"}
+        )
+
+        if unknown_strategies:
+            raise ValueError(
+                "未対応の戦略が指定されています。 "
+                f"strategies={','.join(unknown_strategies)}"
+            )
+
         if self.initial_cash < 0:
             raise ValueError(
                 "初期資金は0以上である必要があります。"
@@ -197,12 +235,6 @@ class PaperTradingProductionSettings:
                 "最大サイクル数は0より大きい必要があります。"
             )
 
-        if self.jquants_timeout_seconds <= 0:
-            raise ValueError(
-                "J-Quantsタイムアウト秒数は"
-                "0より大きい必要があります。"
-            )
-
         if self.maximum_codes_per_poll <= 0:
             raise ValueError(
                 "1回の最大取得銘柄数は"
@@ -218,22 +250,10 @@ class PaperTradingProductionSettings:
             self.market_data_mode.strip().lower()
         )
 
-        if normalized_market_data_mode not in {
-            "previous-day-replay",
-            "jquants-current-day",
-            "kabu-station-realtime",
-        }:
+        if normalized_market_data_mode != "kabu-station-realtime":
             raise ValueError(
-                "市場データモードは"
-                "previous-day-replayまたは"
-                "jquants-current-day、または"
-                "kabu-station-realtimeを指定してください。"
-            )
-
-        if self.replay_maximum_lookback_days <= 0:
-            raise ValueError(
-                "リプレイ最大遡及日数は"
-                "0より大きい必要があります。"
+                "市場データモードはkabu-station-realtimeのみ"
+                "指定できます。"
             )
 
         normalized_kabu_base_url = (
@@ -277,6 +297,27 @@ class PaperTradingProductionSettings:
                 "50銘柄です。"
             )
 
+        if self.max_position_count <= 0:
+            raise ValueError(
+                "最大保有銘柄数は0より大きい必要があります。"
+            )
+
+        if self.max_daily_entries <= 0:
+            raise ValueError(
+                "1日最大エントリー数は0より大きい必要があります。"
+            )
+
+        for name, value in {
+            "1銘柄最大投資額": self.max_position_value,
+            "最大総投資額": self.max_total_exposure,
+            "最低現金残高": self.minimum_cash_balance,
+            "日次損失上限": self.max_daily_loss,
+        }.items():
+            if value < 0:
+                raise ValueError(
+                    f"{name}は0以上である必要があります。"
+                )
+
         if self.commission_per_order < 0:
             raise ValueError(
                 "注文手数料は0以上である必要があります。"
@@ -285,6 +326,15 @@ class PaperTradingProductionSettings:
         if self.slippage_rate < 0:
             raise ValueError(
                 "スリッページ率は0以上である必要があります。"
+            )
+
+        normalized_risk_trace_path = Path(
+            self.risk_trace_path
+        )
+
+        if not normalized_risk_trace_path.is_absolute():
+            normalized_risk_trace_path = (
+                ROOT_DIR / normalized_risk_trace_path
             )
 
         object.__setattr__(
@@ -296,6 +346,11 @@ class PaperTradingProductionSettings:
             self,
             "codes",
             normalized_codes,
+        )
+        object.__setattr__(
+            self,
+            "enabled_strategy_names",
+            normalized_strategy_names,
         )
         object.__setattr__(
             self,
@@ -312,6 +367,11 @@ class PaperTradingProductionSettings:
             "kabu_station_websocket_url",
             normalized_kabu_websocket_url,
         )
+        object.__setattr__(
+            self,
+            "risk_trace_path",
+            normalized_risk_trace_path.resolve(),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,7 +383,6 @@ class PaperTradingProductionBundle:
     trading_loop_component: TradingLoopComponent
     runtime_bundle: PaperTradingRuntimeBundle
     market_monitor: RealtimeMarketMonitor
-    replay_provider: PreviousTradingDayReplayProvider | None
     live_orchestrator: LiveTradingOrchestrator
     realtime_paper_trading_service: RealtimePaperTradingService
     signal_engine: RealtimeSignalEngine
@@ -388,110 +447,37 @@ class PaperTradingComposition:
         )
         market_calendar = TokyoMarketCalendar()
 
-        replay_provider: (
-            PreviousTradingDayReplayProvider | None
-        ) = None
-        kabu_station_service: (
-            KabuStationRealtimeService | None
-        ) = None
-
-        if (
-            settings.market_data_mode
-            == "kabu-station-realtime"
-        ):
-            completed_bar_provider = (
-                KabuStationCompletedBarProvider()
-            )
-            kabu_client = KabuStationClient(
-                settings=KabuStationClientSettings(
-                    api_password=(
-                        settings.kabu_station_api_password
-                        or ""
-                    ),
-                    base_url=(
-                        settings.kabu_station_base_url
-                    ),
-                    maximum_registered_symbols=50,
-                )
-            )
-            kabu_provider = KabuStationRealtimeProvider(
-                client=kabu_client
-            )
-
-            def websocket_factory(**kwargs):
-                return KabuStationWebSocketClient(
-                    url=(
-                        settings.kabu_station_websocket_url
-                    ),
-                    **kwargs,
-                )
-
-            kabu_station_service = (
-                KabuStationRealtimeService(
-                    provider=kabu_provider,
-                    websocket_client_factory=(
-                        websocket_factory
-                    ),
-                    on_completed_bar=(
-                        completed_bar_provider.accept
-                    ),
-                    interval_minutes=5,
-                )
-            )
-            provide_five_minute_bars = (
-                completed_bar_provider
-            )
-            market_data_source = (
-                "kabu-station-realtime"
-            )
-        else:
-            downloader = JQuantsMinuteDownloader(
-                api_key=settings.jquants_api_key,
-                timeout_seconds=(
-                    settings.jquants_timeout_seconds
+        completed_bar_provider = (
+            KabuStationCompletedBarProvider()
+        )
+        kabu_client = KabuStationClient(
+            settings=KabuStationClientSettings(
+                api_password=(
+                    settings.kabu_station_api_password
+                    or ""
                 ),
+                base_url=settings.kabu_station_base_url,
+                maximum_registered_symbols=50,
             )
-            aggregator = StockPriceAggregator()
+        )
+        kabu_provider = KabuStationRealtimeProvider(
+            client=kabu_client
+        )
 
-            if (
-                settings.market_data_mode
-                == "previous-day-replay"
-            ):
-                replay_provider = (
-                    PreviousTradingDayReplayProvider(
-                        downloader=downloader,
-                        aggregator=aggregator,
-                        trading_day_predicate=(
-                            market_calendar.is_business_day
-                        ),
-                        maximum_lookback_days=(
-                            settings.replay_maximum_lookback_days
-                        ),
-                    )
-                )
-                provide_five_minute_bars = replay_provider
-                market_data_source = (
-                    "jquants-previous-day-replay"
-                )
-            else:
-                def provide_five_minute_bars(
-                    code: str,
-                    target_date: date,
-                ) -> list[StockPrice]:
-                    minute_bars = downloader.download(
-                        code,
-                        target_date.isoformat(),
-                    )
+        def websocket_factory(**kwargs):
+            return KabuStationWebSocketClient(
+                url=settings.kabu_station_websocket_url,
+                **kwargs,
+            )
 
-                    return (
-                        aggregator.aggregate_to_five_minutes(
-                            minute_bars
-                        )
-                    )
-
-                market_data_source = (
-                    "jquants-current-day"
-                )
+        kabu_station_service = KabuStationRealtimeService(
+            provider=kabu_provider,
+            websocket_client_factory=websocket_factory,
+            on_completed_bar=completed_bar_provider.accept,
+            interval_minutes=5,
+        )
+        provide_five_minute_bars = completed_bar_provider
+        market_data_source = "kabu-station-realtime"
 
         market_session_service = TokyoMarketSessionService(
             trading_day_predicate=(
@@ -659,6 +645,38 @@ class PaperTradingComposition:
             )
         )
 
+        trace_recorder = (
+            PaperTradingTraceRecorder(
+                output_path=settings.risk_trace_path
+            )
+            if settings.risk_trace_enabled
+            else None
+        )
+
+        if trace_recorder is not None:
+            trace_recorder.runtime_started(
+                market_data_mode=settings.market_data_mode,
+                codes=settings.codes,
+                database_path=settings.database_path,
+            )
+
+        risk_provider = PaperTradingPreTradeRiskProvider(
+            broker=paper_broker,
+            limits=PaperTradingRiskLimits(
+                max_position_count=settings.max_position_count,
+                max_position_value=settings.max_position_value,
+                max_total_exposure=settings.max_total_exposure,
+                minimum_cash_balance=settings.minimum_cash_balance,
+                max_daily_loss=settings.max_daily_loss,
+                max_daily_entries=settings.max_daily_entries,
+            ),
+        )
+        risk_aware_execution_service = (
+            RiskAwareQueueExecutionService(
+                execution_service=queue_execution_service,
+            )
+        )
+
         position_service = PositionService(
             database_path=settings.database_path,
             position_repository=position_repository,
@@ -679,7 +697,18 @@ class PaperTradingComposition:
             )
         )
 
-        signal_engine = RealtimeSignalEngine()
+        signal_engine = RealtimeSignalEngine(
+            enabled_strategy_names=(
+                settings.enabled_strategy_names
+            ),
+            high_breakout_candidate_provider=(
+                RepositoryHighBreakoutCandidateProvider(
+                    HighBreakoutCandidateRepository(
+                        settings.database_path
+                    )
+                )
+            ),
+        )
 
         realtime_paper_trading_service = (
             RealtimePaperTradingService(
@@ -692,6 +721,13 @@ class PaperTradingComposition:
                     portfolio_update_service
                 ),
                 market_price_updater=update_market_price,
+                risk_aware_execution_service=(
+                    risk_aware_execution_service
+                ),
+                risk_result_provider=risk_provider,
+                risk_context_updater=risk_provider.prepare,
+                require_risk_gate=True,
+                trace_recorder=trace_recorder,
             )
         )
         live_orchestrator = LiveTradingOrchestrator(
@@ -764,7 +800,6 @@ class PaperTradingComposition:
             ),
             runtime_bundle=runtime_bundle,
             market_monitor=market_monitor,
-            replay_provider=replay_provider,
             live_orchestrator=live_orchestrator,
             realtime_paper_trading_service=(
                 realtime_paper_trading_service

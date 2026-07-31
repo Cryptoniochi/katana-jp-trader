@@ -7,7 +7,6 @@ from datetime import date, datetime, time, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from app.market.jquants_downloader import JQuantsDownloadError
 from app.market.models import StockPrice
 from app.market.realtime_models import (
     MarketSessionSnapshot,
@@ -18,6 +17,20 @@ from app.market.realtime_models import (
 
 
 JST = ZoneInfo("Asia/Tokyo")
+
+
+class RealtimeProviderRateLimitError(RuntimeError):
+    """市場データProviderのレート制限を表す。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
 
 
 class RealtimeBarProvider(Protocol):
@@ -239,10 +252,7 @@ class RealtimeMarketMonitor:
                     code,
                     session.trading_date,
                 )
-            except JQuantsDownloadError as error:
-                if not error.is_rate_limited:
-                    raise
-
+            except RealtimeProviderRateLimitError as error:
                 cooldown_seconds = (
                     error.retry_after_seconds
                     if error.retry_after_seconds is not None

@@ -85,17 +85,13 @@ class FakeCompositionFactory:
 
 def create_settings(
     tmp_path: Path,
-    *,
-    api_key: str | None = "test-key",
 ) -> PaperTradingProductionSettings:
     """診断用の正常設定を作成する。"""
 
     return PaperTradingProductionSettings(
-        database_path=(
-            tmp_path / "data" / "katana.db"
-        ),
+        database_path=(tmp_path / "data" / "katana.db"),
         codes=("7203", "6758"),
-        jquants_api_key=api_key,
+        kabu_station_api_password="secret",
     )
 
 
@@ -125,42 +121,6 @@ def test_readiness_report_is_ready(
         report.items
     )
     assert FakeCompositionFactory.call_count == 1
-
-
-def test_missing_api_key_is_not_ready(
-    tmp_path: Path,
-) -> None:
-    """APIキーがなければCompositionを生成しない。"""
-
-    FakeCompositionFactory.reset()
-
-    report = ProductionReadinessChecker(
-        composition_factory=(
-            FakeCompositionFactory
-        ),
-        python_version_provider=lambda: (
-            3,
-            14,
-            0,
-        ),
-    ).check(
-        settings=create_settings(
-            tmp_path,
-            api_key=None,
-        )
-    )
-
-    assert report.is_ready is False
-    assert report.failure_count == 1
-    assert FakeCompositionFactory.call_count == 0
-
-    failed = next(
-        item
-        for item in report.items
-        if item.is_failed
-    )
-
-    assert failed.name == "J-Quants API Key"
 
 
 def test_old_python_is_not_ready(

@@ -15,12 +15,10 @@ from app.run_paper_trading import (
     create_production_settings,
     create_runtime_notification_gateway,
     _extract_live_orb_diagnostics,
-    _extract_replay_diagnostics,
     _extract_market_data_diagnostics,
     _extract_paper_service_diagnostics,
     _finished_notification_message,
     _format_live_orb_diagnostics,
-    _format_replay_diagnostics,
     _format_market_data_diagnostics,
     _format_money,
     _format_percentage,
@@ -267,7 +265,7 @@ def test_settings_loads_codes_from_watchlist(
 
     settings = create_production_settings(
         arguments,
-        environ={},
+        environ={"KABU_STATION_API_PASSWORD": "secret"},
     )
 
     assert settings.codes == (
@@ -299,7 +297,7 @@ def test_direct_codes_override_watchlist(
 
     settings = create_production_settings(
         arguments,
-        environ={},
+        environ={"KABU_STATION_API_PASSWORD": "secret"},
     )
 
     assert settings.codes == ("9984",)
@@ -319,6 +317,7 @@ def test_settings_reads_environment_values(
     settings = create_production_settings(
         arguments,
         environ={
+            "KABU_STATION_API_PASSWORD": "secret",
             "KATANA_DATABASE_PATH": str(
                 tmp_path / "katana.db"
             ),
@@ -327,10 +326,8 @@ def test_settings_reads_environment_values(
             ),
             "KATANA_INITIAL_CASH": "5000000",
             "KATANA_CYCLE_INTERVAL_SECONDS": "15",
-            "KATANA_JQUANTS_TIMEOUT_SECONDS": "20",
             "KATANA_COMMISSION_PER_ORDER": "100",
             "KATANA_SLIPPAGE_RATE": "0.001",
-            "JQUANTS_API_KEY": "test-key",
         },
     )
 
@@ -339,10 +336,8 @@ def test_settings_reads_environment_values(
     )
     assert settings.initial_cash == 5_000_000.0
     assert settings.cycle_interval_seconds == 15.0
-    assert settings.jquants_timeout_seconds == 20.0
     assert settings.commission_per_order == 100.0
     assert settings.slippage_rate == 0.001
-    assert settings.jquants_api_key == "test-key"
 
 
 def test_settings_rejects_invalid_environment_number(
@@ -405,7 +400,7 @@ def test_run_creates_composition_and_executes_bundle(
         composition_factory=(
             FakeCompositionFactory
         ),
-        environ={},
+        environ={"KABU_STATION_API_PASSWORD": "secret"},
         output=output,
         error_output=error_output,
         install_signals=False,
@@ -501,7 +496,7 @@ def test_run_returns_exit_code_for_stop_reason(
         composition_factory=(
             FakeCompositionFactory
         ),
-        environ={},
+        environ={"KABU_STATION_API_PASSWORD": "secret"},
         output=StringIO(),
         error_output=StringIO(),
         install_signals=False,
@@ -538,7 +533,7 @@ def test_run_returns_one_when_bundle_raises(
         composition_factory=(
             FakeCompositionFactory
         ),
-        environ={},
+        environ={"KABU_STATION_API_PASSWORD": "secret"},
         output=StringIO(),
         error_output=error_output,
         install_signals=False,
@@ -575,7 +570,7 @@ def test_fail_fast_and_resource_flags_are_applied(
 
     settings = create_production_settings(
         arguments,
-        environ={},
+        environ={"KABU_STATION_API_PASSWORD": "secret"},
     )
 
     assert settings.continue_on_cycle_error is False
@@ -600,7 +595,7 @@ def test_run_sends_started_and_finished_notifications(
             str(watchlist_path),
         ],
         composition_factory=FakeCompositionFactory,
-        environ={},
+        environ={"KABU_STATION_API_PASSWORD": "secret"},
         output=StringIO(),
         error_output=StringIO(),
         install_signals=False,
@@ -652,7 +647,7 @@ def test_run_sends_failure_notification_when_bundle_raises(
             str(watchlist_path),
         ],
         composition_factory=FakeCompositionFactory,
-        environ={},
+        environ={"KABU_STATION_API_PASSWORD": "secret"},
         output=StringIO(),
         error_output=StringIO(),
         install_signals=False,
@@ -693,7 +688,7 @@ def test_notification_failure_does_not_stop_runtime(
             str(watchlist_path),
         ],
         composition_factory=FakeCompositionFactory,
-        environ={},
+        environ={"KABU_STATION_API_PASSWORD": "secret"},
         output=StringIO(),
         error_output=error_output,
         install_signals=False,
@@ -1009,127 +1004,16 @@ def test_extract_market_and_paper_service_diagnostics() -> None:
 
 
 def test_parser_accepts_market_data_mode() -> None:
-    """市場データモードと遡及日数をCLIで指定できる。"""
-
     arguments = build_argument_parser().parse_args(
         [
             "--code",
             "7203",
             "--market-data-mode",
-            "jquants-current-day",
-            "--replay-lookback-days",
-            "10",
+            "kabu-station-realtime",
         ]
     )
 
-    assert arguments.market_data_mode == "jquants-current-day"
-    assert arguments.replay_lookback_days == 10
-
-
-def test_settings_reads_replay_environment_values(
-    tmp_path: Path,
-) -> None:
-    """リプレイ設定を環境変数から読み込む。"""
-
-    watchlist_path = create_watchlist(tmp_path)
-    arguments = build_argument_parser().parse_args([])
-
-    settings = create_production_settings(
-        arguments,
-        environ={
-            "KATANA_WATCHLIST_PATH": str(watchlist_path),
-            "KATANA_MARKET_DATA_MODE": "jquants-current-day",
-            "KATANA_REPLAY_MAXIMUM_LOOKBACK_DAYS": "9",
-        },
-    )
-
-    assert settings.market_data_mode == "jquants-current-day"
-    assert settings.replay_maximum_lookback_days == 9
-
-
-def test_format_replay_diagnostics() -> None:
-    """リプレイ元日付と利用統計を整形する。"""
-
-    from datetime import date
-    from app.market.previous_trading_day_replay_provider import (
-        PreviousTradingDayReplayDiagnosticSnapshot,
-    )
-
-    message = _format_replay_diagnostics(
-        PreviousTradingDayReplayDiagnosticSnapshot(
-            request_count=20,
-            download_count=2,
-            cache_hit_count=18,
-            downloaded_minute_bar_count=480,
-            generated_five_minute_bar_count=96,
-            source_dates=(date(2026, 7, 28),),
-            target_dates=(date(2026, 7, 29),),
-            symbol_count=2,
-        )
-    )
-
-    assert "Replay Data Diagnostics" in message
-    assert "再生元営業日: 2026-07-28" in message
-    assert "再生対象日: 2026-07-29" in message
-    assert "キャッシュヒット率: 90.00%" in message
-    assert "生成5分足数: 96" in message
-
-
-def test_extract_replay_diagnostics_from_bundle() -> None:
-    """BundleからリプレイProvider診断を取得する。"""
-
-    from datetime import date
-    from app.market.previous_trading_day_replay_provider import (
-        PreviousTradingDayReplayDiagnosticSnapshot,
-    )
-
-    expected = PreviousTradingDayReplayDiagnosticSnapshot(
-        request_count=1,
-        download_count=1,
-        cache_hit_count=0,
-        downloaded_minute_bar_count=240,
-        generated_five_minute_bar_count=48,
-        source_dates=(date(2026, 7, 28),),
-        target_dates=(date(2026, 7, 29),),
-        symbol_count=1,
-    )
-
-    class ReplayProvider:
-        def diagnostic_snapshot(self):
-            return expected
-
-    class Bundle:
-        replay_provider = ReplayProvider()
-
-    assert _extract_replay_diagnostics(Bundle()) == expected
-
-
-def test_finished_notification_includes_replay_diagnostics() -> None:
-    """終了通知へリプレイ元情報を含める。"""
-
-    from datetime import date
-    from app.market.previous_trading_day_replay_provider import (
-        PreviousTradingDayReplayDiagnosticSnapshot,
-    )
-
-    message = _finished_notification_message(
-        FakeResult(),
-        replay_diagnostics=(
-            PreviousTradingDayReplayDiagnosticSnapshot(
-                request_count=1,
-                download_count=1,
-                cache_hit_count=0,
-                downloaded_minute_bar_count=240,
-                generated_five_minute_bar_count=48,
-                source_dates=(date(2026, 7, 28),),
-                target_dates=(date(2026, 7, 29),),
-                symbol_count=1,
-            )
-        ),
-    )
-
-    assert "Replay Data Diagnostics" in message
-    assert "再生元営業日: 2026-07-28" in message
+    assert arguments.market_data_mode == "kabu-station-realtime"
 
 
 def test_settings_loads_kabu_station_environment(
@@ -1158,3 +1042,134 @@ def test_settings_loads_kabu_station_environment(
         "kabu-station-realtime"
     )
     assert settings.kabu_station_api_password == "secret"
+
+
+def test_settings_loads_risk_limits_from_cli(
+    tmp_path: Path,
+) -> None:
+    parser = build_argument_parser()
+    arguments = parser.parse_args(
+        [
+            "--code",
+            "7203",
+            "--database-path",
+            str(tmp_path / "katana.db"),
+            "--max-position-count",
+            "1",
+            "--max-position-value",
+            "100000",
+            "--max-total-exposure",
+            "200000",
+            "--minimum-cash-balance",
+            "9000000",
+            "--max-daily-loss",
+            "1000",
+            "--max-daily-entries",
+            "1",
+        ]
+    )
+
+    settings = create_production_settings(
+        arguments,
+        environ={"KABU_STATION_API_PASSWORD": "secret"},
+    )
+
+    assert settings.max_position_count == 1
+    assert settings.max_position_value == 100000
+    assert settings.max_total_exposure == 200000
+    assert settings.minimum_cash_balance == 9000000
+    assert settings.max_daily_loss == 1000
+    assert settings.max_daily_entries == 1
+
+
+def test_settings_loads_risk_limits_from_environment(
+    tmp_path: Path,
+) -> None:
+    parser = build_argument_parser()
+    arguments = parser.parse_args(
+        [
+            "--code",
+            "7203",
+            "--database-path",
+            str(tmp_path / "katana.db"),
+        ]
+    )
+
+    settings = create_production_settings(
+        arguments,
+        environ={
+            "KABU_STATION_API_PASSWORD": "secret",
+            "KATANA_MAX_POSITION_COUNT": "2",
+            "KATANA_MAX_POSITION_VALUE": "200000",
+            "KATANA_MAX_TOTAL_EXPOSURE": "400000",
+            "KATANA_MINIMUM_CASH_BALANCE": "8000000",
+            "KATANA_MAX_DAILY_LOSS": "2000",
+            "KATANA_MAX_DAILY_ENTRIES": "2",
+        },
+    )
+
+    assert settings.max_position_count == 2
+    assert settings.max_position_value == 200000
+    assert settings.max_total_exposure == 400000
+    assert settings.minimum_cash_balance == 8000000
+    assert settings.max_daily_loss == 2000
+    assert settings.max_daily_entries == 2
+
+
+def test_parser_accepts_multiple_strategies() -> None:
+    arguments = build_argument_parser().parse_args(
+        [
+            "--code",
+            "7203",
+            "--strategy",
+            "orb",
+            "--strategy",
+            "pullback",
+        ]
+    )
+
+    assert arguments.strategy == [
+        "orb",
+        "pullback",
+    ]
+
+
+def test_settings_reads_enabled_strategies_from_environment(
+    tmp_path: Path,
+) -> None:
+    arguments = build_argument_parser().parse_args(
+        [
+            "--code",
+            "7203",
+            "--database-path",
+            str(tmp_path / "katana.db"),
+        ]
+    )
+
+    settings = create_production_settings(
+        arguments,
+        environ={
+            "KABU_STATION_API_PASSWORD": "secret",
+            "KATANA_ENABLED_STRATEGIES": "orb,pullback",
+        },
+    )
+
+    assert settings.enabled_strategy_names == (
+        "orb",
+        "pullback",
+    )
+
+
+def test_parser_accepts_high_breakout_strategy() -> None:
+    arguments = build_argument_parser().parse_args(
+        [
+            "--code",
+            "7203",
+            "--strategy",
+            "high-breakout",
+        ]
+    )
+
+    assert arguments.strategy == [
+        "high-breakout",
+    ]

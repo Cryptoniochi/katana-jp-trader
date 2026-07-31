@@ -13,6 +13,14 @@ from app.backtest.historical_models import (
     MarketTimeframe,
 )
 from app.backtest.market_replay import MarketReplayFrame
+from app.backtest.high_breakout_strategy import (
+    HighBreakoutStrategy,
+    HighBreakoutStrategySettings,
+)
+from app.backtest.pullback_breakout_strategy import (
+    PullbackBreakoutSettings,
+    PullbackBreakoutStrategy,
+)
 from app.backtest.orb_signal_strategy import (
     OrbSignalDiagnosticSnapshot,
     OrbSignalStrategy,
@@ -22,6 +30,9 @@ from app.market.models import StockPrice
 from app.market.realtime_signal_models import (
     RealtimeSignalDecision,
     RealtimeSignalProcessResult,
+)
+from app.market.strategy_registry import (
+    StrategyRegistry,
 )
 from app.trading.signal_models import TradeSignal
 
@@ -41,8 +52,9 @@ class RealtimeStrategy(Protocol):
     def reset(self) -> None:
         """内部状態を初期化する。"""
 
-
-    def diagnostic_snapshot(self) -> OrbSignalDiagnosticSnapshot:
+    def diagnostic_snapshot(
+        self,
+    ) -> OrbSignalDiagnosticSnapshot:
         """現在までの診断集計を返す。"""
 
 
@@ -56,14 +68,48 @@ class RealtimeSignalEngine:
         self,
         *,
         strategy_factory: StrategyFactory | None = None,
+        strategy_registry: StrategyRegistry | None = None,
+        enabled_strategy_names: tuple[str, ...] = ("orb",),
+        high_breakout_candidate_provider=None,
     ) -> None:
-        """銘柄別戦略生成処理を設定する。"""
+        """戦略FactoryまたはStrategy Registryを設定する。"""
 
-        self.strategy_factory = (
-            strategy_factory
-            if strategy_factory is not None
-            else self._default_strategy_factory
+        if (
+            strategy_factory is not None
+            and strategy_registry is not None
+        ):
+            raise ValueError(
+                "strategy_factoryとstrategy_registryは"
+                "同時に指定できません。"
+            )
+
+        normalized_enabled = tuple(
+            name.strip().lower()
+            for name in enabled_strategy_names
+            if name.strip()
         )
+
+        if not normalized_enabled:
+            raise ValueError(
+                "有効戦略を1件以上指定してください。"
+            )
+
+        if strategy_registry is not None:
+            self.strategy_factory = (
+                strategy_registry.create
+            )
+            self.strategy_registry = strategy_registry
+        else:
+            self.strategy_factory = (
+                strategy_factory
+                if strategy_factory is not None
+                else self._default_registry(
+                    normalized_enabled,
+                    high_breakout_candidate_provider,
+                ).create
+            )
+            self.strategy_registry = None
+
         self._strategies: dict[str, RealtimeStrategy] = {}
         self._bars_by_code: dict[
             str,
@@ -189,7 +235,7 @@ class RealtimeSignalEngine:
         self,
         code: str | None = None,
     ) -> OrbSignalDiagnosticSnapshot:
-        """全銘柄または指定銘柄のORB診断集計を返す。"""
+        """全銘柄または指定銘柄の戦略診断集計を返す。"""
 
         if code is not None:
             strategy = self._strategies.get(
@@ -200,7 +246,11 @@ class RealtimeSignalEngine:
                     evaluation_count=0,
                     counts={},
                 )
-            getter = getattr(strategy, "diagnostic_snapshot", None)
+            getter = getattr(
+                strategy,
+                "diagnostic_snapshot",
+                None,
+            )
             if getter is None:
                 return OrbSignalDiagnosticSnapshot(
                     evaluation_count=0,
@@ -212,7 +262,11 @@ class RealtimeSignalEngine:
         total_counts: dict[str, int] = defaultdict(int)
 
         for strategy in self._strategies.values():
-            getter = getattr(strategy, "diagnostic_snapshot", None)
+            getter = getattr(
+                strategy,
+                "diagnostic_snapshot",
+                None,
+            )
             if getter is None:
                 continue
 
@@ -238,13 +292,37 @@ class RealtimeSignalEngine:
         )
 
     @staticmethod
-    def _default_strategy_factory(
-        _code: str,
-    ) -> RealtimeStrategy:
-        """既定のORB戦略を作成する。"""
+    def _default_registry(
+        enabled_strategy_names: tuple[str, ...],
+        high_breakout_candidate_provider,
+    ) -> StrategyRegistry:
+        """標準戦略を登録したRegistryを作成する。"""
 
-        return OrbSignalStrategy(
-            settings=OrbSignalStrategySettings()
+        return StrategyRegistry(
+            factories={
+                "orb": (
+                    lambda _code: OrbSignalStrategy(
+                        settings=OrbSignalStrategySettings()
+                    )
+                ),
+                "pullback": (
+                    lambda _code: PullbackBreakoutStrategy(
+                        settings=PullbackBreakoutSettings()
+                    )
+                ),
+                "high-breakout": (
+                    lambda _code: HighBreakoutStrategy(
+                        candidate_provider=(
+                            high_breakout_candidate_provider
+                            or (lambda _code, _date: None)
+                        ),
+                        settings=HighBreakoutStrategySettings(),
+                    )
+                ),
+            },
+            enabled_strategy_names=(
+                enabled_strategy_names
+            ),
         )
 
     @staticmethod

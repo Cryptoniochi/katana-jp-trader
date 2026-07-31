@@ -280,3 +280,105 @@ def test_engine_returns_empty_diagnostics_for_unknown_code() -> None:
 
     assert snapshot.evaluation_count == 0
     assert snapshot.counts == {}
+
+
+def test_engine_accepts_strategy_registry() -> None:
+    """Strategy Registryから銘柄別複合戦略を生成する。"""
+
+    from app.market.strategy_registry import StrategyRegistry
+    from app.backtest.orb_signal_strategy import (
+        OrbSignalStrategy,
+        OrbSignalStrategySettings,
+    )
+
+    registry = StrategyRegistry(
+        factories={
+            "orb": lambda _code: OrbSignalStrategy(
+                settings=OrbSignalStrategySettings()
+            ),
+        },
+        enabled_strategy_names=("orb",),
+    )
+    engine = RealtimeSignalEngine(
+        strategy_registry=registry
+    )
+
+    result = engine.process(
+        opening_and_breakout_prices()
+    )
+
+    assert result.signal_count == 1
+    assert result.signals[0].strategy_name == (
+        "opening-range-breakout-v2"
+    )
+
+
+def test_engine_rejects_factory_and_registry_together() -> None:
+    """旧FactoryとRegistryの同時指定を拒否する。"""
+
+    import pytest
+    from app.market.strategy_registry import StrategyRegistry
+    from app.backtest.orb_signal_strategy import (
+        OrbSignalStrategy,
+    )
+
+    registry = StrategyRegistry(
+        factories={
+            "orb": lambda _code: OrbSignalStrategy(),
+        }
+    )
+
+    with pytest.raises(ValueError, match="同時"):
+        RealtimeSignalEngine(
+            strategy_factory=lambda _code: (
+                OrbSignalStrategy()
+            ),
+            strategy_registry=registry,
+        )
+
+
+def test_engine_can_enable_pullback_only() -> None:
+    """標準RegistryからPullback戦略だけを有効化できる。"""
+
+    from app.market.models import StockPrice
+
+    def item(minute, open_, high, low, close, volume=1000):
+        return StockPrice(
+            code="7203",
+            datetime=datetime(
+                2026, 8, 3, 9, minute, tzinfo=JST
+            ),
+            open=open_,
+            high=high,
+            low=low,
+            close=close,
+            volume=volume,
+        )
+
+    bars = (
+        item(0, 1000, 1003, 998, 1001),
+        item(5, 1001, 1007, 1000, 1006),
+        item(10, 1006, 1012, 1005, 1010),
+        item(15, 1010, 1016, 1009, 1014),
+        item(20, 1014, 1015, 1008, 1010),
+        item(25, 1010, 1012, 1006, 1008),
+        item(30, 1008, 1018, 1007, 1017, 1500),
+    )
+
+    result = RealtimeSignalEngine(
+        enabled_strategy_names=("pullback",)
+    ).process(bars)
+
+    assert result.signal_count == 1
+    assert result.signals[0].strategy_name == (
+        "pullback-breakout-v1"
+    )
+
+
+def test_engine_rejects_empty_enabled_strategies() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="有効戦略"):
+        RealtimeSignalEngine(
+            enabled_strategy_names=()
+        )

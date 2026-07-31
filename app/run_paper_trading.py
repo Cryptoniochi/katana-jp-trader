@@ -57,16 +57,12 @@ from app.live.live_orchestrator import (
 from app.market.realtime_paper_trading_service import (
     RealtimePaperTradingDiagnosticSnapshot,
 )
-from app.market.previous_trading_day_replay_provider import (
-    PreviousTradingDayReplayDiagnosticSnapshot,
-)
 
 
 DEFAULT_DATABASE_PATH = Path("data/katana.db")
 DEFAULT_WATCHLIST_PATH = Path("watchlist.txt")
 DEFAULT_INITIAL_CASH = 10_000_000.0
 DEFAULT_CYCLE_INTERVAL_SECONDS = 30.0
-DEFAULT_JQUANTS_TIMEOUT_SECONDS = 30.0
 
 
 class PaperTradingApplicationBundle(Protocol):
@@ -166,6 +162,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--strategy",
+        action="append",
+        default=[],
+        choices=("orb", "pullback", "high-breakout"),
+        help=(
+            "有効にする戦略。複数指定できます。"
+            "未指定時は環境変数KATANA_ENABLED_STRATEGIES、"
+            "またはorbを使用します。"
+        ),
+    )
+
+    parser.add_argument(
         "--initial-cash",
         type=float,
         default=None,
@@ -188,6 +196,60 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--max-position-count",
+        type=int,
+        default=None,
+        help=(
+            "最大保有銘柄数。未指定時は環境変数"
+            "KATANA_MAX_POSITION_COUNTまたは既定値5です。"
+        ),
+    )
+    parser.add_argument(
+        "--max-position-value",
+        type=float,
+        default=None,
+        help=(
+            "1銘柄最大投資額。未指定時は環境変数"
+            "KATANA_MAX_POSITION_VALUEまたは既定値1000000です。"
+        ),
+    )
+    parser.add_argument(
+        "--max-total-exposure",
+        type=float,
+        default=None,
+        help=(
+            "最大総エクスポージャー。未指定時は環境変数"
+            "KATANA_MAX_TOTAL_EXPOSUREまたは既定値5000000です。"
+        ),
+    )
+    parser.add_argument(
+        "--minimum-cash-balance",
+        type=float,
+        default=None,
+        help=(
+            "最低現金残高。未指定時は環境変数"
+            "KATANA_MINIMUM_CASH_BALANCEまたは既定値500000です。"
+        ),
+    )
+    parser.add_argument(
+        "--max-daily-loss",
+        type=float,
+        default=None,
+        help=(
+            "日次損失上限。未指定時は環境変数"
+            "KATANA_MAX_DAILY_LOSSまたは既定値100000です。"
+        ),
+    )
+    parser.add_argument(
+        "--max-daily-entries",
+        type=int,
+        default=None,
+        help=(
+            "1日最大新規エントリー数。未指定時は環境変数"
+            "KATANA_MAX_DAILY_ENTRIESまたは既定値5です。"
+        ),
+    )
+    parser.add_argument(
         "--maximum-cycles",
         type=int,
         default=None,
@@ -198,50 +260,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "--jquants-api-key",
-        default=None,
-        help=(
-            "J-Quants APIキー。"
-            "通常は環境変数JQUANTS_API_KEYを使用してください。"
-        ),
-    )
-
-    parser.add_argument(
-        "--jquants-timeout",
-        type=float,
-        default=None,
-        help=(
-            "J-Quants APIのタイムアウト秒数。"
-            "未指定時は環境変数KATANA_JQUANTS_TIMEOUT_SECONDS、"
-            "または30秒を使用します。"
-        ),
-    )
-
-    parser.add_argument(
         "--market-data-mode",
-        choices=(
-            "previous-day-replay",
-            "jquants-current-day",
-            "kabu-station-realtime",
-        ),
+        choices=("kabu-station-realtime",),
         default=None,
         help=(
-            "Paper Tradingの市場データモード。"
-            "未指定時は環境変数KATANA_MARKET_DATA_MODE、"
-            "またはprevious-day-replayを使用します。"
-            " 実市場ではkabu-station-realtimeを指定します。"
-        ),
-    )
-
-    parser.add_argument(
-        "--replay-lookback-days",
-        type=int,
-        default=None,
-        help=(
-            "前営業日リプレイで取引日を探す最大遡及日数。"
-            "未指定時は環境変数"
-            "KATANA_REPLAY_MAXIMUM_LOOKBACK_DAYS、"
-            "または14日を使用します。"
+            "市場データモード。現在は"
+            "kabu-station-realtimeのみ使用できます。"
         ),
     )
 
@@ -309,6 +333,50 @@ def build_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_int_setting(
+    argument_value: int | None,
+    environment_value: str | None,
+    default_value: int,
+    label: str,
+) -> int:
+    """CLI、環境変数、既定値の順で整数設定を解決する。"""
+
+    if argument_value is not None:
+        return argument_value
+
+    if environment_value is None or not environment_value.strip():
+        return default_value
+
+    try:
+        return int(environment_value)
+    except ValueError as error:
+        raise ValueError(
+            f"{label}の環境変数は整数で指定してください。"
+        ) from error
+
+
+def _resolve_float_setting(
+    argument_value: float | None,
+    environment_value: str | None,
+    default_value: float,
+    label: str,
+) -> float:
+    """CLI、環境変数、既定値の順で数値設定を解決する。"""
+
+    if argument_value is not None:
+        return argument_value
+
+    if environment_value is None or not environment_value.strip():
+        return default_value
+
+    try:
+        return float(environment_value)
+    except ValueError as error:
+        raise ValueError(
+            f"{label}の環境変数は数値で指定してください。"
+        ) from error
+
+
 def create_production_settings(
     arguments: argparse.Namespace,
     *,
@@ -343,6 +411,13 @@ def create_production_settings(
         watchlist_path=watchlist_path,
     )
 
+    enabled_strategy_names = _resolve_strategies(
+        direct_names=tuple(arguments.strategy),
+        environment_value=resolved_environ.get(
+            "KATANA_ENABLED_STRATEGIES"
+        ),
+    )
+
     initial_cash = _resolve_float(
         argument_value=arguments.initial_cash,
         environment_value=resolved_environ.get(
@@ -363,35 +438,13 @@ def create_production_settings(
         ),
     )
 
-    jquants_timeout_seconds = _resolve_float(
-        argument_value=arguments.jquants_timeout,
-        environment_value=resolved_environ.get(
-            "KATANA_JQUANTS_TIMEOUT_SECONDS"
-        ),
-        default_value=DEFAULT_JQUANTS_TIMEOUT_SECONDS,
-        environment_name=(
-            "KATANA_JQUANTS_TIMEOUT_SECONDS"
-        ),
-    )
-
     market_data_mode = (
         arguments.market_data_mode
         if arguments.market_data_mode is not None
         else resolved_environ.get(
             "KATANA_MARKET_DATA_MODE",
-            "previous-day-replay",
+            "kabu-station-realtime",
         )
-    )
-
-    replay_maximum_lookback_days = _resolve_int(
-        argument_value=arguments.replay_lookback_days,
-        environment_value=resolved_environ.get(
-            "KATANA_REPLAY_MAXIMUM_LOOKBACK_DAYS"
-        ),
-        default_value=14,
-        environment_name=(
-            "KATANA_REPLAY_MAXIMUM_LOOKBACK_DAYS"
-        ),
     )
 
     commission_per_order = _resolve_float(
@@ -414,11 +467,6 @@ def create_production_settings(
         environment_name="KATANA_SLIPPAGE_RATE",
     )
 
-    api_key = (
-        arguments.jquants_api_key
-        if arguments.jquants_api_key is not None
-        else resolved_environ.get("JQUANTS_API_KEY")
-    )
     kabu_station_api_password = (
         resolved_environ.get(
             "KABU_STATION_API_PASSWORD"
@@ -435,23 +483,60 @@ def create_production_settings(
         "KABU_STATION_WEBSOCKET_URL",
         "ws://localhost:18080/kabusapi/websocket",
     )
+    max_position_count = _resolve_int_setting(
+        arguments.max_position_count,
+        resolved_environ.get("KATANA_MAX_POSITION_COUNT"),
+        5,
+        "最大保有銘柄数",
+    )
+    max_position_value = _resolve_float_setting(
+        arguments.max_position_value,
+        resolved_environ.get("KATANA_MAX_POSITION_VALUE"),
+        1_000_000.0,
+        "1銘柄最大投資額",
+    )
+    max_total_exposure = _resolve_float_setting(
+        arguments.max_total_exposure,
+        resolved_environ.get("KATANA_MAX_TOTAL_EXPOSURE"),
+        5_000_000.0,
+        "最大総エクスポージャー",
+    )
+    minimum_cash_balance = _resolve_float_setting(
+        arguments.minimum_cash_balance,
+        resolved_environ.get("KATANA_MINIMUM_CASH_BALANCE"),
+        500_000.0,
+        "最低現金残高",
+    )
+    max_daily_loss = _resolve_float_setting(
+        arguments.max_daily_loss,
+        resolved_environ.get("KATANA_MAX_DAILY_LOSS"),
+        100_000.0,
+        "日次損失上限",
+    )
+    max_daily_entries = _resolve_int_setting(
+        arguments.max_daily_entries,
+        resolved_environ.get("KATANA_MAX_DAILY_ENTRIES"),
+        5,
+        "1日最大新規エントリー数",
+    )
+
 
     return PaperTradingProductionSettings(
         database_path=database_path,
         codes=codes,
         initial_cash=initial_cash,
+        enabled_strategy_names=enabled_strategy_names,
         cycle_interval_seconds=(
             cycle_interval_seconds
         ),
         maximum_cycles=arguments.maximum_cycles,
-        jquants_api_key=api_key,
-        jquants_timeout_seconds=(
-            jquants_timeout_seconds
-        ),
         market_data_mode=market_data_mode,
-        replay_maximum_lookback_days=(
-            replay_maximum_lookback_days
-        ),
+        max_position_count=max_position_count,
+        max_position_value=max_position_value,
+        max_total_exposure=max_total_exposure,
+        minimum_cash_balance=minimum_cash_balance,
+        max_daily_loss=max_daily_loss,
+        max_daily_entries=max_daily_entries,
         kabu_station_api_password=(
             kabu_station_api_password
         ),
@@ -705,9 +790,9 @@ def _startup_notification_message(
         f"監視銘柄数: {len(settings.codes)}\n"
         f"監視銘柄: {','.join(settings.codes)}\n"
         f"初期資金: {settings.initial_cash:,.0f}円\n"
+        "有効戦略: "
+        f"{','.join(settings.enabled_strategy_names)}\n"
         f"市場データモード: {settings.market_data_mode}\n"
-        "リプレイ最大遡及日数: "
-        f"{settings.replay_maximum_lookback_days}\n"
         "実行間隔: "
         f"{settings.cycle_interval_seconds:g}秒\n"
         f"最大サイクル数: {settings.maximum_cycles}"
@@ -723,9 +808,6 @@ def _finished_notification_message(
     ) = None,
     paper_service_diagnostics: (
         RealtimePaperTradingDiagnosticSnapshot | None
-    ) = None,
-    replay_diagnostics: (
-        PreviousTradingDayReplayDiagnosticSnapshot | None
     ) = None,
 ) -> str:
     """終了通知を日次サマリー形式で生成する。"""
@@ -748,9 +830,6 @@ def _finished_notification_message(
     )
     failure_diagnostics = _format_cycle_failure_diagnostics(
         summary
-    )
-    replay_summary = _format_replay_diagnostics(
-        replay_diagnostics
     )
     market_flow_diagnostics = (
         _format_market_data_diagnostics(
@@ -784,49 +863,10 @@ def _finished_notification_message(
         f"日次収益率: {return_rate}\n"
         f"Runtimeエラー: {error_message}"
         f"{failure_diagnostics}"
-        f"{replay_summary}"
         f"{market_flow_diagnostics}"
         f"{live_orb_diagnostics}"
     )
 
-
-
-def _format_replay_diagnostics(
-    snapshot: PreviousTradingDayReplayDiagnosticSnapshot | None,
-) -> str:
-    """前営業日リプレイの利用状況を終了通知向けに整形する。"""
-
-    if snapshot is None:
-        return (
-            "\n\nReplay Data Diagnostics"
-            "\nモード: 非リプレイまたは利用不可"
-        )
-
-    source_dates = ",".join(
-        value.isoformat()
-        for value in snapshot.source_dates
-    ) or "なし"
-    target_dates = ",".join(
-        value.isoformat()
-        for value in snapshot.target_dates
-    ) or "なし"
-
-    return (
-        "\n\nReplay Data Diagnostics\n"
-        "モード: previous-day-replay\n"
-        f"再生元営業日: {source_dates}\n"
-        f"再生対象日: {target_dates}\n"
-        f"対象銘柄数: {snapshot.symbol_count}\n"
-        f"Provider要求回数: {snapshot.request_count}\n"
-        f"J-Quants取得回数: {snapshot.download_count}\n"
-        f"キャッシュヒット: {snapshot.cache_hit_count}\n"
-        "キャッシュヒット率: "
-        f"{snapshot.cache_hit_rate * 100.0:.2f}%\n"
-        "取得1分足数: "
-        f"{snapshot.downloaded_minute_bar_count}\n"
-        "生成5分足数: "
-        f"{snapshot.generated_five_minute_bar_count}"
-    )
 
 
 def _format_market_data_diagnostics(
@@ -1075,40 +1115,6 @@ def _format_percentage(
     return f"{sign}{percentage:,.4f}%"
 
 
-def _extract_replay_diagnostics(
-    bundle: PaperTradingApplicationBundle,
-) -> PreviousTradingDayReplayDiagnosticSnapshot | None:
-    """BundleからリプレイProvider診断を安全に取得する。"""
-
-    replay_provider = getattr(
-        bundle,
-        "replay_provider",
-        None,
-    )
-
-    if replay_provider is None:
-        return None
-
-    provider = getattr(
-        replay_provider,
-        "diagnostic_snapshot",
-        None,
-    )
-
-    if not callable(provider):
-        return None
-
-    snapshot = provider()
-
-    if not isinstance(
-        snapshot,
-        PreviousTradingDayReplayDiagnosticSnapshot,
-    ):
-        return None
-
-    return snapshot
-
-
 def _extract_market_data_diagnostics(
     bundle: PaperTradingApplicationBundle,
 ) -> LiveMarketDataDiagnosticSnapshot | None:
@@ -1336,9 +1342,6 @@ def run(
         )
 
         result = bundle.run()
-        replay_diagnostics = (
-            _extract_replay_diagnostics(bundle)
-        )
         market_data_diagnostics = (
             _extract_market_data_diagnostics(bundle)
         )
@@ -1353,14 +1356,6 @@ def run(
             result,
             output=resolved_output,
         )
-
-        if replay_diagnostics is not None:
-            print(
-                _format_replay_diagnostics(
-                    replay_diagnostics
-                ).lstrip("\n"),
-                file=resolved_output,
-            )
 
         if market_data_diagnostics is not None:
             print(
@@ -1396,7 +1391,6 @@ def run(
                 paper_service_diagnostics=(
                     paper_service_diagnostics
                 ),
-                replay_diagnostics=replay_diagnostics,
             ),
             severity=(
                 NotificationSeverity.INFO
@@ -1473,6 +1467,51 @@ def main() -> None:
 
     raise SystemExit(run())
 
+
+
+def _resolve_strategies(
+    *,
+    direct_names: tuple[str, ...],
+    environment_value: str | None,
+) -> tuple[str, ...]:
+    """CLIまたは環境変数から有効戦略を決定する。"""
+
+    if direct_names:
+        names = direct_names
+    elif environment_value is not None:
+        names = tuple(
+            value
+            for value in environment_value.split(",")
+        )
+    else:
+        names = ("orb",)
+
+    normalized = tuple(
+        dict.fromkeys(
+            name.strip().lower()
+            for name in names
+            if name.strip()
+        )
+    )
+
+    if not normalized:
+        raise ValueError(
+            "有効戦略を1件以上指定してください。"
+        )
+
+    unknown = tuple(
+        name
+        for name in normalized
+        if name not in {"orb", "pullback", "high-breakout"}
+    )
+
+    if unknown:
+        raise ValueError(
+            "未対応の戦略が指定されています。 "
+            f"strategies={','.join(unknown)}"
+        )
+
+    return normalized
 
 def _resolve_codes(
     *,
@@ -1656,6 +1695,11 @@ def _print_startup_information(
         file=output,
     )
     print(
+        "strategies="
+        + ",".join(settings.enabled_strategy_names),
+        file=output,
+    )
+    print(
         f"initial_cash={settings.initial_cash:.2f}",
         file=output,
     )
@@ -1665,14 +1709,33 @@ def _print_startup_information(
         file=output,
     )
     print(
-        "replay_maximum_lookback_days="
-        f"{settings.replay_maximum_lookback_days}",
-        file=output,
-    )
-    print(
         "cycle_interval_seconds="
         f"{settings.cycle_interval_seconds}",
         file=output,
+    )
+    print(
+        "risk_max_position_count="
+        f"{settings.max_position_count}"
+    )
+    print(
+        "risk_max_position_value="
+        f"{settings.max_position_value:.2f}"
+    )
+    print(
+        "risk_max_total_exposure="
+        f"{settings.max_total_exposure:.2f}"
+    )
+    print(
+        "risk_minimum_cash_balance="
+        f"{settings.minimum_cash_balance:.2f}"
+    )
+    print(
+        "risk_max_daily_loss="
+        f"{settings.max_daily_loss:.2f}"
+    )
+    print(
+        "risk_max_daily_entries="
+        f"{settings.max_daily_entries}"
     )
     print(
         "maximum_cycles="

@@ -3,7 +3,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 def initialize_database(
@@ -65,6 +65,9 @@ def initialize_database(
 
         _create_recovery_event_table(connection)
         _create_recovery_event_indexes(connection)
+
+        _create_high_breakout_candidates_table(connection)
+        _create_high_breakout_candidate_indexes(connection)
 
         _update_schema_version(connection)
 
@@ -1373,6 +1376,78 @@ def _create_recovery_event_indexes(
         ON recovery_events (
             status,
             started_at DESC
+        )
+        """
+    )
+
+
+
+def _create_high_breakout_candidates_table(
+    connection: sqlite3.Connection,
+) -> None:
+    """新高値ブレイク候補を保存するテーブルを作成する。"""
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS high_breakout_candidates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL,
+            trading_date TEXT NOT NULL,
+            breakout_types_json TEXT NOT NULL,
+            close_price REAL NOT NULL,
+            previous_20_day_high REAL,
+            previous_60_day_high REAL,
+            previous_year_high REAL,
+            volume_ratio REAL NOT NULL,
+            turnover REAL NOT NULL,
+            atr REAL NOT NULL,
+            atr_rate REAL NOT NULL,
+            score REAL NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(
+                code,
+                trading_date
+            )
+        )
+        """
+    )
+
+
+def _create_high_breakout_candidate_indexes(
+    connection: sqlite3.Connection,
+) -> None:
+    """新高値候補の検索用インデックスを作成する。"""
+
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_high_breakout_candidates_identity
+        ON high_breakout_candidates (
+            code,
+            trading_date
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_high_breakout_candidates_date_score
+        ON high_breakout_candidates (
+            trading_date DESC,
+            score DESC
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+            idx_high_breakout_candidates_code_date
+        ON high_breakout_candidates (
+            code,
+            trading_date DESC
         )
         """
     )

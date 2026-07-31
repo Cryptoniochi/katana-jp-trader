@@ -230,11 +230,6 @@ class ProductionReadinessChecker:
                 self._check_trading_day()
             )
 
-        api_key_item = self._check_api_key(
-            settings
-        )
-        items.append(api_key_item)
-
         database_parent_item = (
             self._check_database_parent(
                 settings.database_path
@@ -463,32 +458,6 @@ class ProductionReadinessChecker:
                 "診断日は東京市場の営業日です。 "
                 f"date={target_date.isoformat()}"
             ),
-        )
-
-    @staticmethod
-    def _check_api_key(
-        settings: PaperTradingProductionSettings,
-    ) -> ProductionReadinessItem:
-        """J-Quants APIキーの有無を診断する。"""
-
-        api_key = (
-            ""
-            if settings.jquants_api_key is None
-            else settings.jquants_api_key.strip()
-        )
-
-        if not api_key:
-            return ProductionReadinessChecker._failed(
-                "J-Quants API Key",
-                (
-                    "J-Quants APIキーが設定されていません。 "
-                    "環境変数JQUANTS_API_KEYを設定してください。"
-                ),
-            )
-
-        return ProductionReadinessChecker._ok(
-            "J-Quants API Key",
-            "J-Quants APIキーが設定されています。",
         )
 
     @staticmethod

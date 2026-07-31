@@ -7,11 +7,11 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from app.market.jquants_downloader import JQuantsDownloadError
 from app.market.models import StockPrice
 from app.market.realtime_market_service import (
     JST,
     RealtimeMarketMonitor,
+    RealtimeProviderRateLimitError,
     TokyoMarketSessionService,
 )
 from app.market.realtime_models import (
@@ -513,9 +513,8 @@ def test_monitor_enters_cooldown_after_rate_limit() -> None:
         call_count += 1
 
         if call_count == 1:
-            raise JQuantsDownloadError(
+            raise RealtimeProviderRateLimitError(
                 "rate limited",
-                status_code=429,
                 retry_after_seconds=60.0,
             )
 
@@ -572,44 +571,6 @@ def test_monitor_enters_cooldown_after_rate_limit() -> None:
     assert waiting.code_count == 0
     assert resumed.decision is RealtimePollDecision.NO_NEW_BAR
     assert call_count == 2
-
-
-def test_monitor_reraises_non_rate_limit_download_error() -> None:
-    """429以外のDownloader例外は従来どおり上位へ返す。"""
-
-    def provider(
-        _code: str,
-        _target_date: date,
-    ) -> list[StockPrice]:
-        raise JQuantsDownloadError(
-            "server error",
-            status_code=500,
-        )
-
-    monitor = RealtimeMarketMonitor(
-        repository=FakeRepository(),
-        bar_provider=provider,
-        session_service=TokyoMarketSessionService(
-            trading_day_predicate=lambda _date: True
-        ),
-        data_source="realtime-test",
-    )
-
-    with pytest.raises(
-        JQuantsDownloadError,
-        match="server error",
-    ):
-        monitor.poll(
-            codes=("7203",),
-            observed_at=datetime(
-                2026,
-                7,
-                17,
-                9,
-                0,
-                tzinfo=JST,
-            ),
-        )
 
 
 @pytest.mark.parametrize(

@@ -35,6 +35,12 @@ from app.risk.risk_aware_queue_execution_service import (
 )
 from app.trading.order_models import OrderType
 from app.trading.signal_models import TradeSignal
+from app.risk.paper_trading_pretrade_risk import (
+    PaperTradingRiskDecision,
+)
+from app.risk.paper_trading_trace import (
+    PaperTradingTraceRecorder,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +71,17 @@ class RealtimePaperTradingStatus(StrEnum):
 
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class RealtimeRiskContextUpdater(Protocol):
+    """Risk Gateへ次のシグナル情報を渡す。"""
+
+    def __call__(
+        self,
+        signal: TradeSignal,
+        current_price: float,
+    ) -> None:
+        """Broker送信前のシグナルと価格を登録する。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +218,11 @@ class RealtimePaperTradingService:
         risk_result_provider: (
             RealtimeRiskResultProvider | None
         ) = None,
+        risk_context_updater: (
+            RealtimeRiskContextUpdater | None
+        ) = None,
+        require_risk_gate: bool = False,
+        trace_recorder: PaperTradingTraceRecorder | None = None,
     ) -> None:
         """Paper Tradingパイプラインの依存関係を設定する。"""
 
@@ -222,6 +244,25 @@ class RealtimePaperTradingService:
                 "risk_result_providerも必要です。"
             )
 
+        if (
+            risk_context_updater is not None
+            and risk_result_provider is None
+        ):
+            raise ValueError(
+                "risk_context_updaterを使用する場合は"
+                "risk_result_providerも必要です。"
+            )
+
+        if require_risk_gate and (
+            risk_aware_execution_service is None
+            or risk_result_provider is None
+            or risk_context_updater is None
+        ):
+            raise ValueError(
+                "本番Paper TradingではRisk Gateを"
+                "無効化できません。"
+            )
+
         self.signal_engine = signal_engine
         self.order_queue_service = order_queue_service
         self.queue_execution_service = queue_execution_service
@@ -232,6 +273,9 @@ class RealtimePaperTradingService:
             risk_aware_execution_service
         )
         self.risk_result_provider = risk_result_provider
+        self.risk_context_updater = risk_context_updater
+        self.require_risk_gate = require_risk_gate
+        self.trace_recorder = trace_recorder
         self._diagnostic_process_call_count = 0
         self._diagnostic_input_bar_count = 0
         self._diagnostic_signal_engine_call_count = 0
@@ -356,6 +400,22 @@ class RealtimePaperTradingService:
                 )
 
                 for signal in single_signal_result.signals:
+                    if self.trace_recorder is not None:
+                        self.trace_recorder.signal_generated(
+                            signal,
+                            float(price.close),
+                        )
+
+                    if self.require_risk_gate:
+                        if self.risk_context_updater is None:
+                            raise RuntimeError(
+                                "Risk Gate Contextが未接続です。"
+                            )
+                        self.risk_context_updater(
+                            signal,
+                            float(price.close),
+                        )
+
                     queue_result = (
                         self.order_queue_service.enqueue_signal(
                             signal,
@@ -364,6 +424,14 @@ class RealtimePaperTradingService:
                         )
                     )
                     queue_results.append(queue_result)
+
+                    if self.trace_recorder is not None:
+                        self.trace_recorder.queue_enqueued(
+                            signal,
+                            was_enqueued=(
+                                queue_result.was_enqueued
+                            ),
+                        )
                     self._diagnostic_queue_count += int(
                         queue_result.was_enqueued
                     )
@@ -379,6 +447,7 @@ class RealtimePaperTradingService:
 
                     execution_result = (
                         self._execute_queued_orders(
+                            signal=signal,
                             continue_on_error=continue_on_error,
                             risk_execution_results=(
                                 risk_execution_results
@@ -477,6 +546,7 @@ class RealtimePaperTradingService:
     def _execute_queued_orders(
         self,
         *,
+        signal: TradeSignal,
         continue_on_error: bool,
         risk_execution_results: list[
             RiskAwareQueueExecutionResult
@@ -488,11 +558,22 @@ class RealtimePaperTradingService:
             self.risk_aware_execution_service is None
             or self.risk_result_provider is None
         ):
+            if self.require_risk_gate:
+                raise RuntimeError(
+                    "Risk Gate未接続のため注文執行を拒否しました。"
+                )
             return self.queue_execution_service.execute_all(
                 continue_on_error=continue_on_error,
             )
 
         risk_result = self.risk_result_provider()
+
+        if self.trace_recorder is not None:
+            self.trace_recorder.risk_evaluated(
+                signal,
+                risk_result,
+            )
+
         gated_result = (
             self.risk_aware_execution_service.execute_all(
                 risk_result=risk_result,
@@ -502,8 +583,28 @@ class RealtimePaperTradingService:
         risk_execution_results.append(gated_result)
 
         if gated_result.execution_result is None:
+            if self.trace_recorder is not None:
+                self.trace_recorder.broker_result(
+                    signal,
+                    executed=False,
+                    saved_execution_count=0,
+                    blocked_reason=getattr(
+                        risk_result,
+                        "reason",
+                        gated_result.message,
+                    ),
+                )
             return BacktestQueueExecutionBatchResult(
                 items=()
+            )
+
+        if self.trace_recorder is not None:
+            self.trace_recorder.broker_result(
+                signal,
+                executed=True,
+                saved_execution_count=(
+                    gated_result.saved_execution_count
+                ),
             )
 
         return gated_result.execution_result

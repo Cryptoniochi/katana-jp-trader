@@ -1,8 +1,5 @@
-fastapi
-jinja2
-uvicorn
+websocket-client<2,>=1.8
 
 [dev]
-httpx
 pytest
 ruff
