@@ -18,8 +18,17 @@ from app.analytics.performance_breakdown_service import (
 from app.analytics.strategy_performance_service import (
     StrategyPerformanceAnalyzer,
 )
+from app.dashboard.morning_preflight_status_reader import (
+    MorningPreflightStatusReader,
+)
+from app.dashboard.paper_trading_schedule_status_reader import (
+    PaperTradingScheduleStatusReader,
+)
 from app.dashboard.katana_service_status_reader import (
     KatanaServiceStatusReader,
+)
+from app.dashboard.daily_report_reader import (
+    DailyReportReader,
 )
 from app.dashboard.dashboard_snapshot_file import (
     DashboardJsonSnapshotReader,
@@ -32,6 +41,9 @@ from app.dashboard.dashboard_web_app import (
 )
 from app.dashboard.dashboard_web_service import (
     DashboardWebService,
+)
+from app.runtime.operational_readiness_service import (
+    OperationalReadinessService,
 )
 from app.runtime.paper_trading_daily_repository import (
     PaperTradingDailySummaryRepository,
@@ -47,6 +59,18 @@ from app.runtime.recovery_history_service import (
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 DEFAULT_DATABASE_PATH = Path("data/katana.db")
+DEFAULT_MORNING_PREFLIGHT_STATUS_PATH = Path(
+    "reports/service/morning_preflight_schedule.json"
+)
+DEFAULT_AUTONOMOUS_OPERATION_REPORT_PATH = Path(
+    "reports/service/autonomous_operation_report.json"
+)
+DEFAULT_DAILY_REPORT_DIRECTORY = Path(
+    "reports/daily"
+)
+DEFAULT_PAPER_SCHEDULE_STATUS_PATH = Path(
+    "reports/service/paper_trading_schedule.json"
+)
 DEFAULT_SERVICE_STATUS_PATH = Path(
     "reports/service/katana_service_status.json"
 )
@@ -85,6 +109,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--service-status",
         type=Path,
         default=DEFAULT_SERVICE_STATUS_PATH,
+    )
+    parser.add_argument(
+        "--paper-schedule-status",
+        type=Path,
+        default=DEFAULT_PAPER_SCHEDULE_STATUS_PATH,
+    )
+    parser.add_argument(
+        "--morning-preflight-status",
+        type=Path,
+        default=DEFAULT_MORNING_PREFLIGHT_STATUS_PATH,
+    )
+    parser.add_argument(
+        "--autonomous-operation-report",
+        type=Path,
+        default=DEFAULT_AUTONOMOUS_OPERATION_REPORT_PATH,
+    )
+    parser.add_argument(
+        "--daily-report-directory",
+        type=Path,
+        default=DEFAULT_DAILY_REPORT_DIRECTORY,
     )
     parser.add_argument(
         "--history-limit",
@@ -128,6 +172,18 @@ def create_launcher_app(
     history_limit: int,
     recent_trade_limit: int = 20,
     service_status_path: Path = DEFAULT_SERVICE_STATUS_PATH,
+    paper_schedule_status_path: Path = (
+        DEFAULT_PAPER_SCHEDULE_STATUS_PATH
+    ),
+    morning_preflight_status_path: Path = (
+        DEFAULT_MORNING_PREFLIGHT_STATUS_PATH
+    ),
+    autonomous_operation_report_path: Path = (
+        DEFAULT_AUTONOMOUS_OPERATION_REPORT_PATH
+    ),
+    daily_report_directory: Path = (
+        DEFAULT_DAILY_REPORT_DIRECTORY
+    ),
     recovery_service: RecoveryHistoryService | None = None,
 ) -> FastAPI:
     snapshot_reader = DashboardJsonSnapshotReader(
@@ -157,6 +213,30 @@ def create_launcher_app(
     service_status_reader = KatanaServiceStatusReader(
         service_status_path
     )
+    paper_schedule_reader = (
+        PaperTradingScheduleStatusReader(
+            paper_schedule_status_path
+        )
+    )
+    morning_preflight_reader = (
+        MorningPreflightStatusReader(
+            schedule_status_path=(
+                morning_preflight_status_path
+            ),
+            operation_report_path=(
+                autonomous_operation_report_path
+            ),
+        )
+    )
+    daily_report_reader = DailyReportReader(
+        daily_report_directory
+    )
+    readiness_service = OperationalReadinessService(
+        database_path=database_path,
+        watchlist_path=Path("watchlist.txt"),
+        service_status_reader=service_status_reader,
+        project_directory=Path.cwd(),
+    )
 
     return create_dashboard_app(
         service=dashboard_service,
@@ -169,6 +249,10 @@ def create_launcher_app(
         performance_service=performance_service,
         breakdown_service=breakdown_service,
         service_status_reader=service_status_reader,
+        readiness_service=readiness_service,
+        paper_schedule_reader=paper_schedule_reader,
+        morning_preflight_reader=morning_preflight_reader,
+        daily_report_reader=daily_report_reader,
     )
 
 
@@ -227,6 +311,18 @@ def main(
             args.recent_trade_limit
         ),
         service_status_path=args.service_status,
+        paper_schedule_status_path=(
+            args.paper_schedule_status
+        ),
+        morning_preflight_status_path=(
+            args.morning_preflight_status
+        ),
+        autonomous_operation_report_path=(
+            args.autonomous_operation_report
+        ),
+        daily_report_directory=(
+            args.daily_report_directory
+        ),
     )
     url = dashboard_url(
         host=args.host,

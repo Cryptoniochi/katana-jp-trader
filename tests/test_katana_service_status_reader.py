@@ -1,6 +1,7 @@
 """KatanaServiceStatusReaderのテスト。"""
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.dashboard.katana_service_status_reader import (
@@ -8,11 +9,23 @@ from app.dashboard.katana_service_status_reader import (
 )
 
 
+NOW = datetime(
+    2026,
+    8,
+    1,
+    0,
+    0,
+    10,
+    tzinfo=timezone.utc,
+)
+
+
 def test_reader_returns_empty_when_missing(
     tmp_path: Path,
 ) -> None:
     payload = KatanaServiceStatusReader(
-        tmp_path / "missing.json"
+        tmp_path / "missing.json",
+        now_provider=lambda: NOW,
     ).read()
 
     assert not payload["available"]
@@ -53,11 +66,15 @@ def test_reader_loads_service_status(
     )
 
     payload = KatanaServiceStatusReader(
-        path
+        path,
+        stale_after_seconds=30,
+        now_provider=lambda: NOW,
     ).read()
 
     assert payload["available"]
+    assert not payload["stale"]
     assert payload["service_state"] == "healthy"
+    assert payload["source_service_state"] == "healthy"
     assert payload["kabu_station_readiness"] == "ready"
     assert payload["components"][0][
         "process_id"

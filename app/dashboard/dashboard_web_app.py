@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from pathlib import Path
 from typing import Protocol
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from app.dashboard.morning_preflight_status_reader import (
+    MorningPreflightStatusReader,
+)
+from app.dashboard.paper_trading_schedule_status_reader import (
+    PaperTradingScheduleStatusReader,
+)
 from app.dashboard.katana_service_status_reader import (
     KatanaServiceStatusReader,
 )
@@ -26,6 +34,9 @@ from app.dashboard.dashboard_web_service import (
     DashboardWebService,
 )
 from app.dashboard.recovery_summary import RecoverySummary
+from app.runtime.operational_readiness_service import (
+    OperationalReadinessService,
+)
 
 
 PACKAGE_DIRECTORY = Path(__file__).resolve().parent
@@ -46,6 +57,10 @@ def create_dashboard_app(
     performance_service: StrategyPerformanceAnalyzer | None = None,
     breakdown_service: PerformanceBreakdownAnalyzer | None = None,
     service_status_reader: KatanaServiceStatusReader | None = None,
+    readiness_service: OperationalReadinessService | None = None,
+    paper_schedule_reader: PaperTradingScheduleStatusReader | None = None,
+    morning_preflight_reader: MorningPreflightStatusReader | None = None,
+    daily_report_reader: DailyReportReader | None = None,
 ) -> FastAPI:
     """Read-only Dashboard用FastAPI Appを作成する。"""
 
@@ -139,6 +154,93 @@ def create_dashboard_app(
             else RecoverySummary()
         )
         return summary.to_dict()
+
+    @app.get("/api/dashboard/morning-preflight")
+    def dashboard_morning_preflight() -> dict[str, object]:
+        if morning_preflight_reader is None:
+            return {
+                "available": False,
+                "generated_at": None,
+                "schedule_state": "not_configured",
+                "overall_state": "unknown",
+                "ready_for_trading": False,
+                "target_date": None,
+                "next_action_at": None,
+                "last_attempt_at": None,
+                "last_exit_code": None,
+                "message": (
+                    "Morning Pre-Flight reader "
+                    "is not configured."
+                ),
+                "checks": [],
+            }
+
+        return morning_preflight_reader.read()
+
+    @app.get("/api/dashboard/daily-report")
+    def dashboard_daily_report(
+        report_date: str | None = None,
+    ) -> dict[str, object]:
+        if daily_report_reader is None:
+            return {
+                "available": False,
+                "source_path": None,
+                "report_date": report_date,
+                "generated_at": None,
+                "status": "not_configured",
+                "summary": {},
+                "strategy_breakdown": [],
+                "symbol_breakdown": [],
+                "error_count": 0,
+                "recovery_count": 0,
+                "notes": [],
+                "message": (
+                    "Daily report reader is not configured."
+                ),
+            }
+
+        if report_date is None:
+            return daily_report_reader.read_latest()
+
+        try:
+            parsed_date = date.fromisoformat(
+                report_date
+            )
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "report_date must use YYYY-MM-DD format."
+                ),
+            )
+
+        return daily_report_reader.read_for_date(
+            parsed_date
+        )
+
+    @app.get("/api/dashboard/paper-trading-schedule")
+    def dashboard_paper_trading_schedule() -> dict[str, object]:
+        if paper_schedule_reader is None:
+            return {
+                "available": False,
+                "state": "not_configured",
+                "enabled": False,
+                "settings": {},
+            }
+
+        return paper_schedule_reader.read()
+
+    @app.get("/api/dashboard/operational-readiness")
+    def dashboard_operational_readiness() -> dict[str, object]:
+        if readiness_service is None:
+            return {
+                "generated_at": None,
+                "overall_state": "not_configured",
+                "ready_for_paper_trading": False,
+                "checks": [],
+            }
+
+        return readiness_service.evaluate().to_dict()
 
     @app.get("/api/dashboard/service-status")
     def dashboard_service_status() -> dict[str, object]:

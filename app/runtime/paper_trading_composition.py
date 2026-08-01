@@ -62,6 +62,9 @@ from app.notifications.notification_composition import (
 from app.notifications.notification_rule_models import (
     NotificationRulePolicy,
 )
+from app.strategy.high_breakout_candidate_repository import (
+    HighBreakoutCandidateRepository,
+)
 from app.settings import ROOT_DIR, Settings
 from app.market.bar_repository import MarketBarRepository
 from app.market.market_calendar import TokyoMarketCalendar

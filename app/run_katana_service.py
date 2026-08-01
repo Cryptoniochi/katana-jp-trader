@@ -12,12 +12,18 @@ from typing import Sequence
 from app.run_dashboard_resident import (
     wait_for_tailscale_ip,
 )
+from app.runtime.kabu_station_readiness_probe import (
+    probe_kabu_station_readiness,
+)
 from app.runtime.katana_service_manager import (
     DEFAULT_STATUS_PATH,
     KatanaServiceManager,
     ManagedProcessDefinition,
     build_dashboard_command,
     build_paper_trading_command,
+    build_scheduled_paper_trading_command,
+    build_daily_report_scheduler_command,
+    build_morning_preflight_scheduler_command,
 )
 from app.runtime.katana_service_models import (
     ManagedComponentName,
@@ -67,6 +73,30 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=5.0,
     )
     parser.add_argument(
+        "--enable-morning-preflight-schedule",
+        action="store_true",
+        help=(
+            "営業日8:40のMorning Pre-Flight自動通知を"
+            "有効化します。"
+        ),
+    )
+    parser.add_argument(
+        "--enable-daily-report-schedule",
+        action="store_true",
+        help=(
+            "営業日15:40の日次レポート生成・通知を"
+            "有効化します。"
+        ),
+    )
+    parser.add_argument(
+        "--enable-paper-trading-schedule",
+        action="store_true",
+        help=(
+            "営業日スケジューラを有効化します。"
+            "Paper Tradingは8:45～15:35だけ起動可能です。"
+        ),
+    )
+    parser.add_argument(
         "--enable-paper-trading",
         action="store_true",
         help=(
@@ -87,6 +117,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--skip-readiness-check",
         action="store_true",
+    )
+    parser.add_argument(
+        "--readiness-interval-seconds",
+        type=float,
+        default=60.0,
     )
     parser.add_argument(
         "--dry-run",
@@ -146,6 +181,48 @@ def run(
             maximum_restarts=100,
         ),
         ManagedProcessDefinition(
+            name=ManagedComponentName.MORNING_PREFLIGHT_SCHEDULER,
+            command=build_morning_preflight_scheduler_command(
+                enabled=(
+                    parsed.enable_morning_preflight_schedule
+                ),
+            ),
+            enabled=True,
+            restart_on_failure=True,
+            restart_delay_seconds=30.0,
+            maximum_restarts=20,
+        ),
+        ManagedProcessDefinition(
+            name=ManagedComponentName.DAILY_REPORT_SCHEDULER,
+            command=build_daily_report_scheduler_command(
+                database_path=parsed.database_path,
+                enabled=(
+                    parsed.enable_daily_report_schedule
+                ),
+            ),
+            enabled=True,
+            restart_on_failure=True,
+            restart_delay_seconds=30.0,
+            maximum_restarts=20,
+        ),
+        ManagedProcessDefinition(
+            name=ManagedComponentName.PAPER_TRADING_SCHEDULER,
+            command=build_scheduled_paper_trading_command(
+                database_path=parsed.database_path,
+                watchlist_path=parsed.watchlist_path,
+                strategies=strategies,
+                enabled=(
+                    parsed.enable_paper_trading_schedule
+                ),
+            ),
+            enabled=True,
+            restart_on_failure=True,
+            restart_delay_seconds=30.0,
+            maximum_restarts=20,
+        ),
+        # Direct Paper Trading is retained for diagnostics only.
+        # Normal automated operation uses PAPER_TRADING_SCHEDULER.
+        ManagedProcessDefinition(
             name=ManagedComponentName.PAPER_TRADING,
             command=build_paper_trading_command(
                 database_path=parsed.database_path,
@@ -162,34 +239,19 @@ def run(
     manager = KatanaServiceManager(
         definitions=definitions,
         status_path=parsed.status_path,
+        readiness_probe=(
+            None
+            if parsed.skip_readiness_check
+            else probe_kabu_station_readiness
+        ),
+        readiness_interval_seconds=(
+            parsed.readiness_interval_seconds
+        ),
     )
 
-    if (
-        parsed.enable_paper_trading
-        and not parsed.skip_readiness_check
-    ):
-        readiness_exit_code = (
-            run_kabu_station_readiness_check()
-        )
-        readiness = (
-            "ready"
-            if readiness_exit_code == 0
-            else "failed"
-        )
-        manager.set_kabu_station_readiness(
-            readiness
-        )
-
-        if readiness_exit_code != 0:
-            print(
-                "kabuステーションProduction Readiness "
-                "Checkに失敗しました。"
-            )
-            return readiness_exit_code
-    else:
-        manager.set_kabu_station_readiness(
-            "not_checked"
-        )
+    manager.set_kabu_station_readiness(
+        "not_checked"
+    )
 
     if parsed.dry_run:
         print(f"Tailscale IP: {tailscale_ip}")

@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,6 +17,8 @@ from app.runtime.katana_service_models import (
     ManagedComponentName,
     ManagedComponentState,
     ManagedComponentStatus,
+    ServiceEvent,
+    ServiceEventType,
 )
 
 
@@ -64,6 +67,7 @@ class _ManagedProcess:
         ManagedComponentState.STOPPED
     )
     message: str | None = None
+    has_started_once: bool = False
 
 
 class KatanaServiceManager:
@@ -83,7 +87,20 @@ class KatanaServiceManager:
         popen_factory: Callable[..., subprocess.Popen] = (
             subprocess.Popen
         ),
+        readiness_probe: Callable[[], object] | None = None,
+        readiness_interval_seconds: float = 60.0,
+        event_limit: int = 50,
     ) -> None:
+        if readiness_interval_seconds <= 0:
+            raise ValueError(
+                "Readiness確認間隔は0より大きい必要があります。"
+            )
+
+        if event_limit <= 0:
+            raise ValueError(
+                "イベント保持件数は0より大きい必要があります。"
+            )
+
         self.status_path = Path(status_path)
         self.now_provider = (
             now_provider
@@ -92,6 +109,11 @@ class KatanaServiceManager:
         )
         self.monotonic_provider = monotonic_provider
         self.popen_factory = popen_factory
+        self.readiness_probe = readiness_probe
+        self.readiness_interval_seconds = (
+            readiness_interval_seconds
+        )
+        self._next_readiness_probe_at = 0.0
         self._components = {
             definition.name: _ManagedProcess(
                 definition=definition,
@@ -105,10 +127,21 @@ class KatanaServiceManager:
         }
         self._stop_requested = False
         self.kabu_station_readiness = "not_checked"
+        self.service_started_at = self._current_time()
+        self._events: deque[ServiceEvent] = deque(
+            maxlen=event_limit
+        )
+        self._record_event(
+            ServiceEventType.SERVICE_STARTED,
+            component=None,
+            message="KATANA Service Manager started.",
+        )
 
     def set_kabu_station_readiness(
         self,
         value: str,
+        *,
+        message: str | None = None,
     ) -> None:
         normalized = value.strip()
 
@@ -117,7 +150,25 @@ class KatanaServiceManager:
                 "kabuステーション状態を指定してください。"
             )
 
+        changed = (
+            normalized
+            != self.kabu_station_readiness
+        )
         self.kabu_station_readiness = normalized
+
+        if changed:
+            self._record_event(
+                ServiceEventType.READINESS_CHANGED,
+                component=None,
+                message=(
+                    message
+                    or (
+                        "kabuステーションReadiness changed "
+                        f"to {normalized}."
+                    )
+                ),
+            )
+
         self.write_status()
 
     def start_enabled_components(self) -> None:
@@ -129,9 +180,17 @@ class KatanaServiceManager:
 
     def request_stop(self) -> None:
         self._stop_requested = True
+        self._record_event(
+            ServiceEventType.SERVICE_STOPPING,
+            component=None,
+            message="KATANA Service Manager stopping.",
+        )
 
     def poll_once(self) -> None:
         now_monotonic = self.monotonic_provider()
+        self._run_readiness_probe_if_due(
+            now_monotonic
+        )
 
         for component in self._components.values():
             if not component.definition.enabled:
@@ -169,6 +228,15 @@ class KatanaServiceManager:
                         "Unexpected exit. "
                         f"exit_code={exit_code}"
                     )
+                    self._record_event(
+                        ServiceEventType.RESTART_SCHEDULED,
+                        component=component.definition.name,
+                        message=(
+                            f"{component.definition.name.value} "
+                            f"exited with code {exit_code}; "
+                            "restart scheduled."
+                        ),
+                    )
                 else:
                     component.state = (
                         ManagedComponentState.STOPPED
@@ -177,6 +245,15 @@ class KatanaServiceManager:
                     )
                     component.message = (
                         f"Process exited. exit_code={exit_code}"
+                    )
+                    self._record_event(
+                        (
+                            ServiceEventType.COMPONENT_STOPPED
+                            if exit_code == 0
+                            else ServiceEventType.COMPONENT_FAILED
+                        ),
+                        component=component.definition.name,
+                        message=component.message,
                     )
 
             elif (
@@ -238,6 +315,11 @@ class KatanaServiceManager:
             )
             component.message = (
                 "Stopped by Service Manager."
+            )
+            self._record_event(
+                ServiceEventType.COMPONENT_STOPPED,
+                component=component.definition.name,
+                message=component.message,
             )
 
         self.write_status()
@@ -302,6 +384,13 @@ class KatanaServiceManager:
                 else "idle"
             )
         )
+        uptime_seconds = max(
+            0.0,
+            (
+                current_time
+                - self.service_started_at
+            ).total_seconds(),
+        )
 
         return KatanaServiceStatus(
             generated_at=current_time,
@@ -310,6 +399,11 @@ class KatanaServiceManager:
                 self.kabu_station_readiness
             ),
             components=statuses,
+            service_started_at=(
+                self.service_started_at
+            ),
+            uptime_seconds=uptime_seconds,
+            recent_events=tuple(self._events),
         )
 
     def write_status(self) -> None:
@@ -334,6 +428,7 @@ class KatanaServiceManager:
         self,
         component: _ManagedProcess,
     ) -> None:
+        was_restart = component.has_started_once
         component.state = (
             ManagedComponentState.STARTING
         )
@@ -351,6 +446,11 @@ class KatanaServiceManager:
                 ManagedComponentState.FAILED
             )
             component.message = str(error)
+            self._record_event(
+                ServiceEventType.COMPONENT_FAILED,
+                component=component.definition.name,
+                message=str(error),
+            )
             self.write_status()
             return
 
@@ -361,6 +461,78 @@ class KatanaServiceManager:
             ManagedComponentState.RUNNING
         )
         component.message = None
+        component.has_started_once = True
+        self._record_event(
+            (
+                ServiceEventType.RESTART_COMPLETED
+                if was_restart
+                else ServiceEventType.COMPONENT_STARTED
+            ),
+            component=component.definition.name,
+            message=(
+                f"{component.definition.name.value} "
+                f"started. pid={process.pid}"
+            ),
+        )
+
+    def _run_readiness_probe_if_due(
+        self,
+        now_monotonic: float,
+    ) -> None:
+        if self.readiness_probe is None:
+            return
+
+        if (
+            now_monotonic
+            < self._next_readiness_probe_at
+        ):
+            return
+
+        self._next_readiness_probe_at = (
+            now_monotonic
+            + self.readiness_interval_seconds
+        )
+
+        try:
+            result = self.readiness_probe()
+            state = str(
+                getattr(
+                    result,
+                    "state",
+                    "error",
+                )
+            )
+            message = str(
+                getattr(
+                    result,
+                    "message",
+                    state,
+                )
+            )
+        except Exception as error:
+            state = "error"
+            message = str(error)
+
+        self.set_kabu_station_readiness(
+            state,
+            message=message,
+        )
+
+    def _record_event(
+        self,
+        event_type: ServiceEventType,
+        *,
+        component: ManagedComponentName | None,
+        message: str,
+    ) -> None:
+        self._events.appendleft(
+            ServiceEvent(
+                occurred_at=self._current_time(),
+                event_type=event_type,
+                component=component,
+                message=message,
+            )
+        )
 
     def _current_time(self) -> datetime:
         value = self.now_provider()
@@ -425,5 +597,87 @@ def build_paper_trading_command(
                 strategy,
             ]
         )
+
+    return tuple(command)
+
+
+
+def build_scheduled_paper_trading_command(
+    *,
+    database_path: Path,
+    watchlist_path: Path,
+    strategies: Sequence[str],
+    enabled: bool,
+) -> tuple[str, ...]:
+    """営業日Paper Tradingスケジューラの起動コマンドを作る。"""
+
+    command = [
+        sys.executable,
+        "-m",
+        "app.run_scheduled_paper_trading",
+    ]
+
+    if enabled:
+        command.append("--enable")
+
+    command.extend(
+        [
+            "--database-path",
+            str(database_path),
+            "--watchlist",
+            str(watchlist_path),
+            "--market-data-mode",
+            "kabu-station-realtime",
+        ]
+    )
+
+    for strategy in strategies:
+        command.extend(
+            [
+                "--strategy",
+                strategy,
+            ]
+        )
+
+    return tuple(command)
+
+
+
+def build_daily_report_scheduler_command(
+    *,
+    database_path: Path,
+    enabled: bool,
+) -> tuple[str, ...]:
+    """Daily Report自動生成・通知スケジューラの起動コマンド。"""
+
+    command = [
+        sys.executable,
+        "-m",
+        "app.run_daily_report_scheduler",
+        "--database-path",
+        str(database_path),
+    ]
+
+    if enabled:
+        command.append("--enable")
+
+    return tuple(command)
+
+
+
+def build_morning_preflight_scheduler_command(
+    *,
+    enabled: bool,
+) -> tuple[str, ...]:
+    """Morning Pre-Flightスケジューラ起動コマンド。"""
+
+    command = [
+        sys.executable,
+        "-m",
+        "app.run_morning_preflight_scheduler",
+    ]
+
+    if enabled:
+        command.append("--enable")
 
     return tuple(command)

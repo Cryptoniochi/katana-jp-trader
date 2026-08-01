@@ -20,13 +20,19 @@
         <p class="eyebrow">PROJECT KATANA</p>
         <h1>Mobile Monitor</h1>
       </div>
-      <div id="mobile-status" class="status-pill">
-        UNKNOWN
+      <div class="mobile-data-status">
+        <span>DATA</span>
+        <div id="mobile-status" class="status-pill">
+          UNKNOWN
+        </div>
       </div>
     </header>
 
     <p id="mobile-updated-at" class="muted">
       Loading...
+    </p>
+    <p id="mobile-data-message" class="mobile-status-note">
+      Data completeness and service health are evaluated separately.
     </p>
 
 
@@ -49,6 +55,206 @@
         id="mobile-service-components"
         class="mobile-card-list"
       ></div>
+
+      <article class="mobile-detail-card">
+        <div class="mobile-detail-grid">
+          <div>
+            <span>Service Uptime</span>
+            <b id="mobile-service-uptime">—</b>
+          </div>
+          <div>
+            <span>Recovery Events</span>
+            <b id="mobile-service-event-count">0</b>
+          </div>
+        </div>
+      </article>
+
+      <div class="mobile-section-title compact">
+        <h3>Recovery History</h3>
+      </div>
+      <div
+        id="mobile-service-events"
+        class="mobile-card-list"
+      ></div>
+    </section>
+
+
+
+    <section>
+      <div class="mobile-section-title">
+        <h2>Today's Schedule</h2>
+        <span
+          id="mobile-schedule-state"
+          class="status-pill"
+        >
+          UNKNOWN
+        </span>
+      </div>
+      <article class="mobile-detail-card">
+        <div class="mobile-detail-grid">
+          <div><span>Start</span><b id="schedule-start">—</b></div>
+          <div><span>Market Open</span><b id="schedule-open">—</b></div>
+          <div><span>Lunch</span><b id="schedule-lunch">—</b></div>
+          <div><span>Resume</span><b id="schedule-resume">—</b></div>
+          <div><span>Market Close</span><b id="schedule-close">—</b></div>
+          <div><span>Stop</span><b id="schedule-stop">—</b></div>
+        </div>
+        <p id="mobile-schedule-message" class="mobile-status-note">
+          Loading schedule...
+        </p>
+      </article>
+    </section>
+
+
+    <section>
+      <div class="mobile-section-title">
+        <h2>Morning Check</h2>
+        <span
+          id="morning-preflight-status"
+          class="status-pill"
+        >
+          UNKNOWN
+        </span>
+      </div>
+
+      <article class="mobile-detail-card">
+        <div class="mobile-card-heading">
+          <strong id="morning-preflight-overall">—</strong>
+          <span id="morning-preflight-ready">—</span>
+        </div>
+
+        <div class="mobile-detail-grid">
+          <div>
+            <span>Schedule</span>
+            <b id="morning-preflight-schedule">—</b>
+          </div>
+          <div>
+            <span>Target Date</span>
+            <b id="morning-preflight-date">—</b>
+          </div>
+          <div>
+            <span>Last Attempt</span>
+            <b id="morning-preflight-attempt">—</b>
+          </div>
+          <div>
+            <span>Exit Code</span>
+            <b id="morning-preflight-exit">—</b>
+          </div>
+        </div>
+
+        <p
+          id="morning-preflight-message"
+          class="mobile-card-message"
+        >
+          Morning Pre-Flight has not reported yet.
+        </p>
+      </article>
+
+      <div
+        id="morning-preflight-checks"
+        class="mobile-card-list"
+      ></div>
+    </section>
+
+    <section>
+      <div class="mobile-section-title">
+        <h2>Operational Readiness</h2>
+        <span
+          id="mobile-readiness-state"
+          class="status-pill"
+        >
+          UNKNOWN
+        </span>
+      </div>
+      <article class="mobile-detail-card">
+        <div class="mobile-card-heading">
+          <strong>Paper Trading</strong>
+          <span id="mobile-paper-ready">—</span>
+        </div>
+      </article>
+      <div
+        id="mobile-readiness-checks"
+        class="mobile-card-list"
+      ></div>
+    </section>
+
+
+    <section>
+      <div class="mobile-section-title">
+        <h2>Daily Report</h2>
+        <span
+          id="mobile-daily-report-status"
+          class="status-pill"
+        >
+          UNKNOWN
+        </span>
+      </div>
+
+      <article
+        id="mobile-daily-report-empty"
+        class="mobile-empty-card"
+      >
+        Daily trading report has not been generated yet.
+      </article>
+
+      <div
+        id="mobile-daily-report-content"
+        hidden
+      >
+        <article class="mobile-detail-card">
+          <div class="mobile-card-heading">
+            <strong id="mobile-daily-report-date">—</strong>
+            <span id="mobile-daily-report-pnl">—</span>
+          </div>
+          <div class="mobile-detail-grid">
+            <div>
+              <span>Trades</span>
+              <b id="mobile-daily-report-trades">—</b>
+            </div>
+            <div>
+              <span>Win Rate</span>
+              <b id="mobile-daily-report-win-rate">—</b>
+            </div>
+            <div>
+              <span>Profit Factor</span>
+              <b id="mobile-daily-report-pf">—</b>
+            </div>
+            <div>
+              <span>Max Drawdown</span>
+              <b id="mobile-daily-report-dd">—</b>
+            </div>
+          </div>
+        </article>
+
+        <div class="mobile-section-title compact">
+          <h3>Strategy Ranking</h3>
+        </div>
+        <div
+          id="mobile-daily-report-strategies"
+          class="mobile-card-list"
+        ></div>
+
+        <div class="mobile-section-title compact">
+          <h3>Top Symbols</h3>
+        </div>
+        <div
+          id="mobile-daily-report-symbols"
+          class="mobile-card-list"
+        ></div>
+
+        <article class="mobile-detail-card">
+          <div class="mobile-detail-grid">
+            <div>
+              <span>Errors</span>
+              <b id="mobile-daily-report-errors">0</b>
+            </div>
+            <div>
+              <span>Recoveries</span>
+              <b id="mobile-daily-report-recoveries">0</b>
+            </div>
+          </div>
+        </article>
+      </div>
     </section>
 
     <section class="mobile-primary-grid">
@@ -128,6 +334,339 @@
 
   <script>
 
+
+
+
+
+    function renderMobileDailyRanking(
+      elementId,
+      rows
+    ) {
+      const container = document.getElementById(
+        elementId
+      );
+      container.innerHTML = "";
+
+      if (!rows || rows.length === 0) {
+        container.innerHTML = `
+          <article class="mobile-empty-card">
+            No breakdown rows.
+          </article>
+        `;
+        return;
+      }
+
+      for (const row of rows.slice(0, 5)) {
+        const card = document.createElement("article");
+        card.className = "mobile-daily-ranking-card";
+        card.innerHTML = `
+          <div>
+            <strong>${row.label ?? row.key ?? "—"}</strong>
+            <span>${row.trade_count ?? 0} trades</span>
+          </div>
+          <b>${yen.format(row.net_profit_loss ?? 0)}</b>
+        `;
+        container.appendChild(card);
+      }
+    }
+
+
+    function renderMorningPreflight(payload) {
+      const status = document.getElementById(
+        "morning-preflight-status"
+      );
+      status.textContent = (
+        payload.schedule_state ?? "unknown"
+      ).toUpperCase();
+
+      document.getElementById(
+        "morning-preflight-overall"
+      ).textContent = (
+        payload.overall_state ?? "unknown"
+      ).toUpperCase();
+
+      document.getElementById(
+        "morning-preflight-ready"
+      ).textContent = (
+        payload.ready_for_trading
+          ? "READY"
+          : "NOT READY"
+      );
+
+      document.getElementById(
+        "morning-preflight-schedule"
+      ).textContent = (
+        payload.schedule_state ?? "—"
+      );
+      document.getElementById(
+        "morning-preflight-date"
+      ).textContent = payload.target_date ?? "—";
+      document.getElementById(
+        "morning-preflight-attempt"
+      ).textContent = payload.last_attempt_at ?? "—";
+      document.getElementById(
+        "morning-preflight-exit"
+      ).textContent = (
+        payload.last_exit_code ?? "—"
+      );
+      document.getElementById(
+        "morning-preflight-message"
+      ).textContent = payload.message ?? "—";
+
+      const container = document.getElementById(
+        "morning-preflight-checks"
+      );
+      container.innerHTML = "";
+
+      const checks = payload.checks ?? [];
+
+      if (checks.length === 0) {
+        container.innerHTML = `
+          <article class="mobile-empty-card">
+            No Morning Check details.
+          </article>
+        `;
+        return;
+      }
+
+      for (const check of checks) {
+        const card = document.createElement("article");
+        card.className = (
+          "morning-check-card "
+          + `level-${check.level ?? "unknown"}`
+        );
+        card.innerHTML = `
+          <div>
+            <strong>${check.label ?? check.key ?? "Unknown"}</strong>
+            <span>${check.message ?? ""}</span>
+          </div>
+          <b>${(check.level ?? "unknown").toUpperCase()}</b>
+        `;
+        container.appendChild(card);
+      }
+    }
+
+    function renderMobileDailyReport(payload) {
+      const status = document.getElementById(
+        "mobile-daily-report-status"
+      );
+      status.textContent = (
+        payload.status ?? "unknown"
+      ).toUpperCase();
+
+      const empty = document.getElementById(
+        "mobile-daily-report-empty"
+      );
+      const content = document.getElementById(
+        "mobile-daily-report-content"
+      );
+
+      if (!payload.available) {
+        empty.hidden = false;
+        empty.textContent = (
+          payload.message
+          ?? "Daily trading report has not been generated yet."
+        );
+        content.hidden = true;
+        return;
+      }
+
+      empty.hidden = true;
+      content.hidden = false;
+
+      const summary = payload.summary ?? {};
+      const pnl = Number(
+        summary.net_profit_loss ?? 0
+      );
+
+      document.getElementById(
+        "mobile-daily-report-date"
+      ).textContent = payload.report_date ?? "—";
+
+      const pnlElement = document.getElementById(
+        "mobile-daily-report-pnl"
+      );
+      pnlElement.textContent = yen.format(pnl);
+      pnlElement.dataset.sign = (
+        pnl > 0
+          ? "positive"
+          : (
+            pnl < 0
+              ? "negative"
+              : "flat"
+          )
+      );
+
+      document.getElementById(
+        "mobile-daily-report-trades"
+      ).textContent = summary.trade_count ?? 0;
+      document.getElementById(
+        "mobile-daily-report-win-rate"
+      ).textContent = (
+        summary.win_rate === null
+        || summary.win_rate === undefined
+          ? "—"
+          : `${(Number(summary.win_rate) * 100).toFixed(1)}%`
+      );
+      document.getElementById(
+        "mobile-daily-report-pf"
+      ).textContent = (
+        summary.profit_factor === null
+        || summary.profit_factor === undefined
+          ? "—"
+          : Number(summary.profit_factor).toFixed(2)
+      );
+      document.getElementById(
+        "mobile-daily-report-dd"
+      ).textContent = (
+        summary.maximum_drawdown === null
+        || summary.maximum_drawdown === undefined
+          ? "—"
+          : yen.format(summary.maximum_drawdown)
+      );
+
+      renderMobileDailyRanking(
+        "mobile-daily-report-strategies",
+        payload.strategy_breakdown ?? []
+      );
+      renderMobileDailyRanking(
+        "mobile-daily-report-symbols",
+        payload.symbol_breakdown ?? []
+      );
+
+      document.getElementById(
+        "mobile-daily-report-errors"
+      ).textContent = payload.error_count ?? 0;
+      document.getElementById(
+        "mobile-daily-report-recoveries"
+      ).textContent = payload.recovery_count ?? 0;
+    }
+
+    function renderPaperTradingSchedule(payload) {
+      const state = document.getElementById(
+        "mobile-schedule-state"
+      );
+      state.textContent = (
+        payload.state ?? "unknown"
+      ).toUpperCase();
+      state.dataset.status = (
+        ["running", "lunch_break"].includes(payload.state)
+          ? "healthy"
+          : (
+            ["failed"].includes(payload.state)
+              ? "failed"
+              : "neutral"
+          )
+      );
+
+      const settings = payload.settings ?? {};
+      document.getElementById("schedule-start").textContent = settings.start_at ?? "—";
+      document.getElementById("schedule-open").textContent = settings.morning_open_at ?? "—";
+      document.getElementById("schedule-lunch").textContent = settings.lunch_start_at ?? "—";
+      document.getElementById("schedule-resume").textContent = settings.lunch_end_at ?? "—";
+      document.getElementById("schedule-close").textContent = settings.market_close_at ?? "—";
+      document.getElementById("schedule-stop").textContent = settings.stop_at ?? "—";
+      document.getElementById(
+        "mobile-schedule-message"
+      ).textContent = payload.message ?? "—";
+    }
+
+    function renderOperationalReadiness(payload) {
+      const state = document.getElementById(
+        "mobile-readiness-state"
+      );
+      state.textContent = (
+        payload.overall_state ?? "unknown"
+      ).toUpperCase();
+      state.dataset.status = (
+        payload.overall_state === "ready"
+          ? "healthy"
+          : (
+            payload.overall_state === "attention"
+              ? "warning"
+              : "failed"
+          )
+      );
+
+      document.getElementById(
+        "mobile-paper-ready"
+      ).textContent = (
+        payload.ready_for_paper_trading
+          ? "READY"
+          : "NOT READY"
+      );
+
+      const list = document.getElementById(
+        "mobile-readiness-checks"
+      );
+      list.innerHTML = "";
+
+      for (const check of payload.checks) {
+        const card = document.createElement("article");
+        card.className = "mobile-readiness-card";
+        card.dataset.level = check.level;
+        card.innerHTML = `
+          <div>
+            <strong>${check.label}</strong>
+            <span>${check.level.toUpperCase()}</span>
+          </div>
+          <p>${check.message}</p>
+        `;
+        list.appendChild(card);
+      }
+    }
+
+    function formatServiceUptime(seconds) {
+      if (seconds === null || seconds === undefined) {
+        return "—";
+      }
+
+      const total = Math.max(0, Math.floor(seconds));
+      const days = Math.floor(total / 86400);
+      const hours = Math.floor((total % 86400) / 3600);
+      const minutes = Math.floor((total % 3600) / 60);
+
+      if (days > 0) {
+        return `${days}d ${hours}h ${minutes}m`;
+      }
+
+      if (hours > 0) {
+        return `${hours}h ${minutes}m`;
+      }
+
+      return `${minutes}m`;
+    }
+
+    function renderMobileServiceEvents(events) {
+      const list = document.getElementById(
+        "mobile-service-events"
+      );
+      list.innerHTML = "";
+
+      if (events.length === 0) {
+        list.innerHTML = `
+          <article class="mobile-empty-card">
+            No recovery events.
+          </article>
+        `;
+        return;
+      }
+
+      for (const event of events.slice(0, 6)) {
+        const card = document.createElement("article");
+        card.className = "mobile-service-event";
+        card.innerHTML = `
+          <div>
+            <strong>${event.component ?? "service"}</strong>
+            <span>${event.event_type}</span>
+          </div>
+          <p>${event.message}</p>
+          <time>${event.occurred_at ?? "—"}</time>
+        `;
+        list.appendChild(card);
+      }
+    }
+
     function mobileServiceStateClass(state) {
       if (["running", "healthy", "ready"].includes(state)) {
         return "healthy";
@@ -137,7 +676,7 @@
         return "neutral";
       }
 
-      if (["starting", "restart_wait", "degraded"].includes(state)) {
+      if (["starting", "restart_wait", "degraded", "stale"].includes(state)) {
         return "warning";
       }
 
@@ -157,12 +696,36 @@
         )
       );
 
+      if (payload.stale) {
+        serviceState.title = (
+          `Last Service update is ${
+            payload.status_age_seconds?.toFixed(1) ?? "unknown"
+          } seconds old.`
+        );
+      } else {
+        serviceState.title = "";
+      }
+
       const kabu = document.getElementById(
         "mobile-kabu-readiness"
       );
       kabu.textContent = (
         payload.kabu_station_readiness ?? "unknown"
       ).toUpperCase();
+
+      document.getElementById(
+        "mobile-service-uptime"
+      ).textContent = formatServiceUptime(
+        payload.uptime_seconds
+      );
+      document.getElementById(
+        "mobile-service-event-count"
+      ).textContent = (
+        payload.recent_events?.length ?? 0
+      );
+      renderMobileServiceEvents(
+        payload.recent_events ?? []
+      );
 
       const list = document.getElementById(
         "mobile-service-components"
@@ -475,13 +1038,21 @@
         strategyResponse,
         performanceResponse,
         breakdownResponse,
-        serviceStatusResponse
+        serviceStatusResponse,
+        readinessResponse,
+        scheduleResponse,
+        dailyReportResponse,
+        morningPreflightResponse
       ] = await Promise.all([
         fetch("/api/dashboard/summary"),
         fetch("/api/dashboard/strategies"),
         fetch("/api/dashboard/performance"),
         fetch("/api/dashboard/performance-breakdown"),
-        fetch("/api/dashboard/service-status")
+        fetch("/api/dashboard/service-status"),
+        fetch("/api/dashboard/operational-readiness"),
+        fetch("/api/dashboard/paper-trading-schedule"),
+        fetch("/api/dashboard/daily-report"),
+        fetch("/api/dashboard/morning-preflight")
       ]);
 
       if (
@@ -490,6 +1061,10 @@
         || !performanceResponse.ok
         || !breakdownResponse.ok
         || !serviceStatusResponse.ok
+        || !readinessResponse.ok
+        || !scheduleResponse.ok
+        || !dailyReportResponse.ok
+        || !morningPreflightResponse.ok
       ) {
         throw new Error(
           "Dashboard API request failed."
@@ -502,6 +1077,18 @@
       const breakdown = await breakdownResponse.json();
       const serviceStatus = (
         await serviceStatusResponse.json()
+      );
+      const readiness = (
+        await readinessResponse.json()
+      );
+      const schedule = (
+        await scheduleResponse.json()
+      );
+      const dailyReport = (
+        await dailyReportResponse.json()
+      );
+      const morningPreflight = (
+        await morningPreflightResponse.json()
       );
       const snapshot = summary.snapshot;
       const daily = summary.daily_history;
@@ -543,9 +1130,27 @@
       const statusElement = document.getElementById(
         "mobile-status"
       );
-      statusElement.textContent = status.toUpperCase();
+      statusElement.textContent = (
+        status === "partial"
+          ? "PARTIAL"
+          : status.toUpperCase()
+      );
       statusElement.dataset.status = status;
 
+      const dataMessage = document.getElementById(
+        "mobile-data-message"
+      );
+      dataMessage.textContent = (
+        status === "partial"
+          ? "Some trading snapshot fields are not available. "
+            + "KATANA Service health is shown separately below."
+          : "Trading snapshot data is available."
+      );
+
+      renderMorningPreflight(morningPreflight);
+      renderMobileDailyReport(dailyReport);
+      renderPaperTradingSchedule(schedule);
+      renderOperationalReadiness(readiness);
       renderMobileServiceStatus(serviceStatus);
       renderPerformance(performance);
       currentBreakdownPayload = breakdown;

@@ -13,6 +13,9 @@ class ManagedComponentName(StrEnum):
 
     DASHBOARD = "dashboard"
     PAPER_TRADING = "paper_trading"
+    PAPER_TRADING_SCHEDULER = "paper_trading_scheduler"
+    DAILY_REPORT_SCHEDULER = "daily_report_scheduler"
+    MORNING_PREFLIGHT_SCHEDULER = "morning_preflight_scheduler"
 
 
 class ManagedComponentState(StrEnum):
@@ -24,6 +27,58 @@ class ManagedComponentState(StrEnum):
     STOPPED = "stopped"
     FAILED = "failed"
     RESTART_WAIT = "restart_wait"
+
+
+class ServiceEventType(StrEnum):
+    """Service Managerの運用イベント種別。"""
+
+    SERVICE_STARTED = "service_started"
+    SERVICE_STOPPING = "service_stopping"
+    COMPONENT_STARTED = "component_started"
+    COMPONENT_STOPPED = "component_stopped"
+    COMPONENT_FAILED = "component_failed"
+    RESTART_SCHEDULED = "restart_scheduled"
+    RESTART_COMPLETED = "restart_completed"
+    READINESS_CHANGED = "readiness_changed"
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceEvent:
+    """Dashboardへ表示する運用イベント。"""
+
+    occurred_at: datetime
+    event_type: ServiceEventType
+    component: ManagedComponentName | None
+    message: str
+
+    def __post_init__(self) -> None:
+        if self.occurred_at.tzinfo is None:
+            raise ValueError(
+                "イベント日時にはタイムゾーンが必要です。"
+            )
+
+        if not self.message.strip():
+            raise ValueError(
+                "イベントメッセージを指定してください。"
+            )
+
+        object.__setattr__(
+            self,
+            "message",
+            self.message.strip(),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "occurred_at": self.occurred_at.isoformat(),
+            "event_type": self.event_type.value,
+            "component": (
+                self.component.value
+                if self.component is not None
+                else None
+            ),
+            "message": self.message,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,11 +136,30 @@ class KatanaServiceStatus:
     service_state: str
     kabu_station_readiness: str
     components: tuple[ManagedComponentStatus, ...]
+    service_started_at: datetime | None = None
+    uptime_seconds: float | None = None
+    recent_events: tuple[ServiceEvent, ...] = ()
 
     def __post_init__(self) -> None:
         if self.generated_at.tzinfo is None:
             raise ValueError(
                 "生成日時にはタイムゾーンが必要です。"
+            )
+
+        if (
+            self.service_started_at is not None
+            and self.service_started_at.tzinfo is None
+        ):
+            raise ValueError(
+                "Service起動日時にはタイムゾーンが必要です。"
+            )
+
+        if (
+            self.uptime_seconds is not None
+            and self.uptime_seconds < 0
+        ):
+            raise ValueError(
+                "稼働時間は0以上である必要があります。"
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -97,8 +171,18 @@ class KatanaServiceStatus:
             "kabu_station_readiness": (
                 self.kabu_station_readiness
             ),
+            "service_started_at": (
+                self.service_started_at.isoformat()
+                if self.service_started_at is not None
+                else None
+            ),
+            "uptime_seconds": self.uptime_seconds,
             "components": [
                 item.to_dict()
                 for item in self.components
+            ],
+            "recent_events": [
+                item.to_dict()
+                for item in self.recent_events
             ],
         }
