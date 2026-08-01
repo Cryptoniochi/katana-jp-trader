@@ -29,6 +29,28 @@
       Loading...
     </p>
 
+
+    <section>
+      <div class="mobile-section-title">
+        <h2>KATANA Service</h2>
+        <span id="mobile-service-state" class="status-pill">
+          UNKNOWN
+        </span>
+      </div>
+
+      <article class="mobile-detail-card">
+        <div class="mobile-card-heading">
+          <strong>kabu Station</strong>
+          <span id="mobile-kabu-readiness">—</span>
+        </div>
+      </article>
+
+      <div
+        id="mobile-service-components"
+        class="mobile-card-list"
+      ></div>
+    </section>
+
     <section class="mobile-primary-grid">
       <article class="mobile-primary-card">
         <span>Today's P/L</span>
@@ -46,6 +68,35 @@
         <span>Executions</span>
         <strong id="mobile-execution-count">—</strong>
       </article>
+    </section>
+
+
+    <section>
+      <div class="mobile-section-title">
+        <h2>Performance Ranking</h2>
+        <span class="muted">All trades</span>
+      </div>
+      <div
+        id="mobile-performance-ranking"
+        class="mobile-card-list"
+      ></div>
+    </section>
+
+
+    <section>
+      <div class="mobile-section-title">
+        <h2>Performance Breakdown</h2>
+      </div>
+      <div class="mobile-breakdown-tabs">
+        <button data-target="weekday">Weekday</button>
+        <button data-target="entry_hour">Hour</button>
+        <button data-target="symbol">Symbols</button>
+        <button data-target="exit_reason">Exits</button>
+      </div>
+      <div
+        id="mobile-breakdown-list"
+        class="mobile-card-list"
+      ></div>
     </section>
 
     <section>
@@ -76,6 +127,82 @@
   </main>
 
   <script>
+
+    function mobileServiceStateClass(state) {
+      if (["running", "healthy", "ready"].includes(state)) {
+        return "healthy";
+      }
+
+      if (["disabled", "not_checked", "not_running"].includes(state)) {
+        return "neutral";
+      }
+
+      if (["starting", "restart_wait", "degraded"].includes(state)) {
+        return "warning";
+      }
+
+      return "failed";
+    }
+
+    function renderMobileServiceStatus(payload) {
+      const serviceState = document.getElementById(
+        "mobile-service-state"
+      );
+      serviceState.textContent = (
+        payload.service_state ?? "unknown"
+      ).toUpperCase();
+      serviceState.dataset.status = (
+        mobileServiceStateClass(
+          payload.service_state
+        )
+      );
+
+      const kabu = document.getElementById(
+        "mobile-kabu-readiness"
+      );
+      kabu.textContent = (
+        payload.kabu_station_readiness ?? "unknown"
+      ).toUpperCase();
+
+      const list = document.getElementById(
+        "mobile-service-components"
+      );
+      list.innerHTML = "";
+
+      if (payload.components.length === 0) {
+        list.innerHTML = `
+          <article class="mobile-empty-card">
+            ${
+              payload.message
+              ?? "Service Manager has not reported yet."
+            }
+          </article>
+        `;
+        return;
+      }
+
+      for (const component of payload.components) {
+        const card = document.createElement("article");
+        card.className = "mobile-detail-card";
+        card.dataset.state = mobileServiceStateClass(
+          component.state
+        );
+        card.innerHTML = `
+          <div class="mobile-card-heading">
+            <strong>${component.name}</strong>
+            <span>${component.state}</span>
+          </div>
+          <div class="mobile-detail-grid">
+            <div><span>Enabled</span><b>${component.enabled}</b></div>
+            <div><span>PID</span><b>${component.process_id ?? "—"}</b></div>
+            <div><span>Restarts</span><b>${component.restart_count}</b></div>
+            <div><span>Last Exit</span><b>${component.last_exit_code ?? "—"}</b></div>
+          </div>
+        `;
+        list.appendChild(card);
+      }
+    }
+
     const yen = new Intl.NumberFormat(
       "ja-JP",
       {
@@ -134,6 +261,144 @@
         `;
         list.appendChild(element);
       }
+    }
+
+
+
+    let currentBreakdownPayload = null;
+
+    function renderMobileBreakdown(
+      target = "weekday"
+    ) {
+      const list = document.getElementById(
+        "mobile-breakdown-list"
+      );
+      const rows = (
+        currentBreakdownPayload?.[target]
+        ?? []
+      );
+      list.innerHTML = "";
+
+      document.querySelectorAll(
+        ".mobile-breakdown-tabs button"
+      ).forEach(button => {
+        button.classList.toggle(
+          "active",
+          button.dataset.target === target
+        );
+      });
+
+      if (rows.length === 0) {
+        list.innerHTML = `
+          <article class="mobile-empty-card">
+            No data yet.
+          </article>
+        `;
+        return;
+      }
+
+      for (const row of rows) {
+        const card = document.createElement("article");
+        card.className = "mobile-detail-card";
+        card.innerHTML = `
+          <div class="mobile-card-heading">
+            <strong>${row.label}</strong>
+            <span>${yen.format(row.net_profit_loss)}</span>
+          </div>
+          <div class="mobile-detail-grid">
+            <div><span>Trades</span><b>${row.trade_count}</b></div>
+            <div><span>Win Rate</span><b>${
+              row.win_rate === null
+                ? "—"
+                : percent.format(row.win_rate)
+            }</b></div>
+            <div><span>PF</span><b>${
+              row.profit_factor === null
+                ? "—"
+                : (
+                  Number.isFinite(row.profit_factor)
+                    ? row.profit_factor.toFixed(2)
+                    : "∞"
+                )
+            }</b></div>
+            <div><span>Average</span><b>${
+              row.average_profit_loss === null
+                ? "—"
+                : yen.format(row.average_profit_loss)
+            }</b></div>
+          </div>
+        `;
+        list.appendChild(card);
+      }
+    }
+
+    document.addEventListener(
+      "click",
+      event => {
+        const button = event.target.closest(
+          ".mobile-breakdown-tabs button"
+        );
+
+        if (button) {
+          renderMobileBreakdown(
+            button.dataset.target
+          );
+        }
+      }
+    );
+
+    function renderPerformance(payload) {
+      const list = document.getElementById(
+        "mobile-performance-ranking"
+      );
+      list.innerHTML = "";
+
+      if (payload.rankings.length === 0) {
+        list.innerHTML = `
+          <article class="mobile-empty-card">
+            No completed trades yet.
+          </article>
+        `;
+        return;
+      }
+
+      payload.rankings.forEach(
+        (strategy, index) => {
+          const element = document.createElement("article");
+          element.className = "mobile-detail-card";
+          element.innerHTML = `
+            <div class="mobile-card-heading">
+              <strong>#${index + 1} ${strategy.strategy_name}</strong>
+              <span>Score ${strategy.score.toFixed(1)}</span>
+            </div>
+            <div class="mobile-detail-grid">
+              <div><span>Trades</span><b>${strategy.trade_count}</b></div>
+              <div><span>Net P/L</span><b>${yen.format(strategy.net_profit_loss)}</b></div>
+              <div><span>Win Rate</span><b>${
+                strategy.win_rate === null
+                  ? "—"
+                  : percent.format(strategy.win_rate)
+              }</b></div>
+              <div><span>PF</span><b>${
+                strategy.profit_factor === null
+                  ? "—"
+                  : (
+                    Number.isFinite(strategy.profit_factor)
+                      ? strategy.profit_factor.toFixed(2)
+                      : "∞"
+                  )
+              }</b></div>
+              <div><span>Expectancy</span><b>${
+                strategy.expectancy === null
+                  ? "—"
+                  : yen.format(strategy.expectancy)
+              }</b></div>
+              <div><span>Max DD</span><b>${yen.format(strategy.maximum_drawdown)}</b></div>
+            </div>
+          `;
+          list.appendChild(element);
+        }
+      );
     }
 
     function renderTrades(trades) {
@@ -207,15 +472,24 @@
     async function refreshMobileDashboard() {
       const [
         summaryResponse,
-        strategyResponse
+        strategyResponse,
+        performanceResponse,
+        breakdownResponse,
+        serviceStatusResponse
       ] = await Promise.all([
         fetch("/api/dashboard/summary"),
-        fetch("/api/dashboard/strategies")
+        fetch("/api/dashboard/strategies"),
+        fetch("/api/dashboard/performance"),
+        fetch("/api/dashboard/performance-breakdown"),
+        fetch("/api/dashboard/service-status")
       ]);
 
       if (
         !summaryResponse.ok
         || !strategyResponse.ok
+        || !performanceResponse.ok
+        || !breakdownResponse.ok
+        || !serviceStatusResponse.ok
       ) {
         throw new Error(
           "Dashboard API request failed."
@@ -224,6 +498,11 @@
 
       const summary = await summaryResponse.json();
       const strategies = await strategyResponse.json();
+      const performance = await performanceResponse.json();
+      const breakdown = await breakdownResponse.json();
+      const serviceStatus = (
+        await serviceStatusResponse.json()
+      );
       const snapshot = summary.snapshot;
       const daily = summary.daily_history;
       const today = daily.length > 0
@@ -267,6 +546,10 @@
       statusElement.textContent = status.toUpperCase();
       statusElement.dataset.status = status;
 
+      renderMobileServiceStatus(serviceStatus);
+      renderPerformance(performance);
+      currentBreakdownPayload = breakdown;
+      renderMobileBreakdown();
       renderStrategies(strategies);
       renderTrades(strategies.recent_trades);
       renderPositions(portfolio?.positions ?? []);

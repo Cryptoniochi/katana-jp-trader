@@ -12,6 +12,15 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI
 
+from app.analytics.performance_breakdown_service import (
+    PerformanceBreakdownAnalyzer,
+)
+from app.analytics.strategy_performance_service import (
+    StrategyPerformanceAnalyzer,
+)
+from app.dashboard.katana_service_status_reader import (
+    KatanaServiceStatusReader,
+)
 from app.dashboard.dashboard_snapshot_file import (
     DashboardJsonSnapshotReader,
 )
@@ -38,6 +47,9 @@ from app.runtime.recovery_history_service import (
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 DEFAULT_DATABASE_PATH = Path("data/katana.db")
+DEFAULT_SERVICE_STATUS_PATH = Path(
+    "reports/service/katana_service_status.json"
+)
 DEFAULT_SNAPSHOT_PATH = Path(
     "reports/dashboard/dashboard.json"
 )
@@ -68,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--snapshot",
         type=Path,
         default=DEFAULT_SNAPSHOT_PATH,
+    )
+    parser.add_argument(
+        "--service-status",
+        type=Path,
+        default=DEFAULT_SERVICE_STATUS_PATH,
     )
     parser.add_argument(
         "--history-limit",
@@ -110,6 +127,7 @@ def create_launcher_app(
     snapshot_path: Path,
     history_limit: int,
     recent_trade_limit: int = 20,
+    service_status_path: Path = DEFAULT_SERVICE_STATUS_PATH,
     recovery_service: RecoveryHistoryService | None = None,
 ) -> FastAPI:
     snapshot_reader = DashboardJsonSnapshotReader(
@@ -130,6 +148,15 @@ def create_launcher_app(
         database_path,
         recent_trade_limit=recent_trade_limit,
     )
+    performance_service = StrategyPerformanceAnalyzer(
+        database_path
+    )
+    breakdown_service = PerformanceBreakdownAnalyzer(
+        database_path
+    )
+    service_status_reader = KatanaServiceStatusReader(
+        service_status_path
+    )
 
     return create_dashboard_app(
         service=dashboard_service,
@@ -139,6 +166,9 @@ def create_launcher_app(
             else create_recovery_history_service()
         ),
         strategy_service=strategy_service,
+        performance_service=performance_service,
+        breakdown_service=breakdown_service,
+        service_status_reader=service_status_reader,
     )
 
 
@@ -196,6 +226,7 @@ def main(
         recent_trade_limit=(
             args.recent_trade_limit
         ),
+        service_status_path=args.service_status,
     )
     url = dashboard_url(
         host=args.host,
@@ -212,6 +243,7 @@ def main(
     print(f"Mobile   : {mobile_url}")
     print(f"Database : {args.database}")
     print(f"Snapshot : {args.snapshot}")
+    print(f"Service  : {args.service_status}")
     print("Strategy : SQLite analytics")
     print("Stop     : Ctrl+C")
     print("=" * 52)

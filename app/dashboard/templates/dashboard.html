@@ -25,6 +25,35 @@
       </div>
     </header>
 
+
+    <section class="panel service-status-panel">
+      <div class="panel-heading">
+        <div>
+          <h2>KATANA Service Status</h2>
+          <span class="muted">
+            kabu Station readiness and managed processes
+          </span>
+        </div>
+        <span id="service-status-updated" class="muted">—</span>
+      </div>
+
+      <div class="service-overview">
+        <article class="service-overview-card">
+          <span>Service</span>
+          <strong id="service-state">—</strong>
+        </article>
+        <article class="service-overview-card">
+          <span>kabu Station</span>
+          <strong id="kabu-readiness">—</strong>
+        </article>
+      </div>
+
+      <div
+        id="service-components"
+        class="service-component-grid"
+      ></div>
+    </section>
+
     <section class="metrics">
       <article class="metric">
         <span>Today's P/L</span>
@@ -58,6 +87,53 @@
         <span>Positions</span>
         <strong id="position-count">—</strong>
       </article>
+    </section>
+
+
+    <section class="panel">
+      <div class="panel-heading">
+        <div>
+          <h2>Strategy Performance Ranking</h2>
+          <span class="muted">
+            Trade Journal based all-period performance
+          </span>
+        </div>
+        <span id="performance-period" class="muted">—</span>
+      </div>
+      <div
+        id="performance-ranking"
+        class="performance-ranking"
+      ></div>
+    </section>
+
+
+    <section class="panel">
+      <div class="panel-heading">
+        <div>
+          <h2>Performance Breakdown</h2>
+          <span class="muted">
+            Weekday, entry hour, symbol and exit reason
+          </span>
+        </div>
+      </div>
+      <div class="breakdown-grid">
+        <article class="breakdown-panel">
+          <h3>Weekday</h3>
+          <div id="breakdown-weekday"></div>
+        </article>
+        <article class="breakdown-panel">
+          <h3>Entry Hour</h3>
+          <div id="breakdown-entry-hour"></div>
+        </article>
+        <article class="breakdown-panel">
+          <h3>Top Symbols</h3>
+          <div id="breakdown-symbol"></div>
+        </article>
+        <article class="breakdown-panel">
+          <h3>Exit Reasons</h3>
+          <div id="breakdown-exit-reason"></div>
+        </article>
+      </div>
     </section>
 
     <section class="panel">
@@ -168,6 +244,95 @@
         maximumFractionDigits: 1
       }
     );
+
+
+    function serviceStateClass(state) {
+      if (["running", "healthy", "ready"].includes(state)) {
+        return "healthy";
+      }
+
+      if (["disabled", "not_checked", "not_running"].includes(state)) {
+        return "neutral";
+      }
+
+      if (["starting", "restart_wait", "degraded"].includes(state)) {
+        return "warning";
+      }
+
+      return "failed";
+    }
+
+    function renderServiceStatus(payload) {
+      document.getElementById(
+        "service-status-updated"
+      ).textContent = payload.generated_at ?? "—";
+
+      const serviceState = document.getElementById(
+        "service-state"
+      );
+      serviceState.textContent = (
+        payload.service_state ?? "unknown"
+      ).toUpperCase();
+      serviceState.dataset.state = serviceStateClass(
+        payload.service_state
+      );
+
+      const kabuReadiness = document.getElementById(
+        "kabu-readiness"
+      );
+      kabuReadiness.textContent = (
+        payload.kabu_station_readiness ?? "unknown"
+      ).toUpperCase();
+      kabuReadiness.dataset.state = serviceStateClass(
+        payload.kabu_station_readiness
+      );
+
+      const grid = document.getElementById(
+        "service-components"
+      );
+      grid.innerHTML = "";
+
+      if (payload.components.length === 0) {
+        grid.innerHTML = `
+          <article class="service-empty">
+            ${
+              payload.message
+              ?? "Service Manager has not reported components yet."
+            }
+          </article>
+        `;
+        return;
+      }
+
+      for (const component of payload.components) {
+        const card = document.createElement("article");
+        card.className = "service-component-card";
+        card.dataset.state = serviceStateClass(
+          component.state
+        );
+        card.innerHTML = `
+          <div class="service-component-heading">
+            <div class="service-indicator"></div>
+            <div>
+              <h3>${component.name}</h3>
+              <span>${component.state}</span>
+            </div>
+          </div>
+          <dl>
+            <div><dt>Enabled</dt><dd>${component.enabled}</dd></div>
+            <div><dt>PID</dt><dd>${component.process_id ?? "—"}</dd></div>
+            <div><dt>Restarts</dt><dd>${component.restart_count}</dd></div>
+            <div><dt>Last Exit</dt><dd>${component.last_exit_code ?? "—"}</dd></div>
+          </dl>
+          ${
+            component.message
+              ? `<p>${component.message}</p>`
+              : ""
+          }
+        `;
+        grid.appendChild(card);
+      }
+    }
 
     function valueOrDash(value, formatter = String) {
       return value === null || value === undefined
@@ -390,6 +555,160 @@
       }
     }
 
+
+
+    function renderBreakdownList(
+      elementId,
+      rows
+    ) {
+      const element = document.getElementById(
+        elementId
+      );
+      element.innerHTML = "";
+
+      if (rows.length === 0) {
+        element.innerHTML = `
+          <p class="breakdown-empty">No data yet.</p>
+        `;
+        return;
+      }
+
+      for (const row of rows) {
+        const item = document.createElement("div");
+        item.className = "breakdown-row";
+        item.innerHTML = `
+          <div>
+            <strong>${row.label}</strong>
+            <small>${row.trade_count} trades</small>
+          </div>
+          <div>
+            <b>${yen.format(row.net_profit_loss)}</b>
+            <small>${
+              row.win_rate === null
+                ? "—"
+                : percent.format(row.win_rate)
+            } win</small>
+          </div>
+        `;
+        element.appendChild(item);
+      }
+    }
+
+    function renderBreakdown(payload) {
+      renderBreakdownList(
+        "breakdown-weekday",
+        payload.weekday
+      );
+      renderBreakdownList(
+        "breakdown-entry-hour",
+        payload.entry_hour
+      );
+      renderBreakdownList(
+        "breakdown-symbol",
+        payload.symbol
+      );
+      renderBreakdownList(
+        "breakdown-exit-reason",
+        payload.exit_reason
+      );
+    }
+
+    function renderPerformance(payload) {
+      const period = document.getElementById(
+        "performance-period"
+      );
+      const ranking = document.getElementById(
+        "performance-ranking"
+      );
+
+      period.textContent = (
+        payload.period_start || payload.period_end
+          ? `${
+              payload.period_start ?? "—"
+            } → ${
+              payload.period_end ?? "—"
+            }`
+          : "All completed trades"
+      );
+      ranking.innerHTML = "";
+
+      if (payload.rankings.length === 0) {
+        ranking.innerHTML = `
+          <article class="performance-empty">
+            Trade Journalに完了トレードがまだありません。
+          </article>
+        `;
+        return;
+      }
+
+      payload.rankings.forEach(
+        (strategy, index) => {
+          const card = document.createElement("article");
+          card.className = "performance-card";
+          card.innerHTML = `
+            <div class="performance-rank">
+              <span>#${index + 1}</span>
+              <div>
+                <h3>${strategy.strategy_name}</h3>
+                <small>${strategy.trade_count} completed trades</small>
+              </div>
+              <strong>${strategy.score.toFixed(1)}</strong>
+            </div>
+            <div class="performance-score-bar">
+              <span style="width:${strategy.score}%"></span>
+            </div>
+            <dl class="performance-metrics">
+              <div>
+                <dt>Net P/L</dt>
+                <dd>${yen.format(strategy.net_profit_loss)}</dd>
+              </div>
+              <div>
+                <dt>Win Rate</dt>
+                <dd>${
+                  strategy.win_rate === null
+                    ? "—"
+                    : percent.format(strategy.win_rate)
+                }</dd>
+              </div>
+              <div>
+                <dt>Profit Factor</dt>
+                <dd>${
+                  strategy.profit_factor === null
+                    ? "—"
+                    : (
+                      Number.isFinite(strategy.profit_factor)
+                        ? strategy.profit_factor.toFixed(2)
+                        : "∞"
+                    )
+                }</dd>
+              </div>
+              <div>
+                <dt>Expectancy</dt>
+                <dd>${
+                  strategy.expectancy === null
+                    ? "—"
+                    : yen.format(strategy.expectancy)
+                }</dd>
+              </div>
+              <div>
+                <dt>Average Hold</dt>
+                <dd>${
+                  strategy.average_holding_minutes === null
+                    ? "—"
+                    : `${strategy.average_holding_minutes.toFixed(1)} min`
+                }</dd>
+              </div>
+              <div>
+                <dt>Max Drawdown</dt>
+                <dd>${yen.format(strategy.maximum_drawdown)}</dd>
+              </div>
+            </dl>
+          `;
+          ranking.appendChild(card);
+        }
+      );
+    }
+
     function renderRecentTrades(trades) {
       const body = document.getElementById(
         "recent-trades-body"
@@ -429,15 +748,24 @@
     async function refreshDashboard() {
       const [
         summaryResponse,
-        strategyResponse
+        strategyResponse,
+        performanceResponse,
+        breakdownResponse,
+        serviceStatusResponse
       ] = await Promise.all([
         fetch("/api/dashboard/summary"),
-        fetch("/api/dashboard/strategies")
+        fetch("/api/dashboard/strategies"),
+        fetch("/api/dashboard/performance"),
+        fetch("/api/dashboard/performance-breakdown"),
+        fetch("/api/dashboard/service-status")
       ]);
 
       if (
         !summaryResponse.ok
         || !strategyResponse.ok
+        || !performanceResponse.ok
+        || !breakdownResponse.ok
+        || !serviceStatusResponse.ok
       ) {
         throw new Error(
           "Dashboard API request failed."
@@ -447,6 +775,15 @@
       const data = await summaryResponse.json();
       const strategyData = (
         await strategyResponse.json()
+      );
+      const performanceData = (
+        await performanceResponse.json()
+      );
+      const breakdownData = (
+        await breakdownResponse.json()
+      );
+      const serviceStatusData = (
+        await serviceStatusResponse.json()
       );
       const snapshot = data.snapshot;
       const daily = data.daily_history;
@@ -517,6 +854,9 @@
       statusElement.textContent = status.toUpperCase();
       statusElement.dataset.status = status;
 
+      renderServiceStatus(serviceStatusData);
+      renderPerformance(performanceData);
+      renderBreakdown(breakdownData);
       renderStrategies(strategyData);
       renderRecentTrades(
         strategyData.recent_trades

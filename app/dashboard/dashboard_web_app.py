@@ -10,8 +10,17 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from app.dashboard.katana_service_status_reader import (
+    KatanaServiceStatusReader,
+)
 from app.dashboard.dashboard_strategy_service import (
     DashboardStrategyService,
+)
+from app.analytics.performance_breakdown_service import (
+    PerformanceBreakdownAnalyzer,
+)
+from app.analytics.strategy_performance_service import (
+    StrategyPerformanceAnalyzer,
 )
 from app.dashboard.dashboard_web_service import (
     DashboardWebService,
@@ -34,6 +43,9 @@ def create_dashboard_app(
     service: DashboardWebService,
     recovery_service: RecoverySummaryProvider | None = None,
     strategy_service: DashboardStrategyService | None = None,
+    performance_service: StrategyPerformanceAnalyzer | None = None,
+    breakdown_service: PerformanceBreakdownAnalyzer | None = None,
+    service_status_reader: KatanaServiceStatusReader | None = None,
 ) -> FastAPI:
     """Read-only Dashboard用FastAPI Appを作成する。"""
 
@@ -127,6 +139,47 @@ def create_dashboard_app(
             else RecoverySummary()
         )
         return summary.to_dict()
+
+    @app.get("/api/dashboard/service-status")
+    def dashboard_service_status() -> dict[str, object]:
+        if service_status_reader is None:
+            return {
+                "available": False,
+                "generated_at": None,
+                "service_state": "not_configured",
+                "kabu_station_readiness": "not_checked",
+                "components": [],
+                "message": (
+                    "Service status reader is not configured."
+                ),
+            }
+
+        return service_status_reader.read()
+
+    @app.get("/api/dashboard/performance-breakdown")
+    def dashboard_performance_breakdown() -> dict[str, object]:
+        if breakdown_service is None:
+            return {
+                "generated_at": None,
+                "weekday": [],
+                "entry_hour": [],
+                "symbol": [],
+                "exit_reason": [],
+            }
+
+        return breakdown_service.analyze().to_dict()
+
+    @app.get("/api/dashboard/performance")
+    def dashboard_performance() -> dict[str, object]:
+        if performance_service is None:
+            return {
+                "generated_at": None,
+                "period_start": None,
+                "period_end": None,
+                "rankings": [],
+            }
+
+        return performance_service.analyze().to_dict()
 
     @app.get("/api/dashboard/strategies")
     def dashboard_strategies() -> dict[str, object]:
