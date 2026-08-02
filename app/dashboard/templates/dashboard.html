@@ -193,6 +193,55 @@
     </section>
 
 
+
+    <section class="panel dynamic-watchlist-panel">
+      <div class="panel-heading">
+        <div>
+          <h2>Dynamic Watchlist</h2>
+          <span class="muted">
+            Ranked candidates for ¥1,000,000 capital
+          </span>
+        </div>
+        <span
+          id="desktop-dynamic-status"
+          class="status-pill"
+        >
+          UNKNOWN
+        </span>
+      </div>
+
+      <div class="morning-summary-grid">
+        <article>
+          <span>Selected</span>
+          <strong id="desktop-dynamic-selected">0</strong>
+        </article>
+        <article>
+          <span>Eligible</span>
+          <strong id="desktop-dynamic-eligible">0</strong>
+        </article>
+        <article>
+          <span>Evaluated</span>
+          <strong id="desktop-dynamic-evaluated">0</strong>
+        </article>
+        <article>
+          <span>Applied</span>
+          <strong id="desktop-dynamic-applied">NO</strong>
+        </article>
+      </div>
+
+      <div
+        id="desktop-dynamic-candidates"
+        class="dynamic-watchlist-table"
+      ></div>
+
+      <p
+        id="desktop-dynamic-message"
+        class="muted"
+      >
+        Dynamic Watchlist has not reported yet.
+      </p>
+    </section>
+
     <section class="panel morning-preflight-panel">
       <div class="panel-heading">
         <div>
@@ -485,6 +534,78 @@
       }
     }
 
+
+
+    function renderDesktopDynamicWatchlist(payload) {
+      document.getElementById(
+        "desktop-dynamic-status"
+      ).textContent = (
+        payload.schedule_state ?? "unknown"
+      ).toUpperCase();
+      document.getElementById(
+        "desktop-dynamic-selected"
+      ).textContent = payload.selected_count ?? 0;
+      document.getElementById(
+        "desktop-dynamic-eligible"
+      ).textContent = payload.eligible_count ?? 0;
+      document.getElementById(
+        "desktop-dynamic-evaluated"
+      ).textContent = payload.evaluated_count ?? 0;
+      document.getElementById(
+        "desktop-dynamic-applied"
+      ).textContent = payload.applied ? "YES" : "NO";
+      document.getElementById(
+        "desktop-dynamic-message"
+      ).textContent = payload.message ?? "—";
+
+      const container = document.getElementById(
+        "desktop-dynamic-candidates"
+      );
+      container.innerHTML = "";
+
+      const candidates = payload.candidates ?? [];
+
+      if (candidates.length === 0) {
+        container.innerHTML = `
+          <div class="empty-state">
+            No Dynamic Watchlist candidates.
+          </div>
+        `;
+        return;
+      }
+
+      const header = document.createElement("div");
+      header.className = "dynamic-watchlist-row header";
+      header.innerHTML = `
+        <span>Rank</span>
+        <span>Code</span>
+        <span>Tier</span>
+        <span>Strategy</span>
+        <span>Score</span>
+        <span>100 shares</span>
+        <span>ORB</span>
+        <span>Pullback</span>
+        <span>Breakout</span>
+      `;
+      container.appendChild(header);
+
+      candidates.forEach((candidate, index) => {
+        const row = document.createElement("div");
+        row.className = "dynamic-watchlist-row";
+        row.innerHTML = `
+          <span>#${index + 1}</span>
+          <strong>${candidate.code ?? "—"}</strong>
+          <b>${candidate.rating_tier ?? "C"}</b>
+          <span>${candidate.preferred_strategy ?? "unknown"}</span>
+          <strong>${Number(candidate.total_score ?? 0).toFixed(2)}</strong>
+          <span>¥${Number(candidate.purchase_amount ?? 0).toLocaleString("ja-JP")}</span>
+          <span>${Number(candidate.orb_score ?? 0).toFixed(1)}</span>
+          <span>${Number(candidate.pullback_score ?? 0).toFixed(1)}</span>
+          <span>${Number(candidate.high_breakout_score ?? 0).toFixed(1)}</span>
+        `;
+        container.appendChild(row);
+      });
+    }
 
     function renderDesktopMorningPreflight(payload) {
       document.getElementById(
@@ -1293,7 +1414,8 @@
         readinessResponse,
         scheduleResponse,
         dailyReportResponse,
-        morningPreflightResponse
+        morningPreflightResponse,
+        dynamicWatchlistResponse
       ] = await Promise.all([
         fetch("/api/dashboard/summary"),
         fetch("/api/dashboard/strategies"),
@@ -1303,7 +1425,8 @@
         fetch("/api/dashboard/operational-readiness"),
         fetch("/api/dashboard/paper-trading-schedule"),
         fetch("/api/dashboard/daily-report"),
-        fetch("/api/dashboard/morning-preflight")
+        fetch("/api/dashboard/morning-preflight"),
+        fetch("/api/dashboard/dynamic-watchlist")
       ]);
 
       if (
@@ -1316,6 +1439,7 @@
         || !scheduleResponse.ok
         || !dailyReportResponse.ok
         || !morningPreflightResponse.ok
+        || !dynamicWatchlistResponse.ok
       ) {
         throw new Error(
           "Dashboard API request failed."
@@ -1346,6 +1470,9 @@
       );
       const morningPreflightData = (
         await morningPreflightResponse.json()
+      );
+      const dynamicWatchlistData = (
+        await dynamicWatchlistResponse.json()
       );
       const snapshot = data.snapshot;
       const daily = data.daily_history;
@@ -1416,6 +1543,9 @@
       statusElement.textContent = status.toUpperCase();
       statusElement.dataset.status = status;
 
+      renderDesktopDynamicWatchlist(
+        dynamicWatchlistData
+      );
       renderDesktopMorningPreflight(
         morningPreflightData
       );

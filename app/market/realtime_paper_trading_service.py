@@ -21,8 +21,14 @@ from app.backtest.queue_execution_service import (
     BacktestQueueExecutionService,
 )
 from app.market.models import StockPrice
+from app.dynamic_watchlist.strategy_routing_models import (
+    SymbolStrategyRoute,
+)
 from app.market.realtime_signal_engine import (
     RealtimeSignalEngine,
+)
+from app.market.symbol_strategy_router import (
+    StrategyRouteDecision,
 )
 from app.market.realtime_signal_models import (
     RealtimeSignalDecision,
@@ -401,6 +407,16 @@ class RealtimePaperTradingService:
 
                 for signal in single_signal_result.signals:
                     if self.trace_recorder is not None:
+                        route_decision, route = (
+                            self._resolve_trace_route(
+                                signal.code
+                            )
+                        )
+                        self.trace_recorder.strategy_route_resolved(
+                            signal,
+                            decision=route_decision,
+                            route=route,
+                        )
                         self.trace_recorder.signal_generated(
                             signal,
                             float(price.close),
@@ -542,6 +558,51 @@ class RealtimePaperTradingService:
                 risk_execution_results=(),
                 error_message=str(error),
             )
+
+
+    def _resolve_trace_route(
+        self,
+        code: str,
+    ) -> tuple[
+        StrategyRouteDecision,
+        SymbolStrategyRoute | None,
+    ]:
+        """Signal Engineが実際に適用したルート情報を返す。"""
+
+        decision = self.signal_engine.route_decision(code)
+
+        if decision is None:
+            strategy_names = (
+                self.signal_engine.active_strategy_names(code)
+            )
+            decision = StrategyRouteDecision(
+                code=code.strip(),
+                strategy_names=strategy_names,
+                routed=False,
+                reason=(
+                    "Route decision was unavailable at trace time; "
+                    "active strategies were recorded as fallback."
+                ),
+            )
+
+        route = None
+        router = getattr(
+            self.signal_engine,
+            "symbol_strategy_router",
+            None,
+        )
+
+        if router is not None:
+            snapshot = getattr(
+                router,
+                "snapshot",
+                None,
+            )
+
+            if snapshot is not None:
+                route = snapshot.route_for(code)
+
+        return decision, route
 
     def _execute_queued_orders(
         self,

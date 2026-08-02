@@ -33,7 +33,10 @@ class AutonomousOperationValidator:
         service_status_path: Path,
         paper_schedule_status_path: Path,
         daily_report_schedule_status_path: Path,
-        watchlist_path: Path,
+        dynamic_watchlist_schedule_status_path: Path = Path(
+            "reports/service/dynamic_watchlist_schedule.json"
+        ),
+        watchlist_path: Path = Path("watchlist.txt"),
         database_path: Path,
         now_provider: Callable[[], datetime] | None = None,
         readiness_runner: Callable[..., subprocess.CompletedProcess] = (
@@ -48,6 +51,9 @@ class AutonomousOperationValidator:
         )
         self.daily_report_schedule_status_path = Path(
             daily_report_schedule_status_path
+        )
+        self.dynamic_watchlist_schedule_status_path = Path(
+            dynamic_watchlist_schedule_status_path
         )
         self.watchlist_path = Path(watchlist_path)
         self.database_path = Path(database_path)
@@ -68,6 +74,7 @@ class AutonomousOperationValidator:
             self._check_component_topology(),
             self._check_paper_schedule(),
             self._check_daily_report_schedule(),
+            self._check_dynamic_watchlist_schedule(),
             self._check_watchlist(),
             self._check_database(),
             self._check_production_readiness(),
@@ -383,6 +390,74 @@ class AutonomousOperationValidator:
                 "message": payload.get(
                     "message"
                 ),
+            },
+        )
+
+
+    def _check_dynamic_watchlist_schedule(
+        self,
+    ) -> AutonomousOperationCheck:
+        payload = self._read_json(
+            self.dynamic_watchlist_schedule_status_path
+        )
+
+        if payload is None:
+            return AutonomousOperationCheck(
+                key="dynamic_watchlist_schedule",
+                label="Dynamic Watchlist",
+                level=AutonomousCheckLevel.FAIL,
+                message=(
+                    "Dynamic Watchlist schedule status "
+                    "is unavailable."
+                ),
+                details={
+                    "path": str(
+                        self.dynamic_watchlist_schedule_status_path
+                    )
+                },
+            )
+
+        enabled = bool(payload.get("enabled", False))
+        state = str(payload.get("state", "unknown"))
+        business_day = bool(
+            payload.get("business_day", False)
+        )
+        selected_count = payload.get("selected_count")
+        applied = payload.get("applied")
+
+        if not business_day and state == "closed_day":
+            level = AutonomousCheckLevel.PASS
+        elif (
+            enabled
+            and state == "completed"
+            and applied is True
+            and isinstance(selected_count, int)
+            and selected_count >= 5
+        ):
+            level = AutonomousCheckLevel.PASS
+        elif state in {"waiting", "running", "retry_wait"}:
+            level = AutonomousCheckLevel.WARNING
+        else:
+            level = AutonomousCheckLevel.FAIL
+
+        return AutonomousOperationCheck(
+            key="dynamic_watchlist_schedule",
+            label="Dynamic Watchlist",
+            level=level,
+            message=(
+                "Dynamic Watchlist "
+                f"state={state} selected_count={selected_count}"
+            ),
+            details={
+                "enabled": enabled,
+                "state": state,
+                "business_day": business_day,
+                "selected_count": selected_count,
+                "applied": applied,
+                "last_exit_code": payload.get(
+                    "last_exit_code"
+                ),
+                "message": payload.get("message"),
             },
         )
 

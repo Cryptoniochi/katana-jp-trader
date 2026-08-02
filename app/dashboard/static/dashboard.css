@@ -1172,3 +1172,96 @@ pre {
     grid-template-columns: 1fr;
   }
 }
+
+
+.dynamic-watchlist-panel {
+  border-color: #2d6d79;
+}
+
+.dynamic-watchlist-table {
+  display: grid;
+  gap: 6px;
+  margin: 18px 0;
+  overflow-x: auto;
+}
+
+.dynamic-watchlist-row {
+  display: grid;
+  grid-template-columns:
+    60px 80px 60px 120px 80px 120px 70px 80px 80px;
+  gap: 10px;
+  align-items: center;
+  min-width: 780px;
+  padding: 10px 12px;
+  border: 1px solid #1d3743;
+  border-radius: 10px;
+  background: #0a1a23;
+}
+
+.dynamic-watchlist-row.header {
+  color: #8da2ad;
+  font-size: 12px;
+  background: #0d222d;
+}
+
+.dynamic-watchlist-card {
+  padding: 16px;
+  border: 1px solid #1d3743;
+  border-radius: 14px;
+  background: #0a1a23;
+}
+
+.dynamic-watchlist-card.tier-aplus {
+  border-color: #2b8d7c;
+}
+
+.dynamic-watchlist-card.tier-a {
+  border-color: #3c7f98;
+}
+
+.dynamic-watchlist-card.tier-b {
+  border-color: #8a7a38;
+}
+
+.dynamic-watchlist-card.tier-c {
+  border-color: #5a6570;
+}
+
+.dynamic-watchlist-card-header,
+.dynamic-watchlist-card-score {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.dynamic-watchlist-card-header > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dynamic-rank {
+  color: #8da2ad;
+  font-size: 13px;
+}
+
+.dynamic-watchlist-card-score {
+  margin: 14px 0;
+}
+
+.dynamic-watchlist-card-score strong {
+  font-size: 28px;
+}
+
+.dynamic-watchlist-card-score span {
+  color: #67d4c4;
+  font-weight: 700;
+}
+
+.dynamic-watchlist-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  color: #8da2ad;
+  font-size: 13px;
+}

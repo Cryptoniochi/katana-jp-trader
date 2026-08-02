@@ -12,6 +12,9 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from app.dashboard.dynamic_watchlist_status_reader import (
+    DynamicWatchlistStatusReader,
+)
 from app.dashboard.morning_preflight_status_reader import (
     MorningPreflightStatusReader,
 )
@@ -59,6 +62,7 @@ def create_dashboard_app(
     service_status_reader: KatanaServiceStatusReader | None = None,
     readiness_service: OperationalReadinessService | None = None,
     paper_schedule_reader: PaperTradingScheduleStatusReader | None = None,
+    dynamic_watchlist_reader: DynamicWatchlistStatusReader | None = None,
     morning_preflight_reader: MorningPreflightStatusReader | None = None,
     daily_report_reader: DailyReportReader | None = None,
 ) -> FastAPI:
@@ -154,6 +158,28 @@ def create_dashboard_app(
             else RecoverySummary()
         )
         return summary.to_dict()
+
+    @app.get("/api/dashboard/dynamic-watchlist")
+    def dashboard_dynamic_watchlist() -> dict[str, object]:
+        if dynamic_watchlist_reader is None:
+            return {
+                "available": False,
+                "generated_at": None,
+                "schedule_state": "not_configured",
+                "applied": False,
+                "selected_count": 0,
+                "evaluated_count": 0,
+                "eligible_count": 0,
+                "capital_limit": None,
+                "purchase_budget": None,
+                "message": (
+                    "Dynamic Watchlist reader "
+                    "is not configured."
+                ),
+                "candidates": [],
+            }
+
+        return dynamic_watchlist_reader.read()
 
     @app.get("/api/dashboard/morning-preflight")
     def dashboard_morning_preflight() -> dict[str, object]:

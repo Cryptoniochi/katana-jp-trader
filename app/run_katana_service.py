@@ -23,6 +23,7 @@ from app.runtime.katana_service_manager import (
     build_paper_trading_command,
     build_scheduled_paper_trading_command,
     build_daily_report_scheduler_command,
+    build_dynamic_watchlist_scheduler_command,
     build_morning_preflight_scheduler_command,
 )
 from app.runtime.katana_service_models import (
@@ -71,6 +72,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--tailscale-wait-seconds",
         type=float,
         default=5.0,
+    )
+    parser.add_argument(
+        "--enable-dynamic-watchlist-schedule",
+        action="store_true",
+        help=(
+            "営業日8:20のDynamic Watchlist自動更新を"
+            "有効化します。"
+        ),
     )
     parser.add_argument(
         "--enable-morning-preflight-schedule",
@@ -179,6 +188,20 @@ def run(
             restart_on_failure=True,
             restart_delay_seconds=10.0,
             maximum_restarts=100,
+        ),
+        ManagedProcessDefinition(
+            name=ManagedComponentName.DYNAMIC_WATCHLIST_SCHEDULER,
+            command=build_dynamic_watchlist_scheduler_command(
+                database_path=parsed.database_path,
+                watchlist_path=parsed.watchlist_path,
+                enabled=(
+                    parsed.enable_dynamic_watchlist_schedule
+                ),
+            ),
+            enabled=True,
+            restart_on_failure=True,
+            restart_delay_seconds=30.0,
+            maximum_restarts=20,
         ),
         ManagedProcessDefinition(
             name=ManagedComponentName.MORNING_PREFLIGHT_SCHEDULER,

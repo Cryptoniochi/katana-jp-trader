@@ -23,6 +23,7 @@ echo Project KATANA Service task started at %DATE% %TIME%>> "logs\service\katana
 ".venv\Scripts\python.exe" -m app.run_katana_service ^
   --database-path data\katana.db ^
   --dashboard-port 8000 ^
+  --enable-dynamic-watchlist-schedule ^
   --enable-morning-preflight-schedule ^
   --enable-daily-report-schedule ^
   --enable-paper-trading-schedule ^

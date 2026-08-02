@@ -15,6 +15,7 @@ class ManagedComponentName(StrEnum):
     PAPER_TRADING = "paper_trading"
     PAPER_TRADING_SCHEDULER = "paper_trading_scheduler"
     DAILY_REPORT_SCHEDULER = "daily_report_scheduler"
+    DYNAMIC_WATCHLIST_SCHEDULER = "dynamic_watchlist_scheduler"
     MORNING_PREFLIGHT_SCHEDULER = "morning_preflight_scheduler"
 
 

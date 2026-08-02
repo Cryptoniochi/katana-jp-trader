@@ -40,6 +40,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--dynamic-watchlist-schedule-status-path",
+        type=Path,
+        default=Path(
+            "reports/service/dynamic_watchlist_schedule.json"
+        ),
+    )
+    parser.add_argument(
         "--watchlist-path",
         type=Path,
         default=Path("watchlist.txt"),
@@ -75,6 +82,9 @@ def run(
         ),
         daily_report_schedule_status_path=(
             parsed.daily_report_schedule_status_path
+        ),
+        dynamic_watchlist_schedule_status_path=(
+            parsed.dynamic_watchlist_schedule_status_path
         ),
         watchlist_path=parsed.watchlist_path,
         database_path=parsed.database_path,

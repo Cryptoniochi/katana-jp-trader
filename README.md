@@ -3,7 +3,7 @@
 AI-assisted Japanese equity research, backtesting, paper-trading, risk-control,
 operations, monitoring, and multi-strategy development platform.
 
-> **Current status:** Sprint104-5 / Version 1.0 RC operational baseline.
+> **Current status:** Sprint110-3 / Version 1.0 RC+ full-market screening baseline.
 > The production paper-trading runtime uses the kabuステーションAPI for realtime market data.
 > J-Quants is no longer required by the active runtime.
 > Live brokerage execution is not implemented.
@@ -20,7 +20,50 @@ operations, monitoring, and multi-strategy development platform.
 - Intraday-to-daily bar aggregation
 - Tokyo-market calendar and market-session gating
 - High Breakout daily-candidate screening and persistence
-- Production watchlist limited to 50 symbols
+- Full-market universe management for approximately 4,000 listed symbols
+- Universe primary screening from approximately 4,000 symbols to a maximum of 300 candidates
+- Dynamic Watchlist secondary ranking from a maximum of 300 candidates to a maximum of 50 symbols
+- Production realtime watchlist limited to 50 symbols
+
+### Full-market universe and Dynamic Watchlist
+
+```text
+Approximately 4,000 listed symbols
+    |
+    v
+Universe Primary Screening
+    |
+    +-- common-stock and market filters
+    +-- 100-share purchase amount <= 950,000 JPY
+    +-- price, volume, turnover, and data-age filters
+    |
+    v
+Maximum 300 primary candidates
+    |
+    v
+Dynamic Watchlist Feature Engine
+    |
+    +-- liquidity
+    +-- relative volume
+    +-- ATR / volatility
+    +-- gap and VWAP distance
+    +-- ORB / Pullback / High Breakout fitness
+    +-- Strategy Learning feedback
+    |
+    v
+Maximum 50 realtime symbols
+```
+
+Current universe files and tables:
+
+```text
+listed_symbols
+market_bars (1440-minute daily bars)
+data/universe_candidates.txt
+reports/universe/primary_screening_latest.json
+reports/watchlist/latest.json
+watchlist.txt
+```
 
 ### Trading strategies
 
@@ -33,13 +76,17 @@ High Breakout
 The Strategy Registry resolves same-bar duplication and contradictory signals
 before forwarding them to the trading and risk layers.
 
+Dynamic Watchlist assigns a preferred strategy per symbol. The realtime signal
+engine applies the routed strategy when available and safely falls back to the
+globally enabled strategy set when no valid route exists.
+
 ### Paper trading and risk
 
 - Recoverable Paper Broker
 - Production Paper Trading runtime
 - Pre-trade Risk Gate
 - Position-count, position-value, exposure, cash, daily-loss, and entry limits
-- Signal → Risk → Broker JSONL trace
+- Dynamic Watchlist route → Signal → Risk → Broker JSONL trace
 - Runtime health, heartbeat, recovery, and safe-stop handling
 - Discord and LINE operational notifications
 - Production Readiness check
@@ -89,6 +136,31 @@ paper_trading                disabled
 The direct `paper_trading` component remains disabled to prevent duplicate
 runtime startup.
 
+### Strategy learning
+
+Completed trades in `trade_journal` are aggregated by symbol and strategy into:
+
+```text
+strategy_learning_summary
+```
+
+Learning metrics include:
+
+```text
+Trade count
+Win rate
+Profit Factor
+Expectancy
+Average return
+Average holding time
+Sample confidence
+Historical score
+```
+
+Historical feedback is applied only after the configured minimum trade count is
+reached. With insufficient history, the Dynamic Watchlist continues using only
+technical scores.
+
 ### Dashboard and reporting
 
 - Desktop and mobile FastAPI Dashboard
@@ -98,6 +170,7 @@ runtime startup.
 - Morning Check panel
 - Operational Readiness panel
 - Daily Report panel
+- Dynamic Watchlist ranking, Tier, preferred strategy, and 100-share amount
 - Strategy and symbol ranking
 - Error and recovery counts
 
@@ -165,7 +238,7 @@ reports/daily/notifications/YYYY-MM-DD.sent.json
 
 ## Current milestone
 
-### Completed through Sprint104-5
+### Completed through Sprint110-3
 
 - Sprint95: Desktop and Mobile Dashboard baseline
 - Sprint96-99: operations, recovery, and service-readiness foundations
@@ -179,17 +252,40 @@ reports/daily/notifications/YYYY-MM-DD.sent.json
   - Scheduler Guard
   - Automated Morning Pre-Flight Scheduler
   - Morning Check Dashboard
+- Sprint105-106:
+  - Dynamic Watchlist service and resident scheduler
+  - 1,000,000 JPY capital constraint
+  - KATANA Service integration
+- Sprint107:
+  - Dynamic Watchlist Feature Engine
+  - A+ / A / B / C rating Tier
+  - ORB / Pullback / High Breakout fitness scoring
+  - Desktop and Mobile Dashboard integration
+- Sprint108:
+  - Symbol Strategy Routing
+  - Realtime Signal Engine integration
+  - Strategy-routing audit trace
+- Sprint109:
+  - Strategy Learning Core
+  - Historical Score and sample-confidence control
+  - Learning feedback into Dynamic Watchlist and Strategy Routing
+- Sprint110:
+  - Listed-symbol universe management
+  - Full-market daily-bar import
+  - Universe Primary Screener
+  - Approximately 4,000 → maximum 300 → maximum 50 pipeline
+  - Full-market integration tests
 
 Recent focused test results:
 
 ```text
-Sprint102-5A: 5 passed
-Sprint102-6: 19 passed
-Sprint103-1: 10 passed
-Sprint104-1: 3 passed
-Sprint104-2: 7 passed
-Sprint104-3: 10 passed
-Sprint104-4: 12 passed
+Sprint107-1: 8 passed
+Sprint108-1: 4 passed
+Sprint108-2: 32 passed
+Sprint108-3: 29 passed
+Sprint109-1: 4 passed
+Sprint109-2: 10 passed
+Sprint110-3: 7 passed
 ```
 
 Focused suites may overlap and must not be added together as a unique
@@ -320,6 +416,63 @@ python -m app.run_paper_trading `
   --strategy high-breakout
 ```
 
+### Full-market universe
+
+Import the listed-symbol master:
+
+```powershell
+python -m app.run_listed_symbol_import `
+  data\listed_symbols.csv
+```
+
+Import daily bars:
+
+```powershell
+python -m app.run_universe_daily_import `
+  data\universe_daily_bars.csv
+```
+
+Run primary screening:
+
+```powershell
+python -m app.run_universe_primary_screening
+```
+
+Run the complete 4,000 → 300 → 50 pipeline:
+
+```powershell
+python -m app.run_full_market_watchlist
+```
+
+Apply the resulting final watchlist:
+
+```powershell
+python -m app.run_full_market_watchlist --apply
+```
+
+Run Dynamic Watchlist only:
+
+```powershell
+python -m app.run_dynamic_watchlist `
+  --require-candidate-universe
+```
+
+Ignore the primary-candidate file and evaluate every symbol already present in
+`market_bars`:
+
+```powershell
+python -m app.run_dynamic_watchlist `
+  --ignore-candidate-universe
+```
+
+### Strategy learning
+
+```powershell
+python -m app.run_strategy_learning
+python -m app.run_dynamic_watchlist
+python -m app.run_strategy_routing
+```
+
 ### Daily Report
 
 ```powershell
@@ -357,7 +510,7 @@ Never commit `.env` or any real secret.
 git status
 git add .
 git diff --cached --name-only
-git commit -m "Sprint104-5: complete autonomous operations dashboard"
+git commit -m "Sprint110-3: add full-market watchlist pipeline"
 git push origin main
 ```
 
@@ -382,12 +535,14 @@ archives.
 
 ## Current next steps
 
-1. Commit and push the verified Sprint104-5 baseline.
-2. Restart the PC and verify automatic KATANA Service startup.
-3. Verify the complete schedule on the next Tokyo-market business day.
-4. Run Paper Trading for multiple business days.
-5. Review strategy performance before changing capital allocation.
-6. Continue Version 1.0 release validation and recovery drills.
+1. Commit and push the verified Sprint110-3 baseline.
+2. Obtain and import an authoritative listed-symbol master.
+3. Obtain and import full-market daily bars for the required lookback period.
+4. Verify approximately 4,000 listed symbols are present in `listed_symbols`.
+5. Run the full-market pipeline and confirm approximately 4,000 → <=300 → <=50.
+6. Integrate the full-market pipeline into the morning resident schedule.
+7. Continue multi-business-day Paper Trading and Strategy Learning validation.
+8. Review routing, risk, and completed-trade traces before any capital change.
 
 ---
 

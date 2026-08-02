@@ -10,6 +10,12 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from app.dynamic_watchlist.strategy_routing_models import (
+    SymbolStrategyRoute,
+)
+from app.market.symbol_strategy_router import (
+    StrategyRouteDecision,
+)
 from app.risk.paper_trading_pretrade_risk import (
     PaperTradingRiskDecision,
 )
@@ -44,6 +50,9 @@ class PaperTradingTraceEvent:
 class PaperTradingTraceSnapshot:
     """Trace集計。"""
 
+    strategy_route_resolved_count: int
+    routed_strategy_count: int
+    fallback_strategy_count: int
     signal_generated_count: int
     risk_evaluated_count: int
     risk_allowed_count: int
@@ -69,6 +78,9 @@ class PaperTradingTraceRecorder:
             else Path(output_path).resolve()
         )
         self._lock = Lock()
+        self._strategy_route_resolved_count = 0
+        self._routed_strategy_count = 0
+        self._fallback_strategy_count = 0
         self._signal_generated_count = 0
         self._risk_evaluated_count = 0
         self._risk_allowed_count = 0
@@ -133,6 +145,64 @@ class PaperTradingTraceRecorder:
                 payload={"reason": reason},
             )
         )
+
+
+    def strategy_route_resolved(
+        self,
+        signal: TradeSignal,
+        *,
+        decision: StrategyRouteDecision,
+        route: SymbolStrategyRoute | None,
+    ) -> None:
+        """シグナルに適用された銘柄別戦略ルートを記録する。"""
+
+        self._record_signal_event(
+            event_type="strategy_route_resolved",
+            signal=signal,
+            payload={
+                "routed": decision.routed,
+                "selected_strategy_names": list(
+                    decision.strategy_names
+                ),
+                "reason": decision.reason,
+                "route_source": (
+                    "dynamic_watchlist"
+                    if decision.routed
+                    else "fallback"
+                ),
+                "rating_tier": (
+                    route.rating_tier
+                    if route is not None
+                    else None
+                ),
+                "total_score": (
+                    route.total_score
+                    if route is not None
+                    else None
+                ),
+                "strategy_score": (
+                    route.strategy_score
+                    if route is not None
+                    else None
+                ),
+                "source_generated_at": (
+                    route.source_generated_at.isoformat()
+                    if (
+                        route is not None
+                        and route.source_generated_at is not None
+                    )
+                    else None
+                ),
+            },
+        )
+
+        with self._lock:
+            self._strategy_route_resolved_count += 1
+
+            if decision.routed:
+                self._routed_strategy_count += 1
+            else:
+                self._fallback_strategy_count += 1
 
     def signal_generated(
         self,
@@ -236,6 +306,15 @@ class PaperTradingTraceRecorder:
     def snapshot(self) -> PaperTradingTraceSnapshot:
         with self._lock:
             return PaperTradingTraceSnapshot(
+                strategy_route_resolved_count=(
+                    self._strategy_route_resolved_count
+                ),
+                routed_strategy_count=(
+                    self._routed_strategy_count
+                ),
+                fallback_strategy_count=(
+                    self._fallback_strategy_count
+                ),
                 signal_generated_count=(
                     self._signal_generated_count
                 ),

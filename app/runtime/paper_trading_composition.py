@@ -7,6 +7,13 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from app.dynamic_watchlist.strategy_routing_models import (
+    StrategyRoutingSnapshot,
+)
+from app.dynamic_watchlist.strategy_routing_repository import (
+    DynamicWatchlistStrategyRoutingError,
+    DynamicWatchlistStrategyRoutingRepository,
+)
 from app.application.trading_loop_component import (
     TradingLoopComponent,
 )
@@ -79,6 +86,9 @@ from app.market.realtime_paper_trading_service import (
 from app.market.high_breakout_candidate_provider import (
     RepositoryHighBreakoutCandidateProvider,
 )
+from app.market.symbol_strategy_router import (
+    SymbolStrategyRouter,
+)
 from app.market.realtime_signal_engine import (
     RealtimeSignalEngine,
 )
@@ -138,6 +148,13 @@ class PaperTradingProductionSettings:
     cycle_interval_seconds: float = 30.0
     maximum_cycles: int | None = None
     enabled_strategy_names: tuple[str, ...] = ("orb",)
+    strategy_routing_enabled: bool = True
+    strategy_routing_report_path: Path = Path(
+        "reports/watchlist/latest.json"
+    )
+    strategy_routing_minimum_rating_tier: str = "C"
+    strategy_routing_minimum_total_score: float = 0.0
+    strategy_routing_fail_open: bool = True
     maximum_codes_per_poll: int = 10
     rate_limit_cooldown_seconds: float = 60.0
     market_data_mode: str = "kabu-station-realtime"
@@ -218,6 +235,23 @@ class PaperTradingProductionSettings:
             raise ValueError(
                 "未対応の戦略が指定されています。 "
                 f"strategies={','.join(unknown_strategies)}"
+            )
+
+        if self.strategy_routing_minimum_rating_tier not in {
+            "A+",
+            "A",
+            "B",
+            "C",
+        }:
+            raise ValueError(
+                "戦略ルーティング最低Tierは"
+                "A+、A、B、Cのいずれかです。"
+            )
+
+        if self.strategy_routing_minimum_total_score < 0:
+            raise ValueError(
+                "戦略ルーティング最低総合スコアは"
+                "0以上である必要があります。"
             )
 
         if self.initial_cash < 0:
@@ -331,6 +365,16 @@ class PaperTradingProductionSettings:
                 "スリッページ率は0以上である必要があります。"
             )
 
+        normalized_strategy_routing_report_path = Path(
+            self.strategy_routing_report_path
+        )
+
+        if not normalized_strategy_routing_report_path.is_absolute():
+            normalized_strategy_routing_report_path = (
+                ROOT_DIR
+                / normalized_strategy_routing_report_path
+            )
+
         normalized_risk_trace_path = Path(
             self.risk_trace_path
         )
@@ -372,6 +416,11 @@ class PaperTradingProductionSettings:
         )
         object.__setattr__(
             self,
+            "strategy_routing_report_path",
+            normalized_strategy_routing_report_path.resolve(),
+        )
+        object.__setattr__(
+            self,
             "risk_trace_path",
             normalized_risk_trace_path.resolve(),
         )
@@ -392,6 +441,9 @@ class PaperTradingProductionBundle:
     paper_broker: PaperBroker
     broker_recovery_result: PaperBrokerRecoveryResult
     portfolio_service: PortfolioService
+    strategy_routing_snapshot: (
+        StrategyRoutingSnapshot | None
+    ) = None
     kabu_station_service: (
         KabuStationRealtimeService | None
     ) = None
@@ -700,6 +752,37 @@ class PaperTradingComposition:
             )
         )
 
+        strategy_routing_snapshot = None
+        symbol_strategy_router = None
+
+        if settings.strategy_routing_enabled:
+            try:
+                strategy_routing_snapshot = (
+                    DynamicWatchlistStrategyRoutingRepository(
+                        report_path=(
+                            settings.strategy_routing_report_path
+                        ),
+                        minimum_rating_tier=(
+                            settings
+                            .strategy_routing_minimum_rating_tier
+                        ),
+                        minimum_total_score=(
+                            settings
+                            .strategy_routing_minimum_total_score
+                        ),
+                        fallback_strategy_names=(
+                            settings.enabled_strategy_names
+                        ),
+                        now_provider=resolved_now_provider,
+                    ).load()
+                )
+                symbol_strategy_router = SymbolStrategyRouter(
+                    strategy_routing_snapshot
+                )
+            except DynamicWatchlistStrategyRoutingError:
+                if not settings.strategy_routing_fail_open:
+                    raise
+
         signal_engine = RealtimeSignalEngine(
             enabled_strategy_names=(
                 settings.enabled_strategy_names
@@ -711,6 +794,7 @@ class PaperTradingComposition:
                     )
                 )
             ),
+            symbol_strategy_router=symbol_strategy_router,
         )
 
         realtime_paper_trading_service = (
@@ -813,5 +897,8 @@ class PaperTradingComposition:
                 broker_recovery_result
             ),
             portfolio_service=portfolio_service,
+            strategy_routing_snapshot=(
+                strategy_routing_snapshot
+            ),
             kabu_station_service=kabu_station_service,
         )

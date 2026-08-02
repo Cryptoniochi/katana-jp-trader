@@ -681,3 +681,36 @@ def build_morning_preflight_scheduler_command(
         command.append("--enable")
 
     return tuple(command)
+
+
+
+def build_dynamic_watchlist_scheduler_command(
+    *,
+    database_path: Path,
+    watchlist_path: Path,
+    enabled: bool,
+) -> tuple[str, ...]:
+    """Dynamic Watchlistスケジューラ起動コマンド。"""
+
+    command = [
+        sys.executable,
+        "-m",
+        "app.run_dynamic_watchlist_scheduler",
+        "--database-path",
+        str(database_path),
+        "--watchlist-path",
+        str(watchlist_path),
+        "--minimum-symbols",
+        "5",
+        "--maximum-symbols",
+        "50",
+        "--capital-limit",
+        "1000000",
+        "--purchase-budget",
+        "950000",
+    ]
+
+    if enabled:
+        command.append("--enable")
+
+    return tuple(command)

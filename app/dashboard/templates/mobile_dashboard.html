@@ -106,6 +106,57 @@
     </section>
 
 
+
+    <section>
+      <div class="mobile-section-title">
+        <h2>Dynamic Watchlist</h2>
+        <span
+          id="dynamic-watchlist-status"
+          class="status-pill"
+        >
+          UNKNOWN
+        </span>
+      </div>
+
+      <article class="mobile-detail-card">
+        <div class="mobile-card-heading">
+          <strong id="dynamic-watchlist-count">0 symbols</strong>
+          <span id="dynamic-watchlist-applied">NOT APPLIED</span>
+        </div>
+
+        <div class="mobile-detail-grid">
+          <div>
+            <span>Evaluated</span>
+            <b id="dynamic-watchlist-evaluated">0</b>
+          </div>
+          <div>
+            <span>Eligible</span>
+            <b id="dynamic-watchlist-eligible">0</b>
+          </div>
+          <div>
+            <span>Capital</span>
+            <b id="dynamic-watchlist-capital">—</b>
+          </div>
+          <div>
+            <span>Budget</span>
+            <b id="dynamic-watchlist-budget">—</b>
+          </div>
+        </div>
+
+        <p
+          id="dynamic-watchlist-message"
+          class="mobile-card-message"
+        >
+          Dynamic Watchlist has not reported yet.
+        </p>
+      </article>
+
+      <div
+        id="dynamic-watchlist-candidates"
+        class="mobile-card-list"
+      ></div>
+    </section>
+
     <section>
       <div class="mobile-section-title">
         <h2>Morning Check</h2>
@@ -370,6 +421,96 @@
       }
     }
 
+
+
+    function formatYen(value) {
+      if (value === null || value === undefined) {
+        return "—";
+      }
+
+      return `¥${Number(value).toLocaleString("ja-JP")}`;
+    }
+
+    function renderDynamicWatchlist(payload) {
+      document.getElementById(
+        "dynamic-watchlist-status"
+      ).textContent = (
+        payload.schedule_state ?? "unknown"
+      ).toUpperCase();
+      document.getElementById(
+        "dynamic-watchlist-count"
+      ).textContent = (
+        `${payload.selected_count ?? 0} symbols`
+      );
+      document.getElementById(
+        "dynamic-watchlist-applied"
+      ).textContent = (
+        payload.applied ? "APPLIED" : "NOT APPLIED"
+      );
+      document.getElementById(
+        "dynamic-watchlist-evaluated"
+      ).textContent = payload.evaluated_count ?? 0;
+      document.getElementById(
+        "dynamic-watchlist-eligible"
+      ).textContent = payload.eligible_count ?? 0;
+      document.getElementById(
+        "dynamic-watchlist-capital"
+      ).textContent = formatYen(payload.capital_limit);
+      document.getElementById(
+        "dynamic-watchlist-budget"
+      ).textContent = formatYen(payload.purchase_budget);
+      document.getElementById(
+        "dynamic-watchlist-message"
+      ).textContent = payload.message ?? "—";
+
+      const container = document.getElementById(
+        "dynamic-watchlist-candidates"
+      );
+      container.innerHTML = "";
+
+      const candidates = payload.candidates ?? [];
+
+      if (candidates.length === 0) {
+        container.innerHTML = `
+          <article class="mobile-empty-card">
+            No Dynamic Watchlist candidates.
+          </article>
+        `;
+        return;
+      }
+
+      candidates.forEach((candidate, index) => {
+        const card = document.createElement("article");
+        card.className = (
+          "dynamic-watchlist-card "
+          + `tier-${String(candidate.rating_tier ?? "C")
+            .replace("+", "plus")
+            .toLowerCase()}`
+        );
+        card.innerHTML = `
+          <div class="dynamic-watchlist-card-header">
+            <div>
+              <span class="dynamic-rank">#${index + 1}</span>
+              <strong>${candidate.code ?? "—"}</strong>
+            </div>
+            <b>${candidate.rating_tier ?? "C"}</b>
+          </div>
+          <div class="dynamic-watchlist-card-score">
+            <strong>${Number(candidate.total_score ?? 0).toFixed(2)}</strong>
+            <span>${candidate.preferred_strategy ?? "unknown"}</span>
+          </div>
+          <div class="dynamic-watchlist-card-grid">
+            <span>Price ${formatYen(candidate.latest_price)}</span>
+            <span>100 shares ${formatYen(candidate.purchase_amount)}</span>
+            <span>ORB ${Number(candidate.orb_score ?? 0).toFixed(1)}</span>
+            <span>Pullback ${Number(candidate.pullback_score ?? 0).toFixed(1)}</span>
+            <span>Breakout ${Number(candidate.high_breakout_score ?? 0).toFixed(1)}</span>
+            <span>${candidate.selection_tier ?? "fallback"}</span>
+          </div>
+        `;
+        container.appendChild(card);
+      });
+    }
 
     function renderMorningPreflight(payload) {
       const status = document.getElementById(
@@ -1042,7 +1183,8 @@
         readinessResponse,
         scheduleResponse,
         dailyReportResponse,
-        morningPreflightResponse
+        morningPreflightResponse,
+        dynamicWatchlistResponse
       ] = await Promise.all([
         fetch("/api/dashboard/summary"),
         fetch("/api/dashboard/strategies"),
@@ -1052,7 +1194,8 @@
         fetch("/api/dashboard/operational-readiness"),
         fetch("/api/dashboard/paper-trading-schedule"),
         fetch("/api/dashboard/daily-report"),
-        fetch("/api/dashboard/morning-preflight")
+        fetch("/api/dashboard/morning-preflight"),
+        fetch("/api/dashboard/dynamic-watchlist")
       ]);
 
       if (
@@ -1065,6 +1208,7 @@
         || !scheduleResponse.ok
         || !dailyReportResponse.ok
         || !morningPreflightResponse.ok
+        || !dynamicWatchlistResponse.ok
       ) {
         throw new Error(
           "Dashboard API request failed."
@@ -1089,6 +1233,9 @@
       );
       const morningPreflight = (
         await morningPreflightResponse.json()
+      );
+      const dynamicWatchlist = (
+        await dynamicWatchlistResponse.json()
       );
       const snapshot = summary.snapshot;
       const daily = summary.daily_history;
@@ -1147,6 +1294,7 @@
           : "Trading snapshot data is available."
       );
 
+      renderDynamicWatchlist(dynamicWatchlist);
       renderMorningPreflight(morningPreflight);
       renderMobileDailyReport(dailyReport);
       renderPaperTradingSchedule(schedule);

@@ -12,32 +12,41 @@ from app.backtest.historical_models import (
     HistoricalBar,
     MarketTimeframe,
 )
-from app.backtest.market_replay import MarketReplayFrame
 from app.backtest.high_breakout_strategy import (
     HighBreakoutStrategy,
     HighBreakoutStrategySettings,
 )
-from app.backtest.pullback_breakout_strategy import (
-    PullbackBreakoutSettings,
-    PullbackBreakoutStrategy,
-)
+from app.backtest.market_replay import MarketReplayFrame
 from app.backtest.orb_signal_strategy import (
     OrbSignalDiagnosticSnapshot,
     OrbSignalStrategy,
     OrbSignalStrategySettings,
+)
+from app.backtest.pullback_breakout_strategy import (
+    PullbackBreakoutSettings,
+    PullbackBreakoutStrategy,
 )
 from app.market.models import StockPrice
 from app.market.realtime_signal_models import (
     RealtimeSignalDecision,
     RealtimeSignalProcessResult,
 )
-from app.market.strategy_registry import (
-    StrategyRegistry,
+from app.market.strategy_registry import StrategyRegistry
+from app.market.symbol_strategy_router import (
+    StrategyRouteDecision,
+    SymbolStrategyRouter,
 )
 from app.trading.signal_models import TradeSignal
 
 
 JST = ZoneInfo("Asia/Tokyo")
+SUPPORTED_STRATEGY_NAMES = frozenset(
+    {
+        "orb",
+        "pullback",
+        "high-breakout",
+    }
+)
 
 
 class RealtimeStrategy(Protocol):
@@ -62,7 +71,7 @@ StrategyFactory = Callable[[str], RealtimeStrategy]
 
 
 class RealtimeSignalEngine:
-    """新しい5分足だけを順番に戦略へ適用する。"""
+    """新しい5分足だけを銘柄別戦略へ適用する。"""
 
     def __init__(
         self,
@@ -71,8 +80,9 @@ class RealtimeSignalEngine:
         strategy_registry: StrategyRegistry | None = None,
         enabled_strategy_names: tuple[str, ...] = ("orb",),
         high_breakout_candidate_provider=None,
+        symbol_strategy_router: SymbolStrategyRouter | None = None,
     ) -> None:
-        """戦略FactoryまたはStrategy Registryを設定する。"""
+        """戦略Factory、Registry、銘柄別Routerを設定する。"""
 
         if (
             strategy_factory is not None
@@ -84,9 +94,11 @@ class RealtimeSignalEngine:
             )
 
         normalized_enabled = tuple(
-            name.strip().lower()
-            for name in enabled_strategy_names
-            if name.strip()
+            dict.fromkeys(
+                name.strip().lower()
+                for name in enabled_strategy_names
+                if name.strip()
+            )
         )
 
         if not normalized_enabled:
@@ -94,20 +106,44 @@ class RealtimeSignalEngine:
                 "有効戦略を1件以上指定してください。"
             )
 
+        unknown = tuple(
+            name
+            for name in normalized_enabled
+            if name not in SUPPORTED_STRATEGY_NAMES
+        )
+
+        if unknown:
+            raise ValueError(
+                "未対応の戦略が指定されています。 "
+                f"strategies={','.join(unknown)}"
+            )
+
+        if (
+            symbol_strategy_router is not None
+            and (
+                strategy_factory is not None
+                or strategy_registry is not None
+            )
+        ):
+            raise ValueError(
+                "銘柄別戦略Routerは標準Strategy Registryと"
+                "組み合わせて使用してください。"
+            )
+
+        self.enabled_strategy_names = normalized_enabled
+        self.symbol_strategy_router = symbol_strategy_router
+        self.high_breakout_candidate_provider = (
+            high_breakout_candidate_provider
+        )
+
         if strategy_registry is not None:
-            self.strategy_factory = (
-                strategy_registry.create
-            )
+            self.strategy_factory = strategy_registry.create
             self.strategy_registry = strategy_registry
+        elif strategy_factory is not None:
+            self.strategy_factory = strategy_factory
+            self.strategy_registry = None
         else:
-            self.strategy_factory = (
-                strategy_factory
-                if strategy_factory is not None
-                else self._default_registry(
-                    normalized_enabled,
-                    high_breakout_candidate_provider,
-                ).create
-            )
+            self.strategy_factory = self._create_strategy_for_code
             self.strategy_registry = None
 
         self._strategies: dict[str, RealtimeStrategy] = {}
@@ -118,6 +154,10 @@ class RealtimeSignalEngine:
         self._last_processed_at: dict[
             str,
             datetime,
+        ] = {}
+        self._route_decisions: dict[
+            str,
+            StrategyRouteDecision,
         ] = {}
 
     def process(
@@ -217,6 +257,7 @@ class RealtimeSignalEngine:
             self._strategies.clear()
             self._bars_by_code.clear()
             self._last_processed_at.clear()
+            self._route_decisions.clear()
             return
 
         normalized_code = self._normalize_code(code)
@@ -230,6 +271,7 @@ class RealtimeSignalEngine:
 
         self._bars_by_code.pop(normalized_code, None)
         self._last_processed_at.pop(normalized_code, None)
+        self._route_decisions.pop(normalized_code, None)
 
     def diagnostic_snapshot(
         self,
@@ -291,6 +333,86 @@ class RealtimeSignalEngine:
             self._normalize_code(code)
         )
 
+    def route_decision(
+        self,
+        code: str,
+    ) -> StrategyRouteDecision | None:
+        """指定銘柄へ実際に適用した戦略ルートを返す。"""
+
+        return self._route_decisions.get(
+            self._normalize_code(code)
+        )
+
+    def active_strategy_names(
+        self,
+        code: str,
+    ) -> tuple[str, ...]:
+        """指定銘柄で有効になった戦略名を返す。"""
+
+        decision = self.route_decision(code)
+
+        if decision is not None:
+            return decision.strategy_names
+
+        return self.enabled_strategy_names
+
+    def _create_strategy_for_code(
+        self,
+        code: str,
+    ) -> RealtimeStrategy:
+        """銘柄ルートに応じたStrategy Registryを作成する。"""
+
+        decision = self._resolve_route(code)
+        self._route_decisions[code] = decision
+
+        return self._default_registry(
+            decision.strategy_names,
+            self.high_breakout_candidate_provider,
+        ).create(code)
+
+    def _resolve_route(
+        self,
+        code: str,
+    ) -> StrategyRouteDecision:
+        if self.symbol_strategy_router is None:
+            return StrategyRouteDecision(
+                code=code,
+                strategy_names=self.enabled_strategy_names,
+                routed=False,
+                reason=(
+                    "Symbol Strategy Router is not configured; "
+                    "globally enabled strategies are used."
+                ),
+            )
+
+        routed = self.symbol_strategy_router.resolve(code)
+        allowed = tuple(
+            name
+            for name in routed.strategy_names
+            if name in self.enabled_strategy_names
+        )
+
+        if routed.routed and allowed:
+            return StrategyRouteDecision(
+                code=code,
+                strategy_names=allowed,
+                routed=True,
+                reason=routed.reason,
+            )
+
+        return StrategyRouteDecision(
+            code=code,
+            strategy_names=self.enabled_strategy_names,
+            routed=False,
+            reason=(
+                routed.reason
+                + " Route was not allowed by globally enabled "
+                "strategies; global fallback is used."
+                if routed.routed
+                else routed.reason
+            ),
+        )
+
     @staticmethod
     def _default_registry(
         enabled_strategy_names: tuple[str, ...],
@@ -320,9 +442,7 @@ class RealtimeSignalEngine:
                     )
                 ),
             },
-            enabled_strategy_names=(
-                enabled_strategy_names
-            ),
+            enabled_strategy_names=enabled_strategy_names,
         )
 
     @staticmethod

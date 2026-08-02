@@ -3,6 +3,12 @@
 import json
 from datetime import datetime, timezone
 
+from app.dynamic_watchlist.strategy_routing_models import (
+    SymbolStrategyRoute,
+)
+from app.market.symbol_strategy_router import (
+    StrategyRouteDecision,
+)
 from app.risk.paper_trading_pretrade_risk import (
     PaperTradingRiskDecision,
 )
@@ -32,6 +38,22 @@ def test_trace_records_full_blocked_path(tmp_path) -> None:
     )
     signal = make_signal()
 
+    recorder.strategy_route_resolved(
+        signal,
+        decision=StrategyRouteDecision(
+            code="7203",
+            strategy_names=("pullback",),
+            routed=True,
+            reason="Dynamic Watchlist preferred strategy.",
+        ),
+        route=SymbolStrategyRoute(
+            code="7203",
+            strategy_name="pullback",
+            rating_tier="B",
+            total_score=57.4,
+            strategy_score=6.78,
+        ),
+    )
     recorder.signal_generated(signal, 2500.0)
     recorder.queue_enqueued(
         signal,
@@ -59,6 +81,9 @@ def test_trace_records_full_blocked_path(tmp_path) -> None:
     )
 
     snapshot = recorder.snapshot()
+    assert snapshot.strategy_route_resolved_count == 1
+    assert snapshot.routed_strategy_count == 1
+    assert snapshot.fallback_strategy_count == 0
     assert snapshot.signal_generated_count == 1
     assert snapshot.queue_enqueued_count == 1
     assert snapshot.risk_evaluated_count == 1
@@ -73,6 +98,7 @@ def test_trace_records_full_blocked_path(tmp_path) -> None:
         ).splitlines()
     ]
     assert [row["event_type"] for row in rows] == [
+        "strategy_route_resolved",
         "signal_generated",
         "queue_enqueued",
         "risk_evaluated",
@@ -109,3 +135,42 @@ def test_trace_records_allowed_execution() -> None:
     assert snapshot.risk_allowed_count == 1
     assert snapshot.broker_executed_count == 1
     assert snapshot.broker_skipped_count == 0
+
+
+
+def test_trace_records_fallback_route(tmp_path) -> None:
+    path = tmp_path / "trace.jsonl"
+    recorder = PaperTradingTraceRecorder(
+        output_path=path
+    )
+    signal = make_signal()
+
+    recorder.strategy_route_resolved(
+        signal,
+        decision=StrategyRouteDecision(
+            code="7203",
+            strategy_names=(
+                "orb",
+                "pullback",
+                "high-breakout",
+            ),
+            routed=False,
+            reason="No symbol-specific route.",
+        ),
+        route=None,
+    )
+
+    snapshot = recorder.snapshot()
+
+    assert snapshot.strategy_route_resolved_count == 1
+    assert snapshot.routed_strategy_count == 0
+    assert snapshot.fallback_strategy_count == 1
+
+    row = json.loads(
+        path.read_text(
+            encoding="utf-8"
+        ).splitlines()[0]
+    )
+    assert row["event_type"] == "strategy_route_resolved"
+    assert row["payload"]["route_source"] == "fallback"
+    assert row["payload"]["rating_tier"] is None

@@ -18,6 +18,10 @@ from app.backtest.order_queue_service import (
 from app.backtest.queue_execution_service import (
     BacktestQueueExecutionBatchResult,
 )
+from app.dynamic_watchlist.strategy_routing_models import (
+    StrategyRoutingSnapshot,
+    SymbolStrategyRoute,
+)
 from app.market.models import StockPrice
 from app.market.realtime_paper_trading_service import (
     RealtimePaperTradingService,
@@ -25,6 +29,9 @@ from app.market.realtime_paper_trading_service import (
 )
 from app.market.realtime_signal_engine import (
     RealtimeSignalEngine,
+)
+from app.market.symbol_strategy_router import (
+    SymbolStrategyRouter,
 )
 from app.risk.risk_aware_queue_execution_service import (
     RiskAwareQueueExecutionDecision,
@@ -590,3 +597,146 @@ def test_service_reset_diagnostics() -> None:
     snapshot = service.diagnostic_snapshot()
     assert snapshot.process_call_count == 0
     assert snapshot.input_bar_count == 0
+
+
+
+class FakeTraceRecorder:
+    """Strategy RouteとSignalの記録順を保持する。"""
+
+    def __init__(self) -> None:
+        self.events = []
+
+    def strategy_route_resolved(
+        self,
+        signal,
+        *,
+        decision,
+        route,
+    ) -> None:
+        self.events.append(
+            (
+                "strategy_route_resolved",
+                signal.code,
+                decision.strategy_names,
+                decision.routed,
+                None if route is None else route.rating_tier,
+            )
+        )
+
+    def signal_generated(
+        self,
+        signal,
+        current_price,
+    ) -> None:
+        self.events.append(
+            (
+                "signal_generated",
+                signal.code,
+                signal.strategy_name,
+            )
+        )
+
+    def queue_enqueued(
+        self,
+        signal,
+        *,
+        was_enqueued,
+    ) -> None:
+        self.events.append(
+            (
+                "queue_enqueued",
+                signal.code,
+                was_enqueued,
+            )
+        )
+
+    def risk_evaluated(
+        self,
+        signal,
+        decision,
+    ) -> None:
+        self.events.append(
+            (
+                "risk_evaluated",
+                signal.code,
+            )
+        )
+
+    def broker_result(
+        self,
+        signal,
+        *,
+        executed,
+        saved_execution_count,
+        blocked_reason=None,
+    ) -> None:
+        self.events.append(
+            (
+                "broker_result",
+                signal.code,
+                executed,
+            )
+        )
+
+
+def test_service_traces_dynamic_strategy_route_before_signal() -> None:
+    queue = FakeQueueService()
+    execution = FakeExecutionService()
+    portfolio = FakePortfolioService()
+    trace = FakeTraceRecorder()
+    routing_snapshot = StrategyRoutingSnapshot(
+        generated_at=datetime(
+            2026,
+            7,
+            17,
+            8,
+            20,
+            tzinfo=JST,
+        ),
+        source_report_path="latest.json",
+        route_count=1,
+        routes=(
+            SymbolStrategyRoute(
+                code="7203",
+                strategy_name="orb",
+                rating_tier="B",
+                total_score=57.4,
+                strategy_score=6.78,
+            ),
+        ),
+        fallback_strategy_names=(
+            "orb",
+            "pullback",
+            "high-breakout",
+        ),
+    )
+    signal_engine = RealtimeSignalEngine(
+        enabled_strategy_names=(
+            "orb",
+            "pullback",
+            "high-breakout",
+        ),
+        symbol_strategy_router=SymbolStrategyRouter(
+            routing_snapshot
+        ),
+    )
+    service = RealtimePaperTradingService(
+        signal_engine=signal_engine,
+        order_queue_service=queue,
+        queue_execution_service=execution,
+        portfolio_update_service=portfolio,
+        market_price_updater=lambda _code, _price: None,
+        trace_recorder=trace,
+    )
+
+    result = service.process(bars())
+
+    assert result.signal_count == 1
+    assert trace.events[0] == (
+        "strategy_route_resolved",
+        "7203",
+        ("orb",),
+        True,
+        "B",
+    )
+    assert trace.events[1][0] == "signal_generated"

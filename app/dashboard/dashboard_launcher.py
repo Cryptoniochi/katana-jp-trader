@@ -18,6 +18,9 @@ from app.analytics.performance_breakdown_service import (
 from app.analytics.strategy_performance_service import (
     StrategyPerformanceAnalyzer,
 )
+from app.dashboard.dynamic_watchlist_status_reader import (
+    DynamicWatchlistStatusReader,
+)
 from app.dashboard.morning_preflight_status_reader import (
     MorningPreflightStatusReader,
 )
@@ -59,6 +62,12 @@ from app.runtime.recovery_history_service import (
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 DEFAULT_DATABASE_PATH = Path("data/katana.db")
+DEFAULT_DYNAMIC_WATCHLIST_REPORT_PATH = Path(
+    "reports/watchlist/latest.json"
+)
+DEFAULT_DYNAMIC_WATCHLIST_SCHEDULE_PATH = Path(
+    "reports/service/dynamic_watchlist_schedule.json"
+)
 DEFAULT_MORNING_PREFLIGHT_STATUS_PATH = Path(
     "reports/service/morning_preflight_schedule.json"
 )
@@ -114,6 +123,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--paper-schedule-status",
         type=Path,
         default=DEFAULT_PAPER_SCHEDULE_STATUS_PATH,
+    )
+    parser.add_argument(
+        "--dynamic-watchlist-report",
+        type=Path,
+        default=DEFAULT_DYNAMIC_WATCHLIST_REPORT_PATH,
+    )
+    parser.add_argument(
+        "--dynamic-watchlist-schedule",
+        type=Path,
+        default=DEFAULT_DYNAMIC_WATCHLIST_SCHEDULE_PATH,
     )
     parser.add_argument(
         "--morning-preflight-status",
@@ -175,6 +194,12 @@ def create_launcher_app(
     paper_schedule_status_path: Path = (
         DEFAULT_PAPER_SCHEDULE_STATUS_PATH
     ),
+    dynamic_watchlist_report_path: Path = (
+        DEFAULT_DYNAMIC_WATCHLIST_REPORT_PATH
+    ),
+    dynamic_watchlist_schedule_path: Path = (
+        DEFAULT_DYNAMIC_WATCHLIST_SCHEDULE_PATH
+    ),
     morning_preflight_status_path: Path = (
         DEFAULT_MORNING_PREFLIGHT_STATUS_PATH
     ),
@@ -218,6 +243,16 @@ def create_launcher_app(
             paper_schedule_status_path
         )
     )
+    dynamic_watchlist_reader = (
+        DynamicWatchlistStatusReader(
+            latest_report_path=(
+                dynamic_watchlist_report_path
+            ),
+            schedule_status_path=(
+                dynamic_watchlist_schedule_path
+            ),
+        )
+    )
     morning_preflight_reader = (
         MorningPreflightStatusReader(
             schedule_status_path=(
@@ -251,6 +286,7 @@ def create_launcher_app(
         service_status_reader=service_status_reader,
         readiness_service=readiness_service,
         paper_schedule_reader=paper_schedule_reader,
+        dynamic_watchlist_reader=dynamic_watchlist_reader,
         morning_preflight_reader=morning_preflight_reader,
         daily_report_reader=daily_report_reader,
     )
@@ -313,6 +349,12 @@ def main(
         service_status_path=args.service_status,
         paper_schedule_status_path=(
             args.paper_schedule_status
+        ),
+        dynamic_watchlist_report_path=(
+            args.dynamic_watchlist_report
+        ),
+        dynamic_watchlist_schedule_path=(
+            args.dynamic_watchlist_schedule
         ),
         morning_preflight_status_path=(
             args.morning_preflight_status
