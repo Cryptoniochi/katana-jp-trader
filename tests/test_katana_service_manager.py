@@ -124,3 +124,118 @@ def test_manager_schedules_restart_after_failure(
         ManagedComponentState.RESTART_WAIT
     )
     assert status.components[0].last_exit_code == 1
+
+
+
+def test_readiness_change_handler_receives_transitions(
+    tmp_path: Path,
+) -> None:
+    transitions = []
+    probe_results = iter(
+        [
+            type(
+                "Result",
+                (),
+                {
+                    "state": "disconnected",
+                    "message": "not logged in",
+                },
+            )(),
+            type(
+                "Result",
+                (),
+                {
+                    "state": "connected",
+                    "message": "connected",
+                },
+            )(),
+            type(
+                "Result",
+                (),
+                {
+                    "state": "connected",
+                    "message": "connected",
+                },
+            )(),
+        ]
+    )
+    monotonic_values = iter(
+        [0.0, 61.0, 122.0]
+    )
+
+    manager = KatanaServiceManager(
+        definitions=(),
+        status_path=tmp_path / "status.json",
+        now_provider=lambda: NOW,
+        monotonic_provider=lambda: next(
+            monotonic_values
+        ),
+        readiness_probe=lambda: next(
+            probe_results
+        ),
+        readiness_interval_seconds=60.0,
+        readiness_change_handler=(
+            lambda previous, current, message: (
+                transitions.append(
+                    (
+                        previous,
+                        current,
+                        message,
+                    )
+                )
+            )
+        ),
+    )
+
+    manager.poll_once()
+    manager.poll_once()
+    manager.poll_once()
+
+    assert transitions == [
+        (
+            "not_checked",
+            "disconnected",
+            "not logged in",
+        ),
+        (
+            "disconnected",
+            "connected",
+            "connected",
+        ),
+    ]
+
+
+def test_readiness_notification_failure_does_not_stop_manager(
+    tmp_path: Path,
+) -> None:
+    manager = KatanaServiceManager(
+        definitions=(),
+        status_path=tmp_path / "status.json",
+        now_provider=lambda: NOW,
+        readiness_probe=lambda: type(
+            "Result",
+            (),
+            {
+                "state": "connected",
+                "message": "connected",
+            },
+        )(),
+        readiness_change_handler=(
+            lambda *_args: (
+                (_ for _ in ()).throw(
+                    RuntimeError("notification failed")
+                )
+            )
+        ),
+    )
+
+    manager.poll_once()
+    status = manager.create_status()
+
+    assert status.kabu_station_readiness == (
+        "connected"
+    )
+    assert any(
+        "notification failed" in event.message
+        for event in status.recent_events
+    )

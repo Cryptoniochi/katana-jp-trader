@@ -16,6 +16,9 @@ def test_paper_trading_is_opt_in() -> None:
     assert arguments.database_path == Path(
         "data/katana.db"
     )
+    assert not (
+        arguments.disable_readiness_notifications
+    )
 
 
 def test_parser_accepts_kabu_station_strategies() -> None:

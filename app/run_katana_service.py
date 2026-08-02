@@ -6,9 +6,29 @@ import argparse
 import signal
 import subprocess
 import sys
+from datetime import datetime, timezone
+from uuid import uuid4
 from pathlib import Path
 from typing import Sequence
 
+from app.notifications.notification_composition import (
+    NotificationComposition,
+)
+from app.notifications.notification_gateway import (
+    NotificationGateway,
+)
+from app.notifications.notification_gateway_models import (
+    NotificationGatewayRequest,
+)
+from app.notifications.notification_models import (
+    NotificationSeverity,
+)
+from app.notifications.notification_rule_models import (
+    NotificationRulePolicy,
+)
+from app.notifications.notification_template import (
+    NotificationTemplateName,
+)
 from app.run_dashboard_resident import (
     wait_for_tailscale_ip,
 )
@@ -29,6 +49,7 @@ from app.runtime.katana_service_manager import (
 from app.runtime.katana_service_models import (
     ManagedComponentName,
 )
+from app.settings import ROOT_DIR, Settings
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -130,13 +151,118 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--readiness-interval-seconds",
         type=float,
-        default=60.0,
+        default=15.0,
+    )
+    parser.add_argument(
+        "--disable-readiness-notifications",
+        action="store_true",
+        help=(
+            "kabuステーション接続・切断時の"
+            "LINE/Discord通知を無効化します。"
+        ),
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
     )
     return parser
+
+
+def create_readiness_notification_gateway(
+) -> NotificationGateway | None:
+    """有効なLINE/DiscordチャネルからGatewayを作成する。"""
+
+    settings = Settings.from_environment(
+        env_file=ROOT_DIR / ".env",
+    )
+    provisional = NotificationComposition.create(
+        settings=settings.notifications,
+        require_channel=False,
+    )
+
+    if not provisional.channels:
+        return None
+
+    channel_names = provisional.channel_names
+    policy = NotificationRulePolicy(
+        info_channels=channel_names,
+        warning_channels=channel_names,
+        error_channels=channel_names,
+        critical_channels=channel_names,
+        quiet_hours_suppressed_severities=frozenset(),
+        duplicate_cooldown_seconds=0,
+    )
+    bundle = NotificationComposition.create(
+        settings=settings.notifications,
+        policy=policy,
+        require_channel=True,
+    )
+    return bundle.gateway
+
+
+def build_readiness_change_handler(
+    gateway: NotificationGateway | None,
+):
+    """Readiness状態変化を外部通知へ変換する。"""
+
+    if gateway is None:
+        return None
+
+    def handle(
+        previous: str,
+        current: str,
+        message: str | None,
+    ) -> None:
+        if current == "connected":
+            title = "KATANA: kabu Station Connected"
+            severity = NotificationSeverity.INFO
+            body = (
+                "kabuステーションAPIへの接続を確認しました。\n"
+                f"previous={previous}\n"
+                f"current={current}\n"
+                f"detail={message or 'none'}"
+            )
+        else:
+            title = "KATANA: kabu Station Disconnected"
+            severity = NotificationSeverity.CRITICAL
+            body = (
+                "kabuステーションAPIへ接続できません。"
+                "Paper Tradingを開始しないでください。\n"
+                f"previous={previous}\n"
+                f"current={current}\n"
+                f"detail={message or 'none'}"
+            )
+
+        gateway.send(
+            NotificationGatewayRequest(
+                notification_id=(
+                    "katana-readiness-"
+                    f"{uuid4().hex}"
+                ),
+                template_name=(
+                    NotificationTemplateName.GENERIC
+                ),
+                created_at=datetime.now(
+                    timezone.utc
+                ),
+                source="katana-service",
+                context={
+                    "title": title,
+                    "message": body,
+                },
+                severity=severity,
+                metadata={
+                    "event_type": (
+                        "kabu_station_readiness_changed"
+                    ),
+                    "previous_state": previous,
+                    "current_state": current,
+                },
+            ),
+            continue_on_error=True,
+        )
+
+    return handle
 
 
 def run_kabu_station_readiness_check() -> int:
@@ -259,6 +385,20 @@ def run(
         ),
     ]
 
+    readiness_notification_gateway = None
+
+    if not parsed.disable_readiness_notifications:
+        try:
+            readiness_notification_gateway = (
+                create_readiness_notification_gateway()
+            )
+        except Exception as error:
+            print(
+                "Readiness通知の初期化に失敗しました。"
+                f" error={type(error).__name__}: {error}",
+                file=sys.stderr,
+            )
+
     manager = KatanaServiceManager(
         definitions=definitions,
         status_path=parsed.status_path,
@@ -270,10 +410,11 @@ def run(
         readiness_interval_seconds=(
             parsed.readiness_interval_seconds
         ),
-    )
-
-    manager.set_kabu_station_readiness(
-        "not_checked"
+        readiness_change_handler=(
+            build_readiness_change_handler(
+                readiness_notification_gateway
+            )
+        ),
     )
 
     if parsed.dry_run:

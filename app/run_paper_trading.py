@@ -93,6 +93,70 @@ RuntimeNotificationGatewayFactory = Callable[
     NotificationGateway | None,
 ]
 
+
+def load_runtime_environment(
+    environ: Mapping[str, str] | None = None,
+    *,
+    env_file: Path = ROOT_DIR / ".env",
+) -> dict[str, str]:
+    """OS環境変数と`.env`を統合した実行環境を返す。"""
+
+    resolved = dict(
+        environ if environ is not None else os.environ
+    )
+
+    if not env_file.exists():
+        return resolved
+
+    text = None
+    last_error = None
+
+    for encoding in ("utf-8-sig", "cp932", "utf-8"):
+        try:
+            text = env_file.read_text(encoding=encoding)
+            break
+        except UnicodeError as error:
+            last_error = error
+
+    if text is None:
+        raise UnicodeError(
+            ".envの文字コードを判定できません。"
+        ) from last_error
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+
+        if (
+            not line
+            or line.startswith("#")
+            or "=" not in line
+        ):
+            continue
+
+        key, value = line.split("=", 1)
+        normalized_key = key.strip()
+
+        if not normalized_key:
+            continue
+
+        normalized_value = value.strip()
+
+        if (
+            len(normalized_value) >= 2
+            and normalized_value[0]
+            == normalized_value[-1]
+            and normalized_value[0] in {"'", '"'}
+        ):
+            normalized_value = normalized_value[1:-1]
+
+        resolved.setdefault(
+            normalized_key,
+            normalized_value,
+        )
+
+    return resolved
+
+
 class StopController:
     """OSシグナルから安全停止要求を管理する。"""
 
@@ -1246,6 +1310,9 @@ def run(
 
     parser = build_argument_parser()
     arguments = parser.parse_args(argv)
+    resolved_environment = load_runtime_environment(
+        environ
+    )
     stop_controller = StopController()
     notification_gateway: NotificationGateway | None = None
     previous_signal_handlers: dict[
@@ -1256,13 +1323,13 @@ def run(
     try:
         settings = create_production_settings(
             arguments,
-            environ=environ,
+            environ=resolved_environment,
         )
 
         if arguments.readiness_check:
             readiness_app_settings = (
                 Settings.from_environment(
-                    environment=environ,
+                    environment=resolved_environment,
                     env_file=ROOT_DIR / ".env",
                 )
             )
@@ -1299,7 +1366,7 @@ def run(
 
         try:
             notification_gateway = (
-                notification_gateway_factory(environ)
+                notification_gateway_factory(resolved_environment)
             )
         except Exception as error:
             detail = (

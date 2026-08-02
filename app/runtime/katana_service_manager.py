@@ -89,6 +89,10 @@ class KatanaServiceManager:
         ),
         readiness_probe: Callable[[], object] | None = None,
         readiness_interval_seconds: float = 60.0,
+        readiness_change_handler: (
+            Callable[[str, str, str | None], None]
+            | None
+        ) = None,
         event_limit: int = 50,
     ) -> None:
         if readiness_interval_seconds <= 0:
@@ -112,6 +116,9 @@ class KatanaServiceManager:
         self.readiness_probe = readiness_probe
         self.readiness_interval_seconds = (
             readiness_interval_seconds
+        )
+        self.readiness_change_handler = (
+            readiness_change_handler
         )
         self._next_readiness_probe_at = 0.0
         self._components = {
@@ -150,23 +157,28 @@ class KatanaServiceManager:
                 "kabuステーション状態を指定してください。"
             )
 
-        changed = (
-            normalized
-            != self.kabu_station_readiness
-        )
+        previous = self.kabu_station_readiness
+        changed = normalized != previous
         self.kabu_station_readiness = normalized
+
+        resolved_message = (
+            message
+            or (
+                "kabuステーションReadiness changed "
+                f"to {normalized}."
+            )
+        )
 
         if changed:
             self._record_event(
                 ServiceEventType.READINESS_CHANGED,
                 component=None,
-                message=(
-                    message
-                    or (
-                        "kabuステーションReadiness changed "
-                        f"to {normalized}."
-                    )
-                ),
+                message=resolved_message,
+            )
+            self._notify_readiness_change(
+                previous=previous,
+                current=normalized,
+                message=resolved_message,
             )
 
         self.write_status()
@@ -517,6 +529,34 @@ class KatanaServiceManager:
             state,
             message=message,
         )
+
+    def _notify_readiness_change(
+        self,
+        *,
+        previous: str,
+        current: str,
+        message: str | None,
+    ) -> None:
+        """Readiness状態変化を外部ハンドラーへ通知する。"""
+
+        if self.readiness_change_handler is None:
+            return
+
+        try:
+            self.readiness_change_handler(
+                previous,
+                current,
+                message,
+            )
+        except Exception as error:
+            self._record_event(
+                ServiceEventType.READINESS_CHANGED,
+                component=None,
+                message=(
+                    "Readiness change notification failed. "
+                    f"error={type(error).__name__}: {error}"
+                ),
+            )
 
     def _record_event(
         self,
