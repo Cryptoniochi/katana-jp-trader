@@ -1265,3 +1265,59 @@ pre {
   color: #8da2ad;
   font-size: 13px;
 }
+
+
+/* Sprint112-2: Paper Trading Runtime */
+
+.status-pill[data-status="completed"] {
+  color: #8fc9ff;
+}
+
+.paper-runtime-card {
+  border-color: #2d6d79;
+}
+
+.paper-runtime-card[data-state="healthy"] {
+  border-color: #2b8d7c;
+}
+
+.paper-runtime-card[data-state="completed"] {
+  border-color: #49789c;
+}
+
+.paper-runtime-card[data-state="failed"] {
+  border-color: #a94f55;
+}
+
+.paper-runtime-card[data-state="warning"] {
+  border-color: #a77b24;
+}
+
+.paper-runtime-card[data-state="neutral"] {
+  border-color: #455b66;
+}
+
+#paper-runtime-message {
+  margin: 14px 0 0;
+  color: #8da2ad;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+#paper-runtime-next {
+  overflow-wrap: anywhere;
+}
+
+
+#paper-runtime-session-pnl,
+#paper-runtime-realized-pnl,
+#paper-runtime-unrealized-pnl,
+#paper-runtime-total-pnl {
+  font-variant-numeric: tabular-nums;
+}
+
+#paper-runtime-last-cycle {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}

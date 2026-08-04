@@ -107,6 +107,54 @@
 
 
 
+
+    <section>
+      <div class="mobile-section-title">
+        <h2>Paper Trading Runtime</h2>
+        <span
+          id="paper-runtime-state"
+          class="status-pill"
+        >
+          UNKNOWN
+        </span>
+      </div>
+
+      <article
+        id="paper-runtime-card"
+        class="mobile-detail-card paper-runtime-card"
+      >
+        <div class="mobile-card-heading">
+          <strong id="paper-runtime-summary">—</strong>
+          <span id="paper-runtime-enabled">—</span>
+        </div>
+
+        <div class="mobile-detail-grid">
+          <div><span>Trading Date</span><b id="paper-runtime-date">—</b></div>
+          <div><span>Runtime PID</span><b id="paper-runtime-pid">—</b></div>
+          <div><span>Cycles</span><b id="paper-runtime-cycles">0</b></div>
+          <div><span>Successful</span><b id="paper-runtime-success">0</b></div>
+          <div><span>Failed</span><b id="paper-runtime-failed">0</b></div>
+          <div><span>Last Cycle</span><b id="paper-runtime-last-cycle">—</b></div>
+          <div><span>Signals</span><b id="paper-runtime-signals">0</b></div>
+          <div><span>Executions</span><b id="paper-runtime-executions">0</b></div>
+          <div><span>Portfolio Positions</span><b id="paper-runtime-positions">0</b></div>
+          <div><span>Session Equity Change</span><b id="paper-runtime-session-pnl">—</b></div>
+          <div><span>Realized P/L</span><b id="paper-runtime-realized-pnl">—</b></div>
+          <div><span>Unrealized P/L</span><b id="paper-runtime-unrealized-pnl">—</b></div>
+          <div><span>Total Portfolio P/L</span><b id="paper-runtime-total-pnl">—</b></div>
+          <div><span>Risk Evaluated</span><b id="paper-runtime-risk">0</b></div>
+          <div><span>Risk Blocked</span><b id="paper-runtime-blocked">0</b></div>
+        </div>
+
+        <p
+          id="paper-runtime-message"
+          class="mobile-card-message"
+        >
+          Paper Trading Runtime has not reported yet.
+        </p>
+      </article>
+    </section>
+
     <section>
       <div class="mobile-section-title">
         <h2>Dynamic Watchlist</h2>
@@ -366,8 +414,11 @@
 
     <section>
       <div class="mobile-section-title">
-        <h2>Recent Trades</h2>
+        <h2>Today's Executions</h2>
       </div>
+      <p class="mobile-status-note">
+        Paper Brokerで本日（JST）に保存された約定だけを表示します。
+      </p>
       <div id="mobile-recent-trades" class="mobile-card-list"></div>
     </section>
 
@@ -388,6 +439,54 @@
 
 
 
+
+    const JST_TIME_ZONE = "Asia/Tokyo";
+
+    function parseDateTime(value) {
+      if (!value) return null;
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    function formatJstDateTime(value) {
+      const parsed = parseDateTime(value);
+      if (parsed === null) return value ?? "—";
+      return new Intl.DateTimeFormat(
+        "ja-JP",
+        {
+          timeZone: JST_TIME_ZONE,
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: false
+        }
+      ).format(parsed) + " JST";
+    }
+
+    function jstDateKey(value) {
+      const parsed = parseDateTime(value);
+      if (parsed === null) return null;
+      const parts = new Intl.DateTimeFormat(
+        "en-CA",
+        {
+          timeZone: JST_TIME_ZONE,
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit"
+        }
+      ).formatToParts(parsed);
+      const values = Object.fromEntries(
+        parts.map(part => [part.type, part.value])
+      );
+      return `${values.year}-${values.month}-${values.day}`;
+    }
+
+    function todayJstDateKey() {
+      return jstDateKey(new Date().toISOString());
+    }
 
     function renderMobileDailyRanking(
       elementId,
@@ -544,7 +643,9 @@
       ).textContent = payload.target_date ?? "—";
       document.getElementById(
         "morning-preflight-attempt"
-      ).textContent = payload.last_attempt_at ?? "—";
+      ).textContent = formatJstDateTime(
+        payload.last_attempt_at
+      );
       document.getElementById(
         "morning-preflight-exit"
       ).textContent = (
@@ -683,21 +784,170 @@
       ).textContent = payload.recovery_count ?? 0;
     }
 
+    function paperRuntimeStatusClass(state) {
+      if (["running", "lunch_break"].includes(state)) {
+        return "healthy";
+      }
+
+      if (["failed"].includes(state)) {
+        return "failed";
+      }
+
+      if (["before_start", "disabled", "closed_day"].includes(state)) {
+        return "neutral";
+      }
+
+      if (["completed"].includes(state)) {
+        return "completed";
+      }
+
+      return "warning";
+    }
+
+    function paperRuntimeLabel(state) {
+      const labels = {
+        before_start: "WAITING",
+        running: "RUNNING",
+        lunch_break: "LUNCH BREAK",
+        completed: "COMPLETED",
+        failed: "FAILED",
+        closed_day: "CLOSED DAY",
+        disabled: "DISABLED",
+        not_configured: "NOT CONFIGURED",
+        not_reported: "NO DATA"
+      };
+
+      return labels[state] ?? String(
+        state ?? "unknown"
+      ).toUpperCase();
+    }
+
+    function renderPaperTradingRuntime(payload) {
+      const runtimeState = payload.state ?? "not_reported";
+      const stateElement = document.getElementById(
+        "paper-runtime-state"
+      );
+      stateElement.textContent = paperRuntimeLabel(runtimeState);
+      stateElement.dataset.status = paperRuntimeStatusClass(
+        runtimeState
+      );
+
+      const runtimeCard = document.getElementById(
+        "paper-runtime-card"
+      );
+      runtimeCard.dataset.state = paperRuntimeStatusClass(
+        runtimeState
+      );
+
+      document.getElementById(
+        "paper-runtime-summary"
+      ).textContent = paperRuntimeLabel(runtimeState);
+      document.getElementById(
+        "paper-runtime-enabled"
+      ).textContent = (
+        payload.available ? "REPORTING" : "NO DATA"
+      );
+      document.getElementById(
+        "paper-runtime-date"
+      ).textContent = payload.trading_date ?? "—";
+      document.getElementById(
+        "paper-runtime-pid"
+      ).textContent = payload.process_id ?? "—";
+      document.getElementById(
+        "paper-runtime-cycles"
+      ).textContent = payload.cycle_count ?? 0;
+      document.getElementById(
+        "paper-runtime-success"
+      ).textContent = payload.successful_cycle_count ?? 0;
+      document.getElementById(
+        "paper-runtime-failed"
+      ).textContent = payload.failed_cycle_count ?? 0;
+      document.getElementById(
+        "paper-runtime-last-cycle"
+      ).textContent = formatJstDateTime(
+        payload.last_cycle_at
+      );
+      document.getElementById(
+        "paper-runtime-signals"
+      ).textContent = payload.signal_count ?? 0;
+      document.getElementById(
+        "paper-runtime-executions"
+      ).textContent = payload.execution_count ?? 0;
+      document.getElementById(
+        "paper-runtime-positions"
+      ).textContent = (
+        payload.portfolio_position_count
+        ?? payload.open_position_count
+        ?? 0
+      );
+      document.getElementById(
+        "paper-runtime-session-pnl"
+      ).textContent = formatYen(
+        payload.session_equity_change
+        ?? payload.net_profit_loss
+      );
+      document.getElementById(
+        "paper-runtime-realized-pnl"
+      ).textContent = formatYen(
+        payload.realized_profit_loss
+      );
+      document.getElementById(
+        "paper-runtime-unrealized-pnl"
+      ).textContent = formatYen(
+        payload.unrealized_profit_loss
+      );
+      document.getElementById(
+        "paper-runtime-total-pnl"
+      ).textContent = formatYen(
+        payload.total_portfolio_profit_loss
+      );
+      document.getElementById(
+        "paper-runtime-risk"
+      ).textContent = payload.risk_evaluated_cycle_count ?? 0;
+      document.getElementById(
+        "paper-runtime-blocked"
+      ).textContent = payload.risk_blocked_cycle_count ?? 0;
+      const portfolioPositionCount = (
+        payload.portfolio_position_count
+        ?? payload.open_position_count
+        ?? 0
+      );
+      const executionCount = payload.execution_count ?? 0;
+      const inheritedPositionNote = (
+        portfolioPositionCount > 0
+        && executionCount === 0
+      )
+        ? (
+          ` ${portfolioPositionCount} positions existed in the `
+          + "restored portfolio before today's executions."
+        )
+        : "";
+
+      document.getElementById(
+        "paper-runtime-message"
+      ).textContent = (
+        payload.error_message
+        ?? payload.message
+        ?? (
+          payload.available
+            ? (
+              "Runtime activity is being recorded."
+              + inheritedPositionNote
+            )
+            : "Paper Trading Runtime has not reported yet."
+        )
+      );
+    }
+
     function renderPaperTradingSchedule(payload) {
       const state = document.getElementById(
         "mobile-schedule-state"
       );
-      state.textContent = (
-        payload.state ?? "unknown"
-      ).toUpperCase();
+      state.textContent = paperRuntimeLabel(
+        payload.state
+      );
       state.dataset.status = (
-        ["running", "lunch_break"].includes(payload.state)
-          ? "healthy"
-          : (
-            ["failed"].includes(payload.state)
-              ? "failed"
-              : "neutral"
-          )
+        paperRuntimeStatusClass(payload.state)
       );
 
       const settings = payload.settings ?? {};
@@ -710,6 +960,7 @@
       document.getElementById(
         "mobile-schedule-message"
       ).textContent = payload.message ?? "—";
+
     }
 
     function renderOperationalReadiness(payload) {
@@ -802,7 +1053,7 @@
             <span>${event.event_type}</span>
           </div>
           <p>${event.message}</p>
-          <time>${event.occurred_at ?? "—"}</time>
+          <time>${formatJstDateTime(event.occurred_at)}</time>
         `;
         list.appendChild(card);
       }
@@ -873,7 +1124,7 @@
       );
       list.innerHTML = "";
 
-      if (payload.components.length === 0) {
+      if ((payload.components ?? []).length === 0) {
         list.innerHTML = `
           <article class="mobile-empty-card">
             ${
@@ -885,7 +1136,22 @@
         return;
       }
 
-      for (const component of payload.components) {
+      const visibleComponents = (
+        payload.components ?? []
+      ).filter(component => (
+        component.name !== "paper_trading"
+      ));
+
+      if (visibleComponents.length === 0) {
+        list.innerHTML = `
+          <article class="mobile-empty-card">
+            No managed service components.
+          </article>
+        `;
+        return;
+      }
+
+      for (const component of visibleComponents) {
         const card = document.createElement("article");
         card.className = "mobile-detail-card";
         card.dataset.state = mobileServiceStateClass(
@@ -1111,29 +1377,39 @@
       );
       list.innerHTML = "";
 
-      if (trades.length === 0) {
+      const todayKey = todayJstDateKey();
+      const todaysExecutions = (trades ?? [])
+        .filter(trade => (
+          jstDateKey(trade.executed_at) === todayKey
+        ))
+        .sort((left, right) => (
+          (parseDateTime(right.executed_at)?.getTime() ?? 0)
+          - (parseDateTime(left.executed_at)?.getTime() ?? 0)
+        ));
+
+      if (todaysExecutions.length === 0) {
         list.innerHTML = `
           <article class="mobile-empty-card">
-            No executions yet.
+            No executions today.
           </article>
         `;
         return;
       }
 
-      for (const trade of trades.slice(0, 10)) {
+      for (const trade of todaysExecutions.slice(0, 20)) {
         const element = document.createElement("article");
         element.className = "mobile-detail-card";
         element.innerHTML = `
           <div class="mobile-card-heading">
-            <strong>${trade.strategy_name}</strong>
-            <span>${trade.side}</span>
+            <strong>${trade.strategy_name ?? "—"}</strong>
+            <span>${String(trade.side ?? "—").toUpperCase()}</span>
           </div>
           <div class="mobile-trade-row">
-            <span>${trade.code}</span>
-            <span>${trade.quantity} shares</span>
-            <span>${yen.format(trade.execution_price)}</span>
+            <span>${trade.code ?? "—"}</span>
+            <span>${trade.quantity ?? 0} shares</span>
+            <span>${yen.format(trade.execution_price ?? 0)}</span>
           </div>
-          <small>${trade.executed_at}</small>
+          <small>${formatJstDateTime(trade.executed_at)}</small>
         `;
         list.appendChild(element);
       }
@@ -1182,17 +1458,25 @@
         serviceStatusResponse,
         readinessResponse,
         scheduleResponse,
+        runtimeResponse,
+        positionsResponse,
         dailyReportResponse,
         morningPreflightResponse,
         dynamicWatchlistResponse
       ] = await Promise.all([
-        fetch("/api/dashboard/summary"),
+        fetch("/api/dashboard/summary", { cache: "no-store" }),
         fetch("/api/dashboard/strategies"),
         fetch("/api/dashboard/performance"),
         fetch("/api/dashboard/performance-breakdown"),
         fetch("/api/dashboard/service-status"),
         fetch("/api/dashboard/operational-readiness"),
         fetch("/api/dashboard/paper-trading-schedule"),
+        fetch("/api/dashboard/paper-trading-runtime", {
+          cache: "no-store"
+        }),
+        fetch("/api/dashboard/positions", {
+          cache: "no-store"
+        }),
         fetch("/api/dashboard/daily-report"),
         fetch("/api/dashboard/morning-preflight"),
         fetch("/api/dashboard/dynamic-watchlist")
@@ -1206,6 +1490,8 @@
         || !serviceStatusResponse.ok
         || !readinessResponse.ok
         || !scheduleResponse.ok
+        || !runtimeResponse.ok
+        || !positionsResponse.ok
         || !dailyReportResponse.ok
         || !morningPreflightResponse.ok
         || !dynamicWatchlistResponse.ok
@@ -1228,6 +1514,12 @@
       const schedule = (
         await scheduleResponse.json()
       );
+      const runtime = (
+        await runtimeResponse.json()
+      );
+      const positionsPayload = (
+        await positionsResponse.json()
+      );
       const dailyReport = (
         await dailyReportResponse.json()
       );
@@ -1238,11 +1530,38 @@
         await dynamicWatchlistResponse.json()
       );
       const snapshot = summary.snapshot;
-      const daily = summary.daily_history;
-      const today = daily.length > 0
-        ? daily[daily.length - 1]
+      const daily = summary.daily_history ?? [];
+      const todayKey = todayJstDateKey();
+      const today = daily.find(row => (
+        String(
+          row.trading_date
+          ?? row.date
+          ?? row.report_date
+          ?? ""
+        ) === todayKey
+      )) ?? null;
+      const runtimeIsToday = (
+        runtime?.available === true
+        && String(runtime.trading_date ?? "") === todayKey
+      );
+      const runtimeTodayProfitLoss = runtimeIsToday
+        ? (
+          runtime.realized_profit_loss
+          ?? runtime.session_equity_change
+          ?? runtime.net_profit_loss
+        )
         : null;
+      const todayProfitLoss = (
+        runtimeTodayProfitLoss
+        ?? today?.net_profit_loss
+        ?? null
+      );
       const portfolio = snapshot.portfolio;
+      const currentPositions = (
+        positionsPayload?.positions
+        ?? portfolio?.positions
+        ?? []
+      );
       const live = snapshot.live_summary;
       const health = snapshot.system_health;
       const status = health?.status ?? (
@@ -1253,18 +1572,22 @@
 
       document.getElementById(
         "mobile-updated-at"
-      ).textContent = `Updated: ${summary.generated_at}`;
+      ).textContent = (
+        `Updated: ${formatJstDateTime(summary.generated_at)}`
+      );
 
       document.getElementById(
         "mobile-today-pl"
-      ).textContent = today?.net_profit_loss === undefined
-        || today?.net_profit_loss === null
-        ? "—"
-        : yen.format(today.net_profit_loss);
+      ).textContent = (
+        todayProfitLoss === null
+        || todayProfitLoss === undefined
+          ? "—"
+          : yen.format(todayProfitLoss)
+      );
 
       document.getElementById(
         "mobile-position-count"
-      ).textContent = portfolio?.position_count ?? "—";
+      ).textContent = currentPositions.length;
 
       document.getElementById(
         "mobile-signal-count"
@@ -1298,6 +1621,7 @@
       renderMorningPreflight(morningPreflight);
       renderMobileDailyReport(dailyReport);
       renderPaperTradingSchedule(schedule);
+      renderPaperTradingRuntime(runtime);
       renderOperationalReadiness(readiness);
       renderMobileServiceStatus(serviceStatus);
       renderPerformance(performance);
@@ -1305,7 +1629,7 @@
       renderMobileBreakdown();
       renderStrategies(strategies);
       renderTrades(strategies.recent_trades);
-      renderPositions(portfolio?.positions ?? []);
+      renderPositions(currentPositions);
     }
 
     refreshMobileDashboard().catch(error => {

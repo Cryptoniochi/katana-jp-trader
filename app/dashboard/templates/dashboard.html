@@ -481,6 +481,36 @@
       }
     );
 
+    const JST_TIME_ZONE = "Asia/Tokyo";
+
+    function parseDateTime(value) {
+      if (!value) return null;
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    function jstDateKey(value) {
+      const parsed = parseDateTime(value);
+      if (parsed === null) return null;
+
+      const parts = new Intl.DateTimeFormat(
+        "en-CA",
+        {
+          timeZone: JST_TIME_ZONE,
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit"
+        }
+      ).formatToParts(parsed);
+      const values = Object.fromEntries(
+        parts.map(part => [part.type, part.value])
+      );
+      return `${values.year}-${values.month}-${values.day}`;
+    }
+
+    function todayJstDateKey() {
+      return jstDateKey(new Date().toISOString());
+    }
 
 
 
@@ -1413,6 +1443,7 @@
         serviceStatusResponse,
         readinessResponse,
         scheduleResponse,
+        runtimeResponse,
         dailyReportResponse,
         morningPreflightResponse,
         dynamicWatchlistResponse
@@ -1424,6 +1455,7 @@
         fetch("/api/dashboard/service-status"),
         fetch("/api/dashboard/operational-readiness"),
         fetch("/api/dashboard/paper-trading-schedule"),
+        fetch("/api/dashboard/paper-trading-runtime"),
         fetch("/api/dashboard/daily-report"),
         fetch("/api/dashboard/morning-preflight"),
         fetch("/api/dashboard/dynamic-watchlist")
@@ -1437,6 +1469,7 @@
         || !serviceStatusResponse.ok
         || !readinessResponse.ok
         || !scheduleResponse.ok
+        || !runtimeResponse.ok
         || !dailyReportResponse.ok
         || !morningPreflightResponse.ok
         || !dynamicWatchlistResponse.ok
@@ -1465,6 +1498,9 @@
       const scheduleData = (
         await scheduleResponse.json()
       );
+      const runtimeData = (
+        await runtimeResponse.json()
+      );
       const dailyReportData = (
         await dailyReportResponse.json()
       );
@@ -1475,11 +1511,33 @@
         await dynamicWatchlistResponse.json()
       );
       const snapshot = data.snapshot;
-      const daily = data.daily_history;
+      const daily = data.daily_history ?? [];
       const analytics = data.analytics ?? {};
-      const today = daily.length > 0
-        ? daily[daily.length - 1]
+      const todayKey = todayJstDateKey();
+      const today = daily.find(row => (
+        String(
+          row.trading_date
+          ?? row.date
+          ?? row.report_date
+          ?? ""
+        ) === todayKey
+      )) ?? null;
+      const runtimeIsToday = (
+        runtimeData?.available === true
+        && String(runtimeData.trading_date ?? "") === todayKey
+      );
+      const runtimeTodayProfitLoss = runtimeIsToday
+        ? (
+          runtimeData.realized_profit_loss
+          ?? runtimeData.session_equity_change
+          ?? runtimeData.net_profit_loss
+        )
         : null;
+      const todayProfitLoss = (
+        runtimeTodayProfitLoss
+        ?? today?.net_profit_loss
+        ?? null
+      );
       const portfolio = snapshot.portfolio;
       const live = snapshot.live_summary;
       const health = snapshot.system_health;
@@ -1490,7 +1548,7 @@
       document.getElementById(
         "today-pl"
       ).textContent = valueOrDash(
-        today?.net_profit_loss,
+        todayProfitLoss,
         yen.format
       );
       document.getElementById(

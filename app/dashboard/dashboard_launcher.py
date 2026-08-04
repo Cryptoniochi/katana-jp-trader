@@ -34,7 +34,7 @@ from app.dashboard.daily_report_reader import (
     DailyReportReader,
 )
 from app.dashboard.dashboard_snapshot_file import (
-    DashboardJsonSnapshotReader,
+    DashboardSqliteSnapshotReader,
 )
 from app.dashboard.dashboard_strategy_service import (
     DashboardStrategyService,
@@ -211,8 +211,9 @@ def create_launcher_app(
     ),
     recovery_service: RecoveryHistoryService | None = None,
 ) -> FastAPI:
-    snapshot_reader = DashboardJsonSnapshotReader(
-        snapshot_path=snapshot_path
+    snapshot_reader = DashboardSqliteSnapshotReader(
+        database_path=database_path,
+        snapshot_path=snapshot_path,
     )
     daily_repository = PaperTradingDailySummaryRepository(
         database_path,

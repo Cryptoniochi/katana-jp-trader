@@ -104,6 +104,7 @@ class ScheduledPaperTradingController:
         self.process: subprocess.Popen | None = None
         self.last_exit_code: int | None = None
         self._stop_requested = False
+        self._completed_trading_date = None
 
     def run_once(self) -> ScheduledTradingStatus:
         """現在時刻に必要な開始・停止処理を1回行う。"""
@@ -140,6 +141,12 @@ class ScheduledPaperTradingController:
             tzinfo=None
         )
 
+        if (
+            self._completed_trading_date is not None
+            and self._completed_trading_date != now.date()
+        ):
+            self._completed_trading_date = None
+
         if local_time < self.settings.start_at:
             return self._publish(
                 now=now,
@@ -154,19 +161,37 @@ class ScheduledPaperTradingController:
                 ),
             )
 
-        if local_time >= self.settings.stop_at:
+        if (
+            local_time
+            >= self.settings.market_close_at
+        ):
             self._stop_process()
+            self._completed_trading_date = now.date()
             return self._publish(
                 now=now,
                 state=ScheduledTradingState.COMPLETED,
                 business_day=True,
                 next_action_at=None,
                 message=(
-                    "Today's scheduled operation is complete."
+                    "Today's scheduled operation is complete. "
+                    "Paper Trading will not restart after "
+                    "market close."
                 ),
             )
 
         self._refresh_process_state()
+
+        if self._completed_trading_date == now.date():
+            return self._publish(
+                now=now,
+                state=ScheduledTradingState.COMPLETED,
+                business_day=True,
+                next_action_at=None,
+                message=(
+                    "Today's scheduled operation is complete. "
+                    "Paper Trading restart is suppressed."
+                ),
+            )
 
         if self.process is None:
             if (

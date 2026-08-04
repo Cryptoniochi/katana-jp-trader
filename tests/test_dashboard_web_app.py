@@ -220,3 +220,171 @@ def test_recovery_api_is_in_openapi_schema() -> None:
         "/api/dashboard/recovery"
         in response.json()["paths"]
     )
+
+
+class FakePaperScheduleReader:
+    def read(self) -> dict[str, object]:
+        return {
+            "available": True,
+            "generated_at": NOW.isoformat(),
+            "trading_date": "2026-07-18",
+            "state": "running",
+            "business_day": True,
+            "enabled": True,
+            "process_id": 4321,
+            "last_exit_code": None,
+            "next_action_at": (
+                "2026-07-18T11:30:00+09:00"
+            ),
+            "message": (
+                "run_market_session is active."
+            ),
+            "settings": {
+                "start_at": "08:45",
+                "morning_open_at": "09:00",
+                "lunch_start_at": "11:30",
+                "lunch_end_at": "12:30",
+                "market_close_at": "15:30",
+                "stop_at": "15:35",
+            },
+        }
+
+
+def test_paper_trading_schedule_api_returns_runtime_state(
+) -> None:
+    client = TestClient(
+        create_dashboard_app(
+            service=FakeService(),
+            paper_schedule_reader=(
+                FakePaperScheduleReader()
+            ),
+        )
+    )
+
+    response = client.get(
+        "/api/dashboard/paper-trading-schedule"
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] == "running"
+    assert payload["enabled"] is True
+    assert payload["process_id"] == 4321
+    assert payload["trading_date"] == "2026-07-18"
+
+
+def test_paper_trading_schedule_api_has_complete_fallback(
+) -> None:
+    response = create_test_client().get(
+        "/api/dashboard/paper-trading-schedule"
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload == {
+        "available": False,
+        "generated_at": None,
+        "trading_date": None,
+        "state": "not_configured",
+        "business_day": False,
+        "enabled": False,
+        "process_id": None,
+        "last_exit_code": None,
+        "next_action_at": None,
+        "message": (
+            "Paper Trading Schedule reader "
+            "is not configured."
+        ),
+        "settings": {},
+    }
+
+
+def test_mobile_dashboard_contains_runtime_card(
+) -> None:
+    response = create_test_client().get("/mobile")
+
+    assert response.status_code == 200
+    assert "Paper Trading Runtime" in response.text
+    assert 'id="paper-runtime-state"' in response.text
+    assert 'id="paper-runtime-pid"' in response.text
+
+
+
+class FakePaperRuntimeReader:
+    def read(self) -> dict[str, object]:
+        return {
+            "available": True,
+            "state": "running",
+            "process_id": 4321,
+            "cycle_count": 20,
+            "signal_count": 3,
+            "execution_count": 1,
+        }
+
+
+def test_paper_trading_runtime_api_returns_activity(
+) -> None:
+    client = TestClient(
+        create_dashboard_app(
+            service=FakeService(),
+            paper_runtime_reader=FakePaperRuntimeReader(),
+        )
+    )
+
+    response = client.get(
+        "/api/dashboard/paper-trading-runtime"
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] == "running"
+    assert payload["process_id"] == 4321
+    assert payload["cycle_count"] == 20
+    assert payload["signal_count"] == 3
+    assert payload["execution_count"] == 1
+
+
+def test_mobile_dashboard_contains_runtime_activity_fields(
+) -> None:
+    response = create_test_client().get("/mobile")
+
+    assert response.status_code == 200
+    assert 'id="paper-runtime-cycles"' in response.text
+    assert 'id="paper-runtime-signals"' in response.text
+    assert 'id="paper-runtime-executions"' in response.text
+
+
+
+def test_mobile_dashboard_uses_jst_datetime_formatting() -> None:
+    response = create_test_client().get("/mobile")
+
+    assert response.status_code == 200
+    assert 'const JST_TIME_ZONE = "Asia/Tokyo"' in response.text
+    assert "function formatJstDateTime" in response.text
+    assert "function jstDateKey" in response.text
+
+
+def test_mobile_dashboard_shows_only_today_executions() -> None:
+    response = create_test_client().get("/mobile")
+
+    assert response.status_code == 200
+    assert "Today's Executions" in response.text
+    assert "No executions today." in response.text
+    assert "jstDateKey(trade.executed_at) === todayKey" in response.text
+
+
+
+def test_mobile_runtime_separates_pnl_and_labels_positions() -> None:
+    response = create_test_client().get("/mobile")
+
+    assert response.status_code == 200
+    assert "Portfolio Positions" in response.text
+    assert "Session Equity Change" in response.text
+    assert "Realized P/L" in response.text
+    assert "Unrealized P/L" in response.text
+    assert "Total Portfolio P/L" in response.text
+    assert 'id="paper-runtime-session-pnl"' in response.text
+    assert 'id="paper-runtime-realized-pnl"' in response.text
+    assert 'id="paper-runtime-unrealized-pnl"' in response.text
+    assert 'id="paper-runtime-total-pnl"' in response.text
+    assert "restored portfolio before today's executions" in response.text

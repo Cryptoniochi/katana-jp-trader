@@ -21,6 +21,9 @@ from app.dashboard.morning_preflight_status_reader import (
 from app.dashboard.paper_trading_schedule_status_reader import (
     PaperTradingScheduleStatusReader,
 )
+from app.dashboard.paper_trading_runtime_status_reader import (
+    PaperTradingRuntimeStatusReader,
+)
 from app.dashboard.katana_service_status_reader import (
     KatanaServiceStatusReader,
 )
@@ -62,6 +65,7 @@ def create_dashboard_app(
     service_status_reader: KatanaServiceStatusReader | None = None,
     readiness_service: OperationalReadinessService | None = None,
     paper_schedule_reader: PaperTradingScheduleStatusReader | None = None,
+    paper_runtime_reader: PaperTradingRuntimeStatusReader | None = None,
     dynamic_watchlist_reader: DynamicWatchlistStatusReader | None = None,
     morning_preflight_reader: MorningPreflightStatusReader | None = None,
     daily_report_reader: DailyReportReader | None = None,
@@ -249,12 +253,31 @@ def create_dashboard_app(
         if paper_schedule_reader is None:
             return {
                 "available": False,
+                "generated_at": None,
+                "trading_date": None,
                 "state": "not_configured",
+                "business_day": False,
                 "enabled": False,
+                "process_id": None,
+                "last_exit_code": None,
+                "next_action_at": None,
+                "message": (
+                    "Paper Trading Schedule reader "
+                    "is not configured."
+                ),
                 "settings": {},
             }
 
         return paper_schedule_reader.read()
+
+    @app.get("/api/dashboard/paper-trading-runtime")
+    def dashboard_paper_trading_runtime() -> dict[str, object]:
+        reader = (
+            paper_runtime_reader
+            if paper_runtime_reader is not None
+            else PaperTradingRuntimeStatusReader()
+        )
+        return reader.read()
 
     @app.get("/api/dashboard/operational-readiness")
     def dashboard_operational_readiness() -> dict[str, object]:

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import os
 from collections.abc import Callable
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Protocol
 
 from app.risk.risk_engine import RiskEngineResult
@@ -20,6 +23,11 @@ from app.runtime.runtime_heartbeat_service import (
     RuntimeHeartbeatService,
 )
 from app.trading.portfolio_models import PortfolioSnapshot
+
+
+DEFAULT_RUNTIME_STATUS_PATH = Path(
+    "reports/service/paper_trading_runtime_status.json"
+)
 
 
 class PaperTradingCycleRunner(Protocol):
@@ -50,6 +58,8 @@ class PaperTradingRuntime:
         portfolio_reader: PaperTradingPortfolioReader,
         risk_runner: RiskEngineRunner | None = None,
         heartbeat_service: RuntimeHeartbeatService | None = None,
+        status_path: Path | None = DEFAULT_RUNTIME_STATUS_PATH,
+        process_id_provider: Callable[[], int] = os.getpid,
         now_provider: Callable[[], datetime] | None = None,
     ) -> None:
         """Trading Loop・Portfolio・Risk・Heartbeat・時計を設定する。"""
@@ -58,6 +68,13 @@ class PaperTradingRuntime:
         self.portfolio_reader = portfolio_reader
         self.risk_runner = risk_runner
         self.heartbeat_service = heartbeat_service
+        self.status_path = (
+            None
+            if status_path is None
+            else Path(status_path)
+        )
+        self.process_id_provider = process_id_provider
+        self.last_status_publish_error: str | None = None
         self.now_provider = (
             now_provider
             if now_provider is not None
@@ -131,6 +148,11 @@ class PaperTradingRuntime:
                 ),
             },
         )
+        self._publish_runtime_status(
+            generated_at=started_at,
+            portfolio_snapshot=initial_snapshot,
+            error_message=None,
+        )
 
     def run_cycle(self) -> PaperTradingCycleRecord:
         """Trading Cycle・Portfolio取得・Risk判定を実行する。"""
@@ -178,6 +200,11 @@ class PaperTradingRuntime:
             event="cycle_completed",
             recorded_at=recorded_at,
             details=heartbeat_details,
+        )
+        self._publish_runtime_status(
+            generated_at=recorded_at,
+            portfolio_snapshot=snapshot,
+            error_message=None,
         )
 
         return record
@@ -292,8 +319,203 @@ class PaperTradingRuntime:
             recorded_at=completed_at,
             details=heartbeat_details,
         )
+        self._publish_runtime_status(
+            generated_at=completed_at,
+            portfolio_snapshot=final_snapshot,
+            error_message=error_message,
+        )
 
         return summary
+
+    def _publish_runtime_status(
+        self,
+        *,
+        generated_at: datetime,
+        portfolio_snapshot: PortfolioSnapshot,
+        error_message: str | None,
+    ) -> None:
+        """Dashboard用Runtime状態を原子的に保存する。"""
+
+        if self.status_path is None:
+            return
+
+        successful_cycles = sum(
+            1
+            for record in self._records
+            if bool(
+                getattr(
+                    record.cycle_result,
+                    "is_successful",
+                    False,
+                )
+            )
+        )
+        failed_cycles = (
+            len(self._records) - successful_cycles
+        )
+        signal_count = sum(
+            int(
+                getattr(
+                    record.cycle_result,
+                    "signal_count",
+                    0,
+                )
+                or 0
+            )
+            for record in self._records
+        )
+        execution_count = sum(
+            int(
+                getattr(
+                    record.cycle_result,
+                    "execution_count",
+                    0,
+                )
+                or 0
+            )
+            for record in self._records
+        )
+        current_equity = (
+            portfolio_snapshot.broker_equity
+        )
+        session_equity_change = (
+            None
+            if self._initial_equity is None
+            else current_equity - self._initial_equity
+        )
+        realized_profit_loss = sum(
+            float(
+                getattr(
+                    position,
+                    "realized_profit_loss",
+                    0.0,
+                )
+                or 0.0
+            )
+            for position in portfolio_snapshot.positions
+        )
+        unrealized_profit_loss = sum(
+            self._position_unrealized_profit_loss(
+                position
+            )
+            for position in portfolio_snapshot.positions
+        )
+        total_portfolio_profit_loss = (
+            realized_profit_loss
+            + unrealized_profit_loss
+        )
+
+        payload = {
+            "available": True,
+            "generated_at": generated_at.isoformat(),
+            "trading_date": (
+                None
+                if self._started_at is None
+                else self._started_at.date().isoformat()
+            ),
+            "state": (
+                "not_started"
+                if self._status is None
+                else self._status.value
+            ),
+            "process_id": self.process_id_provider(),
+            "started_at": (
+                None
+                if self._started_at is None
+                else self._started_at.isoformat()
+            ),
+            "last_cycle_at": (
+                generated_at.isoformat()
+                if self._records
+                else None
+            ),
+            "cycle_count": len(self._records),
+            "successful_cycle_count": successful_cycles,
+            "failed_cycle_count": failed_cycles,
+            "signal_count": signal_count,
+            "execution_count": execution_count,
+            "open_position_count": len(
+                portfolio_snapshot.positions
+            ),
+            "portfolio_position_count": len(
+                portfolio_snapshot.positions
+            ),
+            "initial_equity": self._initial_equity,
+            "current_equity": current_equity,
+            "net_profit_loss": session_equity_change,
+            "session_equity_change": session_equity_change,
+            "realized_profit_loss": realized_profit_loss,
+            "unrealized_profit_loss": unrealized_profit_loss,
+            "total_portfolio_profit_loss": (
+                total_portfolio_profit_loss
+            ),
+            "risk_evaluated_cycle_count": sum(
+                1
+                for record in self._records
+                if record.risk_result is not None
+            ),
+            "risk_blocked_cycle_count": sum(
+                1
+                for record in self._records
+                if (
+                    record.risk_result is not None
+                    and record.risk_result.is_blocked
+                )
+            ),
+            "error_message": error_message,
+        }
+
+        try:
+            self.status_path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            temporary = self.status_path.with_suffix(
+                self.status_path.suffix + ".tmp"
+            )
+            temporary.write_text(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            temporary.replace(self.status_path)
+            self.last_status_publish_error = None
+        except OSError as error:
+            self.last_status_publish_error = (
+                f"{type(error).__name__}: {error}"
+            )
+
+    @staticmethod
+    def _position_unrealized_profit_loss(
+        position,
+    ) -> float:
+        """保有ポジションの評価損益を返す。"""
+
+        quantity = float(
+            getattr(position, "quantity", 0) or 0
+        )
+        average_cost = float(
+            getattr(position, "average_cost", 0.0)
+            or 0.0
+        )
+        market_price = float(
+            getattr(position, "market_price", 0.0)
+            or 0.0
+        )
+        side = getattr(position, "side", None)
+        side_text = str(
+            getattr(side, "value", side)
+        ).lower()
+
+        price_difference = market_price - average_cost
+
+        if side_text in {"short", "sell"}:
+            price_difference *= -1.0
+
+        return price_difference * quantity
 
     def _record_heartbeat(
         self,

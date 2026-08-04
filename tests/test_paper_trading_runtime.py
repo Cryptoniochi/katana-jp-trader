@@ -281,3 +281,132 @@ def test_runtime_without_risk_runner_is_backward_compatible() -> None:
     assert not record.has_risk_result
     assert record.allows_new_entries is None
     assert runtime.last_risk_result is None
+
+
+
+def test_runtime_publishes_live_activity_status(
+    tmp_path,
+) -> None:
+    status_path = tmp_path / "runtime.json"
+    runtime = PaperTradingRuntime(
+        cycle_runner=FakeCycleRunner(),
+        portfolio_reader=FakePortfolioReader(
+            (
+                1_000_000.0,
+                1_005_000.0,
+                1_005_000.0,
+            )
+        ),
+        status_path=status_path,
+        process_id_provider=lambda: 4321,
+        now_provider=lambda: NOW,
+    )
+
+    runtime.start()
+    runtime.run_cycle()
+
+    import json
+
+    payload = json.loads(
+        status_path.read_text(encoding="utf-8")
+    )
+
+    assert payload["state"] == "running"
+    assert payload["process_id"] == 4321
+    assert payload["cycle_count"] == 1
+    assert payload["successful_cycle_count"] == 1
+    assert payload["failed_cycle_count"] == 0
+    assert payload["signal_count"] == 1
+    assert payload["execution_count"] == 1
+    assert payload["open_position_count"] == 0
+    assert payload["net_profit_loss"] == 5_000.0
+
+
+def test_runtime_status_is_completed_after_finalize(
+    tmp_path,
+) -> None:
+    status_path = tmp_path / "runtime.json"
+    runtime = PaperTradingRuntime(
+        cycle_runner=FakeCycleRunner(),
+        portfolio_reader=FakePortfolioReader(
+            (
+                1_000_000.0,
+                1_010_000.0,
+            )
+        ),
+        status_path=status_path,
+        process_id_provider=lambda: 4321,
+        now_provider=lambda: NOW,
+    )
+
+    runtime.start()
+    runtime.complete()
+
+    import json
+
+    payload = json.loads(
+        status_path.read_text(encoding="utf-8")
+    )
+
+    assert payload["state"] == "completed"
+    assert payload["cycle_count"] == 0
+    assert payload["net_profit_loss"] == 10_000.0
+
+
+
+def test_runtime_status_separates_realized_and_unrealized_pnl(
+    tmp_path,
+) -> None:
+    from app.trading.broker_adapter import BrokerPositionSide
+    from app.trading.portfolio_models import (
+        PortfolioPositionSnapshot,
+    )
+
+    class PositionPortfolioReader:
+        def create_snapshot(
+            self,
+            *,
+            generated_at=None,
+        ):
+            return PortfolioSnapshot(
+                currency="JPY",
+                cash_balance=900_000.0,
+                buying_power=900_000.0,
+                broker_market_value=101_000.0,
+                broker_equity=1_001_000.0,
+                positions=(
+                    PortfolioPositionSnapshot(
+                        position_id="position-7203-long",
+                        code="7203",
+                        side=BrokerPositionSide.LONG,
+                        quantity=100,
+                        average_cost=1000.0,
+                        market_price=1010.0,
+                        realized_profit_loss=500.0,
+                    ),
+                ),
+                generated_at=generated_at,
+            )
+
+    status_path = tmp_path / "runtime.json"
+    runtime = PaperTradingRuntime(
+        cycle_runner=FakeCycleRunner(),
+        portfolio_reader=PositionPortfolioReader(),
+        status_path=status_path,
+        process_id_provider=lambda: 4321,
+        now_provider=lambda: NOW,
+    )
+
+    runtime.start()
+
+    import json
+
+    payload = json.loads(
+        status_path.read_text(encoding="utf-8")
+    )
+
+    assert payload["portfolio_position_count"] == 1
+    assert payload["realized_profit_loss"] == 500.0
+    assert payload["unrealized_profit_loss"] == 1000.0
+    assert payload["total_portfolio_profit_loss"] == 1500.0
+    assert payload["session_equity_change"] == 0.0
