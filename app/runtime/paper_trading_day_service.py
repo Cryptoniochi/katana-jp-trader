@@ -67,6 +67,13 @@ class PaperTradingDayDashboardPublisher(Protocol):
         """現在のDashboard Snapshotを生成して保存する。"""
 
 
+class PaperTradingDayLiquidator(Protocol):
+    """市場終了時に全ポジションを決済する。"""
+
+    def close_all_positions(self):
+        """現在の全ポジションを決済する。"""
+
+
 class PaperTradingDayPostRunHook(Protocol):
     """終日運用結果を受け取る任意後処理。"""
 
@@ -94,6 +101,9 @@ class PaperTradingDayService:
         dashboard_publisher: (
             PaperTradingDayDashboardPublisher | None
         ) = None,
+        end_of_day_liquidator: (
+            PaperTradingDayLiquidator | None
+        ) = None,
         post_run_hooks: tuple[
             PaperTradingDayPostRunHook,
             ...,
@@ -109,6 +119,7 @@ class PaperTradingDayService:
         self.persistence_service = persistence_service
         self.market_clock = market_clock
         self.dashboard_publisher = dashboard_publisher
+        self.end_of_day_liquidator = end_of_day_liquidator
         self.post_run_hooks = tuple(post_run_hooks)
         self.settings = (
             settings
@@ -165,6 +176,10 @@ class PaperTradingDayService:
                     stop_reason = (
                         PaperTradingDayStopReason.MARKET_CLOSED
                     )
+
+                    if self.end_of_day_liquidator is not None:
+                        self.end_of_day_liquidator.close_all_positions()
+
                     break
 
                 if not clock_snapshot.is_open:

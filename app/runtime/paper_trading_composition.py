@@ -92,6 +92,9 @@ from app.market.symbol_strategy_router import (
 from app.market.realtime_signal_engine import (
     RealtimeSignalEngine,
 )
+from app.runtime.end_of_day_liquidation_service import (
+    EndOfDayLiquidationService,
+)
 from app.runtime.paper_trading_day_models import (
     PaperTradingDayResult,
     PaperTradingDaySettings,
@@ -752,6 +755,16 @@ class PaperTradingComposition:
             )
         )
 
+        end_of_day_liquidator = (
+            EndOfDayLiquidationService(
+                broker=paper_broker,
+                order_queue_service=order_queue_service,
+                execution_service=queue_execution_service,
+                portfolio_update_service=portfolio_update_service,
+                now_provider=resolved_now_provider,
+            )
+        )
+
         strategy_routing_snapshot = None
         symbol_strategy_router = None
 
@@ -860,6 +873,7 @@ class PaperTradingComposition:
                 calendar=market_calendar
             ),
             dashboard_publisher=None,
+            end_of_day_liquidator=end_of_day_liquidator,
             post_run_hooks=(),
             settings=PaperTradingDaySettings(
                 cycle_interval_seconds=(

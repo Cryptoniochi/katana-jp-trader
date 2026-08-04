@@ -182,6 +182,26 @@ class KabuStationClient:
             payload=None,
         )
 
+    def symbol_name(
+        self,
+        symbol: KabuStationSymbol,
+    ) -> str | None:
+        """板情報応答から銘柄名を取得する。"""
+
+        payload = self.board(symbol)
+
+        for key in (
+            "SymbolName",
+            "DisplayName",
+            "SymbolNameFull",
+        ):
+            value = str(payload.get(key) or "").strip()
+
+            if value:
+                return value
+
+        return None
+
     def _ensure_token(self) -> str:
         """トークン未取得の場合は自動取得する。"""
 

@@ -6,11 +6,13 @@ import json
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from typing import Protocol
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from app.dashboard.symbol_name_reader import SymbolNameReader
 from app.market.market_calendar import TokyoMarketCalendar
 from app.runtime.dynamic_watchlist_schedule_models import (
     DynamicWatchlistScheduleSettings,
@@ -29,6 +31,16 @@ DEFAULT_REPORT_PATH = Path(
 DEFAULT_MARKER_DIRECTORY = Path(
     "reports/service/dynamic_watchlist"
 )
+
+
+class SymbolNameResolver(Protocol):
+    """銘柄コード一覧から名称Cacheを補完する最小契約。"""
+
+    def resolve(
+        self,
+        codes: Sequence[str],
+    ) -> dict[str, str]:
+        """取得済みを含む銘柄名辞書を返す。"""
 
 
 class DynamicWatchlistScheduler:
@@ -51,6 +63,7 @@ class DynamicWatchlistScheduler:
             subprocess.run
         ),
         monotonic_provider: Callable[[], float] = time.monotonic,
+        symbol_name_resolver: SymbolNameResolver | None = None,
     ) -> None:
         self.enabled = enabled
         self.database_path = Path(database_path)
@@ -76,6 +89,13 @@ class DynamicWatchlistScheduler:
         )
         self.command_runner = command_runner
         self.monotonic_provider = monotonic_provider
+        self.symbol_name_resolver = (
+            symbol_name_resolver
+            if symbol_name_resolver is not None
+            else SymbolNameReader(
+                self.database_path
+            )
+        )
         self.last_attempt_at: datetime | None = None
         self.last_exit_code: int | None = None
         self._retry_after_monotonic = 0.0
@@ -131,6 +151,17 @@ class DynamicWatchlistScheduler:
 
         if marker_path.exists():
             selected_count, applied = self._read_latest_result()
+            refreshed_count = self._refresh_symbol_names_once(
+                marker_path=marker_path,
+            )
+            message = "Dynamic Watchlist was already updated today."
+
+            if refreshed_count is not None:
+                message += (
+                    " Symbol name cache was refreshed. "
+                    f"resolved_count={refreshed_count}"
+                )
+
             return self._publish(
                 now=now,
                 state=DynamicWatchlistScheduleState.COMPLETED,
@@ -138,7 +169,7 @@ class DynamicWatchlistScheduler:
                 next_action_at=None,
                 selected_count=selected_count,
                 applied=applied,
-                message="Dynamic Watchlist was already updated today.",
+                message=message,
             )
 
         if self.monotonic_provider() < self._retry_after_monotonic:
@@ -215,6 +246,8 @@ class DynamicWatchlistScheduler:
                 ),
             )
 
+        resolved_name_count = self._refresh_symbol_names()
+
         marker_path.parent.mkdir(
             parents=True,
             exist_ok=True,
@@ -227,6 +260,10 @@ class DynamicWatchlistScheduler:
                     "selected_count": selected_count,
                     "applied": applied,
                     "exit_code": self.last_exit_code,
+                    "symbol_names_refreshed": True,
+                    "resolved_symbol_name_count": (
+                        resolved_name_count
+                    ),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -243,7 +280,9 @@ class DynamicWatchlistScheduler:
             applied=applied,
             message=(
                 "Dynamic Watchlist update completed. "
-                f"selected_count={selected_count}"
+                f"selected_count={selected_count} "
+                "resolved_symbol_name_count="
+                f"{resolved_name_count}"
             ),
         )
 
@@ -294,6 +333,111 @@ class DynamicWatchlistScheduler:
             bool(applied)
             if applied is not None
             else None,
+        )
+
+    def _refresh_symbol_names_once(
+        self,
+        *,
+        marker_path: Path,
+    ) -> int | None:
+        """旧Markerの日だけ名称Cacheを一度補完する。"""
+
+        try:
+            marker = json.loads(
+                marker_path.read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+        ):
+            marker = {}
+
+        if (
+            isinstance(marker, dict)
+            and marker.get(
+                "symbol_names_refreshed"
+            ) is True
+        ):
+            return None
+
+        resolved_count = self._refresh_symbol_names()
+
+        if not isinstance(marker, dict):
+            marker = {}
+
+        marker["symbol_names_refreshed"] = True
+        marker[
+            "resolved_symbol_name_count"
+        ] = resolved_count
+
+        temporary = marker_path.with_suffix(
+            marker_path.suffix + ".tmp"
+        )
+        temporary.write_text(
+            json.dumps(
+                marker,
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        temporary.replace(marker_path)
+        return resolved_count
+
+    def _refresh_symbol_names(self) -> int:
+        """最新選定銘柄の名称Cacheを失敗非致命で補完する。"""
+
+        codes = self._read_selected_codes()
+
+        if not codes:
+            return 0
+
+        try:
+            names = self.symbol_name_resolver.resolve(
+                codes
+            )
+        except Exception:
+            # 銘柄名取得失敗でWatchlist更新を失敗させない。
+            return 0
+
+        return len(names)
+
+    def _read_selected_codes(self) -> tuple[str, ...]:
+        """latest.jsonから選定済み銘柄コードを返す。"""
+
+        if not self.latest_report_path.exists():
+            return ()
+
+        try:
+            payload = json.loads(
+                self.latest_report_path.read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+        ):
+            return ()
+
+        selected = payload.get("selected", [])
+
+        if not isinstance(selected, list):
+            return ()
+
+        return tuple(
+            dict.fromkeys(
+                str(candidate.get("code") or "").strip()
+                for candidate in selected
+                if isinstance(candidate, dict)
+                and str(
+                    candidate.get("code") or ""
+                ).strip()
+            )
         )
 
     def _marker_path(self, target_date) -> Path:

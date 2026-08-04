@@ -30,6 +30,7 @@ from app.dashboard.katana_service_status_reader import (
 from app.dashboard.dashboard_strategy_service import (
     DashboardStrategyService,
 )
+from app.dashboard.symbol_name_reader import SymbolNameReader
 from app.analytics.performance_breakdown_service import (
     PerformanceBreakdownAnalyzer,
 )
@@ -69,6 +70,7 @@ def create_dashboard_app(
     dynamic_watchlist_reader: DynamicWatchlistStatusReader | None = None,
     morning_preflight_reader: MorningPreflightStatusReader | None = None,
     daily_report_reader: DailyReportReader | None = None,
+    symbol_name_reader: SymbolNameReader | None = None,
 ) -> FastAPI:
     """Read-only Dashboard用FastAPI Appを作成する。"""
 
@@ -152,6 +154,66 @@ def create_dashboard_app(
                 if portfolio is not None
                 else []
             ),
+        }
+
+    @app.get("/api/dashboard/symbol-names")
+    def dashboard_symbol_names() -> dict[str, object]:
+        if symbol_name_reader is None:
+            return {
+                "count": 0,
+                "names": {},
+            }
+
+        codes: list[str] = []
+
+        payload = service.create_payload().to_dict()
+        portfolio = payload["snapshot"].get(
+            "portfolio"
+        )
+
+        if portfolio is not None:
+            codes.extend(
+                str(position.get("code") or "")
+                for position in portfolio.get(
+                    "positions",
+                    [],
+                )
+            )
+
+        if dynamic_watchlist_reader is not None:
+            watchlist = dynamic_watchlist_reader.read()
+            codes.extend(
+                str(candidate.get("code") or "")
+                for candidate in watchlist.get(
+                    "candidates",
+                    [],
+                )
+            )
+
+        if strategy_service is not None:
+            strategies = (
+                strategy_service
+                .create_payload()
+                .to_dict()
+            )
+            codes.extend(
+                str(trade.get("code") or "")
+                for key in (
+                    "recent_trades",
+                    "recent_completed_trades",
+                )
+                for trade in strategies.get(key, [])
+            )
+
+        names = symbol_name_reader.resolve(
+            code
+            for code in codes
+            if code
+        )
+
+        return {
+            "count": len(names),
+            "names": names,
         }
 
     @app.get("/api/dashboard/recovery")

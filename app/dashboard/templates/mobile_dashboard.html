@@ -441,6 +441,14 @@
 
 
     const JST_TIME_ZONE = "Asia/Tokyo";
+    let symbolNames = {};
+
+    function symbolLabel(code) {
+      const normalized = String(code ?? "—");
+      const name = symbolNames[normalized];
+      return name ? `${normalized} ${name}` : normalized;
+    }
+
 
     function parseDateTime(value) {
       if (!value) return null;
@@ -590,7 +598,7 @@
           <div class="dynamic-watchlist-card-header">
             <div>
               <span class="dynamic-rank">#${index + 1}</span>
-              <strong>${candidate.code ?? "—"}</strong>
+              <strong>${symbolLabel(candidate.code)}</strong>
             </div>
             <b>${candidate.rating_tier ?? "C"}</b>
           </div>
@@ -1405,7 +1413,7 @@
             <span>${String(trade.side ?? "—").toUpperCase()}</span>
           </div>
           <div class="mobile-trade-row">
-            <span>${trade.code ?? "—"}</span>
+            <span>${symbolLabel(trade.code)}</span>
             <span>${trade.quantity ?? 0} shares</span>
             <span>${yen.format(trade.execution_price ?? 0)}</span>
           </div>
@@ -1435,7 +1443,7 @@
         element.className = "mobile-detail-card";
         element.innerHTML = `
           <div class="mobile-card-heading">
-            <strong>${position.code}</strong>
+            <strong>${symbolLabel(position.code)}</strong>
             <span>${position.side}</span>
           </div>
           <div class="mobile-detail-grid">
@@ -1460,6 +1468,7 @@
         scheduleResponse,
         runtimeResponse,
         positionsResponse,
+        symbolNamesResponse,
         dailyReportResponse,
         morningPreflightResponse,
         dynamicWatchlistResponse
@@ -1477,6 +1486,9 @@
         fetch("/api/dashboard/positions", {
           cache: "no-store"
         }),
+        fetch("/api/dashboard/symbol-names", {
+          cache: "no-store"
+        }),
         fetch("/api/dashboard/daily-report"),
         fetch("/api/dashboard/morning-preflight"),
         fetch("/api/dashboard/dynamic-watchlist")
@@ -1492,6 +1504,7 @@
         || !scheduleResponse.ok
         || !runtimeResponse.ok
         || !positionsResponse.ok
+        || !symbolNamesResponse.ok
         || !dailyReportResponse.ok
         || !morningPreflightResponse.ok
         || !dynamicWatchlistResponse.ok
@@ -1520,6 +1533,10 @@
       const positionsPayload = (
         await positionsResponse.json()
       );
+      const symbolNamesPayload = (
+        await symbolNamesResponse.json()
+      );
+      symbolNames = symbolNamesPayload?.names ?? {};
       const dailyReport = (
         await dailyReportResponse.json()
       );

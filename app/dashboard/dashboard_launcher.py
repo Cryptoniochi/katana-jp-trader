@@ -39,6 +39,7 @@ from app.dashboard.dashboard_snapshot_file import (
 from app.dashboard.dashboard_strategy_service import (
     DashboardStrategyService,
 )
+from app.dashboard.symbol_name_reader import SymbolNameReader
 from app.dashboard.dashboard_web_app import (
     create_dashboard_app,
 )
@@ -267,6 +268,9 @@ def create_launcher_app(
     daily_report_reader = DailyReportReader(
         daily_report_directory
     )
+    symbol_name_reader = SymbolNameReader(
+        database_path
+    )
     readiness_service = OperationalReadinessService(
         database_path=database_path,
         watchlist_path=Path("watchlist.txt"),
@@ -290,6 +294,7 @@ def create_launcher_app(
         dynamic_watchlist_reader=dynamic_watchlist_reader,
         morning_preflight_reader=morning_preflight_reader,
         daily_report_reader=daily_report_reader,
+        symbol_name_reader=symbol_name_reader,
     )
 
 
