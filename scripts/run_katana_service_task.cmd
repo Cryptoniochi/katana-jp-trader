@@ -17,10 +17,10 @@ if not exist "logs\service" (
   --maximum-megabytes 5 ^
   --backup-count 5
 
-echo ==================================================>> "logs\service\katana_service.log"
+echo -------------------------------------------------->> "logs\service\katana_service.log"
 echo Project KATANA Service task started at %DATE% %TIME%>> "logs\service\katana_service.log"
 
-".venv\Scripts\python.exe" -m app.run_katana_service ^
+".venv\Scripts\python.exe" -m app.run_katana_service_resilient ^
   --database-path data\katana.db ^
   --dashboard-port 8000 ^
   --enable-dynamic-watchlist-schedule ^

@@ -1,0 +1,16 @@
+{
+  "generated_at": "2026-08-05T06:35:44.637971+00:00",
+  "service_state": "idle",
+  "kabu_station_readiness": "not_checked",
+  "service_started_at": "2026-08-05T06:35:44.637655+00:00",
+  "uptime_seconds": 0.000316,
+  "components": [],
+  "recent_events": [
+    {
+      "occurred_at": "2026-08-05T06:35:44.637665+00:00",
+      "event_type": "service_started",
+      "component": null,
+      "message": "KATANA Service Manager started."
+    }
+  ]
+}
