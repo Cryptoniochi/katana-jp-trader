@@ -40,6 +40,7 @@ class DashboardRecentTrade:
     execution_price: float
     commission: float
     slippage: float
+    realized_profit_loss: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -51,6 +52,9 @@ class DashboardRecentTrade:
             "execution_price": self.execution_price,
             "commission": self.commission,
             "slippage": self.slippage,
+            "realized_profit_loss": (
+                self.realized_profit_loss
+            ),
         }
 
 
@@ -372,126 +376,27 @@ class DashboardStrategyService:
         connection: sqlite3.Connection,
         trading_date: date,
     ) -> dict[str, dict[str, float | int]]:
-        if not (
-            cls._table_exists(
-                connection,
-                "trade_executions",
-            )
-            and cls._table_exists(
-                connection,
-                "trade_signals",
-            )
-        ):
-            return {}
-
-        rows = connection.execute(
-            """
-            SELECT
-                e.execution_id,
-                e.code,
-                e.side,
-                e.quantity,
-                e.execution_price,
-                e.executed_at,
-                e.commission,
-                e.slippage,
-                s.strategy_name,
-                s.action
-            FROM trade_executions AS e
-            JOIN trade_signals AS s
-              ON s.signal_id = e.signal_id
-            WHERE substr(e.executed_at, 1, 10) = ?
-            ORDER BY e.executed_at ASC, e.id ASC
-            """,
-            (trading_date.isoformat(),),
-        ).fetchall()
-
-        open_entries: dict[
-            tuple[str, str],
-            list[dict[str, float | int]],
-        ] = {}
+        analysis = cls._analyze_executions(
+            connection
+        )
         pnl_by_strategy: dict[str, list[float]] = {}
 
-        for row in rows:
-            code = str(row[1])
-            side = str(row[2]).lower()
-            quantity = int(row[3])
-            price = float(row[4])
-            commission = float(row[6])
-            slippage = float(row[7])
-            strategy_name = str(row[8])
-            action = str(row[9]).lower()
-            key = (
-                strategy_name,
-                code,
-            )
-
-            if action == "buy" or side == "buy":
-                open_entries.setdefault(
-                    key,
-                    [],
-                ).append(
-                    {
-                        "quantity": quantity,
-                        "remaining": quantity,
-                        "price": price,
-                        "cost": commission + slippage,
-                    }
-                )
+        for item in analysis:
+            if item["trading_date"] != trading_date:
                 continue
 
-            if (
-                action not in {"sell", "exit"}
-                and side != "sell"
-            ):
-                continue
-
-            remaining_exit = quantity
-            entries = open_entries.setdefault(
-                key,
-                [],
-            )
-
-            while remaining_exit > 0 and entries:
-                entry = entries[0]
-                matched = min(
-                    int(entry["remaining"]),
-                    remaining_exit,
-                )
-                entry_cost = (
-                    float(entry["cost"])
-                    * matched
-                    / int(entry["quantity"])
-                )
-                exit_cost = (
-                    (commission + slippage)
-                    * matched
-                    / quantity
-                )
-                pnl = (
-                    (
-                        price
-                        - float(entry["price"])
-                    )
-                    * matched
-                    - entry_cost
-                    - exit_cost
-                )
+            for strategy_name, value in item[
+                "pnl_by_entry_strategy"
+            ].items():
                 pnl_by_strategy.setdefault(
                     strategy_name,
                     [],
-                ).append(pnl)
+                ).append(float(value))
 
-                entry["remaining"] = (
-                    int(entry["remaining"])
-                    - matched
-                )
-                remaining_exit -= matched
-
-                if int(entry["remaining"]) == 0:
-                    entries.pop(0)
-
-        result = {}
+        result: dict[
+            str,
+            dict[str, float | int],
+        ] = {}
 
         for strategy_name, values in pnl_by_strategy.items():
             profits = [
@@ -515,6 +420,160 @@ class DashboardStrategyService:
 
         return result
 
+    @classmethod
+    def _analyze_executions(
+        cls,
+        connection: sqlite3.Connection,
+    ) -> tuple[dict[str, Any], ...]:
+        """全約定をコード単位FIFOで照合し、決済損益を返す。"""
+
+        if not (
+            cls._table_exists(
+                connection,
+                "trade_executions",
+            )
+            and cls._table_exists(
+                connection,
+                "trade_signals",
+            )
+        ):
+            return ()
+
+        rows = connection.execute(
+            """
+            SELECT
+                e.execution_id,
+                e.code,
+                e.side,
+                e.quantity,
+                e.execution_price,
+                e.executed_at,
+                e.commission,
+                e.slippage,
+                s.strategy_name,
+                s.action
+            FROM trade_executions AS e
+            JOIN trade_signals AS s
+              ON s.signal_id = e.signal_id
+            ORDER BY e.executed_at ASC, e.id ASC
+            """
+        ).fetchall()
+
+        open_entries: dict[
+            str,
+            list[dict[str, Any]],
+        ] = {}
+        results: list[dict[str, Any]] = []
+
+        for row in rows:
+            execution_id = str(row[0])
+            code = str(row[1])
+            side = str(row[2]).lower()
+            quantity = int(row[3])
+            price = float(row[4])
+            executed_at = cls._parse_datetime(
+                str(row[5])
+            )
+            commission = float(row[6])
+            slippage = float(row[7])
+            strategy_name = str(row[8])
+            action = str(row[9]).lower()
+
+            if action == "buy" or side == "buy":
+                open_entries.setdefault(
+                    code,
+                    [],
+                ).append(
+                    {
+                        "quantity": quantity,
+                        "remaining": quantity,
+                        "price": price,
+                        "cost": commission + slippage,
+                        "strategy_name": strategy_name,
+                    }
+                )
+                continue
+
+            if (
+                action not in {"sell", "exit"}
+                and side != "sell"
+            ):
+                continue
+
+            remaining_exit = quantity
+            entries = open_entries.setdefault(
+                code,
+                [],
+            )
+            realized = 0.0
+            pnl_by_entry_strategy: dict[str, float] = {}
+
+            while remaining_exit > 0 and entries:
+                entry = entries[0]
+                matched = min(
+                    int(entry["remaining"]),
+                    remaining_exit,
+                )
+                entry_cost = (
+                    float(entry["cost"])
+                    * matched
+                    / int(entry["quantity"])
+                )
+                exit_cost = (
+                    (commission + slippage)
+                    * matched
+                    / quantity
+                )
+                matched_pnl = (
+                    (
+                        price
+                        - float(entry["price"])
+                    )
+                    * matched
+                    - entry_cost
+                    - exit_cost
+                )
+                realized += matched_pnl
+                entry_strategy = str(
+                    entry["strategy_name"]
+                )
+                pnl_by_entry_strategy[entry_strategy] = (
+                    pnl_by_entry_strategy.get(
+                        entry_strategy,
+                        0.0,
+                    )
+                    + matched_pnl
+                )
+
+                entry["remaining"] = (
+                    int(entry["remaining"])
+                    - matched
+                )
+                remaining_exit -= matched
+
+                if int(entry["remaining"]) == 0:
+                    entries.pop(0)
+
+            results.append(
+                {
+                    "execution_id": execution_id,
+                    "trading_date": (
+                        executed_at.date()
+                    ),
+                    "realized_profit_loss": (
+                        realized
+                        if remaining_exit == 0
+                        else None
+                    ),
+                    "unmatched_quantity": remaining_exit,
+                    "pnl_by_entry_strategy": (
+                        pnl_by_entry_strategy
+                    ),
+                }
+            )
+
+        return tuple(results)
+
     def _load_recent_trades(
         self,
         connection: sqlite3.Connection,
@@ -531,9 +590,18 @@ class DashboardStrategyService:
         ):
             return ()
 
+        analysis = {
+            str(item["execution_id"]): item.get(
+                "realized_profit_loss"
+            )
+            for item in self._analyze_executions(
+                connection
+            )
+        }
         rows = connection.execute(
             """
             SELECT
+                e.execution_id,
                 e.executed_at,
                 s.strategy_name,
                 e.code,
@@ -554,18 +622,21 @@ class DashboardStrategyService:
         return tuple(
             DashboardRecentTrade(
                 executed_at=self._parse_datetime(
-                    str(row[0])
+                    str(row[1])
                 ),
                 strategy_name=self.DISPLAY_NAMES.get(
-                    str(row[1]),
-                    str(row[1]),
+                    str(row[2]),
+                    str(row[2]),
                 ),
-                code=str(row[2]),
-                side=str(row[3]).upper(),
-                quantity=int(row[4]),
-                execution_price=float(row[5]),
-                commission=float(row[6]),
-                slippage=float(row[7]),
+                code=str(row[3]),
+                side=str(row[4]).upper(),
+                quantity=int(row[5]),
+                execution_price=float(row[6]),
+                commission=float(row[7]),
+                slippage=float(row[8]),
+                realized_profit_loss=analysis.get(
+                    str(row[0])
+                ),
             )
             for row in rows
         )

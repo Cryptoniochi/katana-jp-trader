@@ -158,6 +158,15 @@ def test_market_close_stops_process_and_completes(
         2026, 8, 3, 6, 30,
         tzinfo=timezone.utc,
     )
+    stopping = controller.run_once()
+
+    assert stopping.state is ScheduledTradingState.STOPPING
+    assert stopping.process_id == 4321
+    assert process.returncode is None
+    assert len(started) == 1
+
+    process.returncode = 0
+
     completed = controller.run_once()
 
     assert completed.state is ScheduledTradingState.COMPLETED

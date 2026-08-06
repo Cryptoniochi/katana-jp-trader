@@ -44,6 +44,7 @@ from app.runtime.katana_service_manager import (
     build_scheduled_paper_trading_command,
     build_daily_report_scheduler_command,
     build_dynamic_watchlist_scheduler_command,
+    build_universe_daily_scheduler_command,
     build_morning_preflight_scheduler_command,
 )
 from app.runtime.katana_service_models import (
@@ -99,6 +100,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "営業日8:20のDynamic Watchlist自動更新を"
+            "有効化します。"
+        ),
+    )
+    parser.add_argument(
+        "--enable-universe-daily-schedule",
+        action="store_true",
+        help=(
+            "営業日15:36の候補ユニバース日足自動収集を"
             "有効化します。"
         ),
     )
@@ -322,6 +331,19 @@ def run(
                 watchlist_path=parsed.watchlist_path,
                 enabled=(
                     parsed.enable_dynamic_watchlist_schedule
+                ),
+            ),
+            enabled=True,
+            restart_on_failure=True,
+            restart_delay_seconds=30.0,
+            maximum_restarts=20,
+        ),
+        ManagedProcessDefinition(
+            name=ManagedComponentName.UNIVERSE_DAILY_SCHEDULER,
+            command=build_universe_daily_scheduler_command(
+                database_path=parsed.database_path,
+                enabled=(
+                    parsed.enable_universe_daily_schedule
                 ),
             ),
             enabled=True,

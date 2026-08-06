@@ -146,12 +146,18 @@ class PaperTradingDayService:
         cycle_count = 0
         stop_reason = PaperTradingDayStopReason.MARKET_CLOSED
         error_message: str | None = None
+        liquidation_completed = False
 
         try:
             while True:
                 if self.stop_requested():
                     stop_reason = (
                         PaperTradingDayStopReason.STOP_REQUESTED
+                    )
+                    liquidation_completed = (
+                        self._liquidate_if_market_closed(
+                            already_completed=liquidation_completed
+                        )
                     )
                     break
 
@@ -177,8 +183,12 @@ class PaperTradingDayService:
                         PaperTradingDayStopReason.MARKET_CLOSED
                     )
 
-                    if self.end_of_day_liquidator is not None:
-                        self.end_of_day_liquidator.close_all_positions()
+                    liquidation_completed = (
+                        self._liquidate_if_market_closed(
+                            already_completed=liquidation_completed,
+                            session=clock_snapshot.session,
+                        )
+                    )
 
                     break
 
@@ -227,10 +237,22 @@ class PaperTradingDayService:
                     stop_reason = (
                         PaperTradingDayStopReason.STOP_REQUESTED
                     )
+                    liquidation_completed = (
+                        self._liquidate_if_market_closed(
+                            already_completed=liquidation_completed
+                        )
+                    )
                     break
 
                 self.sleeper(
                     self.settings.cycle_interval_seconds
+                )
+
+            if not liquidation_completed:
+                liquidation_completed = (
+                    self._liquidate_if_market_closed(
+                        already_completed=False
+                    )
                 )
 
             summary = self.runtime.complete()
@@ -267,6 +289,63 @@ class PaperTradingDayService:
         )
 
         return self._run_post_run_hooks(result)
+
+    def _liquidate_if_market_closed(
+        self,
+        *,
+        already_completed: bool,
+        session: TokyoMarketSession | None = None,
+    ) -> bool:
+        """市場終了後なら設定済みLiquidatorを一度だけ実行する。"""
+
+        if already_completed:
+            return True
+
+        resolved_session = session
+
+        if resolved_session is None:
+            resolved_session = self.market_clock.snapshot(
+                self._current_time()
+            ).session
+
+        if resolved_session is not TokyoMarketSession.AFTER_CLOSE:
+            return False
+
+        if self.end_of_day_liquidator is None:
+            return False
+
+        result = self.end_of_day_liquidator.close_all_positions()
+
+        external_execution_recorder = getattr(
+            self.runtime,
+            "record_external_executions",
+            None,
+        )
+
+        if callable(external_execution_recorder):
+            external_execution_recorder(
+                int(
+                    getattr(
+                        result,
+                        "executed_count",
+                        0,
+                    )
+                    or 0
+                )
+            )
+
+        if not bool(getattr(result, "completed", True)):
+            remaining = getattr(
+                result,
+                "remaining_position_count",
+                "unknown",
+            )
+            raise RuntimeError(
+                "市場終了時の強制決済が完了しませんでした。 "
+                f"remaining={remaining}"
+            )
+
+        return True
 
     def _run_post_run_hooks(
         self,

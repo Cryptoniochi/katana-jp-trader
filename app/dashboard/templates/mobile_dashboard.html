@@ -182,11 +182,11 @@
             <b id="dynamic-watchlist-eligible">0</b>
           </div>
           <div>
-            <span>Capital</span>
+            <span>Selection Capital</span>
             <b id="dynamic-watchlist-capital">—</b>
           </div>
           <div>
-            <span>Budget</span>
+            <span>Purchase Budget</span>
             <b id="dynamic-watchlist-budget">—</b>
           </div>
         </div>
@@ -417,7 +417,8 @@
         <h2>Today's Executions</h2>
       </div>
       <p class="mobile-status-note">
-        Paper Brokerで本日（JST）に保存された約定だけを表示します。
+        Paper Brokerで本日（JST）に保存された約定を表示します。
+        金額は約定単価で、決済約定には実現損益も表示します。
       </p>
       <div id="mobile-recent-trades" class="mobile-card-list"></div>
     </section>
@@ -931,6 +932,15 @@
         )
         : "";
 
+      const pnlWarning = (
+        payload.pnl_consistent === false
+      )
+        ? (
+          " WARNING: Session Equity Change and P/L "
+          + "reconciliation do not match."
+        )
+        : "";
+
       document.getElementById(
         "paper-runtime-message"
       ).textContent = (
@@ -941,6 +951,7 @@
             ? (
               "Runtime activity is being recorded."
               + inheritedPositionNote
+              + pnlWarning
             )
             : "Paper Trading Runtime has not reported yet."
         )
@@ -1401,26 +1412,47 @@
             No executions today.
           </article>
         `;
-        return;
+        return 0;
       }
 
       for (const trade of todaysExecutions.slice(0, 20)) {
         const element = document.createElement("article");
         element.className = "mobile-detail-card";
+        const realized = trade.realized_profit_loss;
+        const realizedLabel = (
+          realized === null || realized === undefined
+            ? "—"
+            : yen.format(realized)
+        );
         element.innerHTML = `
           <div class="mobile-card-heading">
             <strong>${trade.strategy_name ?? "—"}</strong>
             <span>${String(trade.side ?? "—").toUpperCase()}</span>
           </div>
-          <div class="mobile-trade-row">
-            <span>${symbolLabel(trade.code)}</span>
-            <span>${trade.quantity ?? 0} shares</span>
-            <span>${yen.format(trade.execution_price ?? 0)}</span>
+          <div class="mobile-detail-grid">
+            <div>
+              <span>Symbol</span>
+              <b>${symbolLabel(trade.code)}</b>
+            </div>
+            <div>
+              <span>Quantity</span>
+              <b>${trade.quantity ?? 0} shares</b>
+            </div>
+            <div>
+              <span>Execution Price</span>
+              <b>${yen.format(trade.execution_price ?? 0)}</b>
+            </div>
+            <div>
+              <span>Realized P/L</span>
+              <b>${realizedLabel}</b>
+            </div>
           </div>
           <small>${formatJstDateTime(trade.executed_at)}</small>
         `;
         list.appendChild(element);
       }
+
+      return todaysExecutions.length;
     }
 
     function renderPositions(positions) {
@@ -1645,7 +1677,15 @@
       currentBreakdownPayload = breakdown;
       renderMobileBreakdown();
       renderStrategies(strategies);
-      renderTrades(strategies.recent_trades);
+      const todayExecutionCount = renderTrades(
+        strategies.recent_trades
+      );
+      document.getElementById(
+        "paper-runtime-executions"
+      ).textContent = todayExecutionCount;
+      document.getElementById(
+        "mobile-execution-count"
+      ).textContent = todayExecutionCount;
       renderPositions(currentPositions);
     }
 

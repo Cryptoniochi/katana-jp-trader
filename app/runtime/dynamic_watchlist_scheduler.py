@@ -8,7 +8,7 @@ import sys
 import time
 from collections.abc import Callable, Sequence
 from typing import Protocol
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -150,27 +150,47 @@ class DynamicWatchlistScheduler:
         marker_path = self._marker_path(target_date)
 
         if marker_path.exists():
-            selected_count, applied = self._read_latest_result()
-            refreshed_count = self._refresh_symbol_names_once(
-                marker_path=marker_path,
+            (
+                selected_count,
+                applied,
+                report_target_date,
+                market_data_date,
+            ) = self._read_latest_result()
+            expected_market_data_date = (
+                self._expected_market_data_date(target_date)
             )
-            message = "Dynamic Watchlist was already updated today."
 
-            if refreshed_count is not None:
-                message += (
-                    " Symbol name cache was refreshed. "
-                    f"resolved_count={refreshed_count}"
+            if (
+                applied
+                and report_target_date == target_date
+                and market_data_date is not None
+                and market_data_date >= expected_market_data_date
+            ):
+                refreshed_count = self._refresh_symbol_names_once(
+                    marker_path=marker_path,
+                )
+                message = (
+                    "Dynamic Watchlist was already updated today. "
+                    f"market_data_date={market_data_date.isoformat()}"
                 )
 
-            return self._publish(
-                now=now,
-                state=DynamicWatchlistScheduleState.COMPLETED,
-                business_day=True,
-                next_action_at=None,
-                selected_count=selected_count,
-                applied=applied,
-                message=message,
-            )
+                if refreshed_count is not None:
+                    message += (
+                        " Symbol name cache was refreshed. "
+                        f"resolved_count={refreshed_count}"
+                    )
+
+                return self._publish(
+                    now=now,
+                    state=DynamicWatchlistScheduleState.COMPLETED,
+                    business_day=True,
+                    next_action_at=None,
+                    selected_count=selected_count,
+                    applied=applied,
+                    message=message,
+                )
+
+            marker_path.unlink(missing_ok=True)
 
         if self.monotonic_provider() < self._retry_after_monotonic:
             return self._publish(
@@ -220,13 +240,24 @@ class DynamicWatchlistScheduler:
             timeout=self.settings.command_timeout_seconds,
         )
         self.last_exit_code = int(completed.returncode)
-        selected_count, applied = self._read_latest_result()
+        (
+            selected_count,
+            applied,
+            report_target_date,
+            market_data_date,
+        ) = self._read_latest_result()
+        expected_market_data_date = (
+            self._expected_market_data_date(target_date)
+        )
 
         if (
             completed.returncode != 0
             or not applied
             or selected_count is None
             or selected_count < self.settings.minimum_symbols
+            or report_target_date != target_date
+            or market_data_date is None
+            or market_data_date < expected_market_data_date
         ):
             self._retry_after_monotonic = (
                 self.monotonic_provider()
@@ -242,7 +273,11 @@ class DynamicWatchlistScheduler:
                 message=(
                     "Dynamic Watchlist update failed. "
                     f"exit_code={completed.returncode} "
-                    f"selected_count={selected_count} applied={applied}"
+                    f"selected_count={selected_count} applied={applied} "
+                    f"report_target_date={report_target_date} "
+                    f"market_data_date={market_data_date} "
+                    "expected_market_data_date="
+                    f"{expected_market_data_date}"
                 ),
             )
 
@@ -264,6 +299,14 @@ class DynamicWatchlistScheduler:
                     "resolved_symbol_name_count": (
                         resolved_name_count
                     ),
+                    "market_data_date": (
+                        market_data_date.isoformat()
+                        if market_data_date is not None
+                        else None
+                    ),
+                    "expected_market_data_date": (
+                        expected_market_data_date.isoformat()
+                    ),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -282,7 +325,8 @@ class DynamicWatchlistScheduler:
                 "Dynamic Watchlist update completed. "
                 f"selected_count={selected_count} "
                 "resolved_symbol_name_count="
-                f"{resolved_name_count}"
+                f"{resolved_name_count} "
+                f"market_data_date={market_data_date.isoformat()}"
             ),
         )
 
@@ -304,9 +348,16 @@ class DynamicWatchlistScheduler:
     def request_stop(self) -> None:
         self._stop_requested = True
 
-    def _read_latest_result(self) -> tuple[int | None, bool | None]:
+    def _read_latest_result(
+        self,
+    ) -> tuple[
+        int | None,
+        bool | None,
+        date | None,
+        date | None,
+    ]:
         if not self.latest_report_path.exists():
-            return None, None
+            return None, None, None, None
 
         try:
             payload = json.loads(
@@ -319,7 +370,7 @@ class DynamicWatchlistScheduler:
             UnicodeError,
             json.JSONDecodeError,
         ):
-            return None, None
+            return None, None, None, None
 
         selected = payload.get("selected", [])
         selected_count = (
@@ -328,12 +379,43 @@ class DynamicWatchlistScheduler:
             else None
         )
         applied = payload.get("applied")
+        report_target_date = self._parse_date(
+            payload.get("target_date")
+        )
+        market_data_date = self._parse_date(
+            payload.get("market_data_date")
+        )
         return (
             selected_count,
             bool(applied)
             if applied is not None
             else None,
+            report_target_date,
+            market_data_date,
         )
+
+    def _expected_market_data_date(
+        self,
+        target_date: date,
+    ) -> date:
+        """当日8:20時点で利用可能な直近営業日を返す。"""
+
+        candidate = target_date - timedelta(days=1)
+
+        while not self.calendar.is_business_day(candidate):
+            candidate -= timedelta(days=1)
+
+        return candidate
+
+    @staticmethod
+    def _parse_date(value) -> date | None:
+        if value is None:
+            return None
+
+        try:
+            return date.fromisoformat(str(value))
+        except ValueError:
+            return None
 
     def _refresh_symbol_names_once(
         self,

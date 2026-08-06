@@ -84,6 +84,8 @@ class PaperTradingRuntime:
         self._started_at: datetime | None = None
         self._records: list[PaperTradingCycleRecord] = []
         self._initial_equity: float | None = None
+        self._initial_unrealized_profit_loss: float | None = None
+        self._external_execution_count = 0
         self._status: PaperTradingRuntimeStatus | None = None
 
     @property
@@ -137,6 +139,10 @@ class PaperTradingRuntime:
         self._initial_equity = (
             initial_snapshot.broker_equity
         )
+        self._initial_unrealized_profit_loss = (
+            initial_snapshot.total_unrealized_profit_loss
+        )
+        self._external_execution_count = 0
         self._status = PaperTradingRuntimeStatus.RUNNING
         self._record_heartbeat(
             event="started",
@@ -236,6 +242,22 @@ class PaperTradingRuntime:
             error_message=normalized,
         )
 
+    def record_external_executions(
+        self,
+        count: int,
+    ) -> None:
+        """通常Cycle外で発生した約定数をRuntimeへ加算する。"""
+
+        self._require_running()
+        normalized = int(count)
+
+        if normalized < 0:
+            raise ValueError(
+                "外部約定数は0以上である必要があります。"
+            )
+
+        self._external_execution_count += normalized
+
     def records(
         self,
     ) -> tuple[PaperTradingCycleRecord, ...]:
@@ -292,6 +314,9 @@ class PaperTradingRuntime:
             records=tuple(self._records),
             initial_equity=self._initial_equity,
             final_equity=final_snapshot.broker_equity,
+            external_execution_count=(
+                self._external_execution_count
+            ),
             error_message=error_message,
         )
 
@@ -364,7 +389,7 @@ class PaperTradingRuntime:
             )
             for record in self._records
         )
-        execution_count = sum(
+        cycle_execution_count = sum(
             int(
                 getattr(
                     record.cycle_result,
@@ -375,6 +400,10 @@ class PaperTradingRuntime:
             )
             for record in self._records
         )
+        execution_count = (
+            cycle_execution_count
+            + self._external_execution_count
+        )
         current_equity = (
             portfolio_snapshot.broker_equity
         )
@@ -383,26 +412,46 @@ class PaperTradingRuntime:
             if self._initial_equity is None
             else current_equity - self._initial_equity
         )
-        realized_profit_loss = sum(
-            float(
-                getattr(
-                    position,
-                    "realized_profit_loss",
-                    0.0,
-                )
-                or 0.0
-            )
-            for position in portfolio_snapshot.positions
-        )
         unrealized_profit_loss = sum(
             self._position_unrealized_profit_loss(
                 position
             )
             for position in portfolio_snapshot.positions
         )
-        total_portfolio_profit_loss = (
-            realized_profit_loss
-            + unrealized_profit_loss
+        initial_unrealized_profit_loss = (
+            self._initial_unrealized_profit_loss
+            if self._initial_unrealized_profit_loss is not None
+            else 0.0
+        )
+        unrealized_profit_loss_change = (
+            unrealized_profit_loss
+            - initial_unrealized_profit_loss
+        )
+        realized_profit_loss = (
+            None
+            if session_equity_change is None
+            else (
+                session_equity_change
+                - unrealized_profit_loss_change
+            )
+        )
+        total_portfolio_profit_loss = session_equity_change
+        pnl_reconciliation_difference = (
+            None
+            if (
+                session_equity_change is None
+                or realized_profit_loss is None
+            )
+            else (
+                session_equity_change
+                - realized_profit_loss
+                - unrealized_profit_loss_change
+            )
+        )
+        pnl_consistent = (
+            None
+            if pnl_reconciliation_difference is None
+            else abs(pnl_reconciliation_difference) < 0.01
         )
 
         payload = {
@@ -434,6 +483,10 @@ class PaperTradingRuntime:
             "failed_cycle_count": failed_cycles,
             "signal_count": signal_count,
             "execution_count": execution_count,
+            "cycle_execution_count": cycle_execution_count,
+            "external_execution_count": (
+                self._external_execution_count
+            ),
             "open_position_count": len(
                 portfolio_snapshot.positions
             ),
@@ -445,10 +498,23 @@ class PaperTradingRuntime:
             "net_profit_loss": session_equity_change,
             "session_equity_change": session_equity_change,
             "realized_profit_loss": realized_profit_loss,
+            "realized_profit_loss_source": (
+                "equity_reconciliation"
+            ),
+            "initial_unrealized_profit_loss": (
+                initial_unrealized_profit_loss
+            ),
             "unrealized_profit_loss": unrealized_profit_loss,
+            "unrealized_profit_loss_change": (
+                unrealized_profit_loss_change
+            ),
             "total_portfolio_profit_loss": (
                 total_portfolio_profit_loss
             ),
+            "pnl_reconciliation_difference": (
+                pnl_reconciliation_difference
+            ),
+            "pnl_consistent": pnl_consistent,
             "risk_evaluated_cycle_count": sum(
                 1
                 for record in self._records

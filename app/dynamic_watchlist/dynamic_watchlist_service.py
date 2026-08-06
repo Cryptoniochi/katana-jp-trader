@@ -10,9 +10,13 @@ import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from statistics import fmean
 from typing import Iterable
+
+
+TOKYO = ZoneInfo("Asia/Tokyo")
 
 from app.dynamic_watchlist.dynamic_watchlist_feature_engine import (
     DynamicWatchlistFeatureEngine,
@@ -89,9 +93,31 @@ class DynamicWatchlistService:
         apply: bool = False,
     ) -> DynamicWatchlistResult:
         now = self._current_time()
+        target_date = now.astimezone(TOKYO).date()
         allowed_codes = self._load_candidate_universe()
         series_by_code = self._load_daily_series(
             allowed_codes=allowed_codes
+        )
+        market_data_dates = tuple(
+            bars[-1].trading_date
+            for bars in series_by_code.values()
+            if bars
+        )
+        market_data_date = (
+            max(market_data_dates)
+            if market_data_dates
+            else None
+        )
+        source_bar_count = sum(
+            len(bars)
+            for bars in series_by_code.values()
+        )
+        latest_market_bar_count = sum(
+            1
+            for bars in series_by_code.values()
+            if bars
+            and market_data_date is not None
+            and bars[-1].trading_date == market_data_date
         )
         learning_feedback = (
             self.learning_feedback_provider.load_all()
@@ -102,7 +128,7 @@ class DynamicWatchlistService:
             self._evaluate_code(
                 code=code,
                 bars=bars,
-                today=now.date(),
+                today=target_date,
                 learning_feedback=learning_feedback.get(code),
             )
             for code, bars in sorted(series_by_code.items())
@@ -156,14 +182,14 @@ class DynamicWatchlistService:
             else:
                 backup_path = self._apply_watchlist(
                     selected=selected,
-                    target_date=now.date(),
+                    target_date=target_date,
                 )
                 applied = True
                 message += " watchlist.txt was updated safely."
 
         result = DynamicWatchlistResult(
             generated_at=now,
-            target_date=now.date(),
+            target_date=target_date,
             settings=self.settings,
             selected=selected,
             evaluated_count=len(candidates),
@@ -184,6 +210,9 @@ class DynamicWatchlistService:
         self._write_reports(
             result=result,
             all_candidates=candidates,
+            market_data_date=market_data_date,
+            source_bar_count=source_bar_count,
+            latest_market_bar_count=latest_market_bar_count,
         )
         return result
 
@@ -790,6 +819,9 @@ class DynamicWatchlistService:
         *,
         result: DynamicWatchlistResult,
         all_candidates: Iterable[DynamicWatchlistCandidate],
+        market_data_date: date | None,
+        source_bar_count: int,
+        latest_market_bar_count: int,
     ) -> None:
         self.report_directory.mkdir(
             parents=True,
@@ -804,6 +836,24 @@ class DynamicWatchlistService:
         latest_path = self.report_directory / "latest.json"
 
         payload = result.to_dict()
+        payload["run_date"] = result.generated_at.astimezone(
+            TOKYO
+        ).date().isoformat()
+        payload["market_data_date"] = (
+            market_data_date.isoformat()
+            if market_data_date is not None
+            else None
+        )
+        payload["market_data_age_days"] = (
+            (result.target_date - market_data_date).days
+            if market_data_date is not None
+            else None
+        )
+        payload["source_bar_count"] = int(source_bar_count)
+        payload["latest_market_bar_count"] = int(
+            latest_market_bar_count
+        )
+        payload["recalculated"] = True
         payload["evaluated"] = [
             candidate.to_dict()
             for candidate in all_candidates

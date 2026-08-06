@@ -24,6 +24,7 @@ echo Project KATANA Service task started at %DATE% %TIME%>> "logs\service\katana
   --database-path data\katana.db ^
   --dashboard-port 8000 ^
   --enable-dynamic-watchlist-schedule ^
+  --enable-universe-daily-schedule ^
   --enable-morning-preflight-schedule ^
   --enable-daily-report-schedule ^
   --enable-paper-trading-schedule ^

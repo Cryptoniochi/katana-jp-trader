@@ -754,3 +754,24 @@ def build_dynamic_watchlist_scheduler_command(
         command.append("--enable")
 
     return tuple(command)
+
+def build_universe_daily_scheduler_command(
+    *,
+    database_path: Path,
+    enabled: bool,
+) -> tuple[str, ...]:
+    """Universe Daily Scheduler起動コマンド。"""
+
+    command = [
+        sys.executable,
+        "-m",
+        "app.run_universe_daily_scheduler",
+        "--database-path",
+        str(database_path),
+    ]
+
+    if enabled:
+        command.append("--enable")
+
+    return tuple(command)
+

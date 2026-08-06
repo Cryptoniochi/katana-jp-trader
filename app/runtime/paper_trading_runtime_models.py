@@ -68,6 +68,7 @@ class PaperTradingDailySummary:
     records: tuple[PaperTradingCycleRecord, ...]
     initial_equity: float | None
     final_equity: float | None
+    external_execution_count: int = 0
     error_message: str | None = None
 
     def __post_init__(self) -> None:
@@ -123,6 +124,11 @@ class PaperTradingDailySummary:
                     f"{name}は0以上である必要があります。"
                 )
 
+        if self.external_execution_count < 0:
+            raise ValueError(
+                "外部約定数は0以上である必要があります。"
+            )
+
         object.__setattr__(
             self,
             "error_message",
@@ -166,9 +172,12 @@ class PaperTradingDailySummary:
     def execution_count(self) -> int:
         """約定数合計を返す。"""
 
-        return sum(
-            record.cycle_result.execution_count
-            for record in self.records
+        return (
+            sum(
+                record.cycle_result.execution_count
+                for record in self.records
+            )
+            + self.external_execution_count
         )
 
     @property

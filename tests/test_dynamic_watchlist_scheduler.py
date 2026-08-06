@@ -72,6 +72,10 @@ def test_successful_update_creates_marker(
             json.dumps(
                 {
                     "applied": True,
+                    "target_date": "2026-08-03",
+                    "market_data_date": "2026-07-31",
+                    "market_data_age_days": 3,
+                    "latest_market_bar_count": 5,
                     "selected": [
                         {"code": str(1000 + index)}
                         for index in range(5)

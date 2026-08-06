@@ -161,25 +161,69 @@ class ScheduledPaperTradingController:
                 ),
             )
 
-        if (
-            local_time
-            >= self.settings.market_close_at
-        ):
+        self._refresh_process_state()
+
+        if local_time >= self.settings.stop_at:
             self._stop_process()
             self._completed_trading_date = now.date()
+            state = (
+                ScheduledTradingState.COMPLETED
+                if self.last_exit_code in {None, 0}
+                else ScheduledTradingState.FAILED
+            )
             return self._publish(
                 now=now,
-                state=ScheduledTradingState.COMPLETED,
+                state=state,
                 business_day=True,
                 next_action_at=None,
                 message=(
-                    "Today's scheduled operation is complete. "
-                    "Paper Trading will not restart after "
-                    "market close."
+                    "Today's scheduled operation is complete."
+                    if state is ScheduledTradingState.COMPLETED
+                    else (
+                        "Paper Trading shutdown failed. "
+                        f"exit_code={self.last_exit_code}"
+                    )
                 ),
             )
 
-        self._refresh_process_state()
+        if local_time >= self.settings.market_close_at:
+            if self.process is None:
+                self._completed_trading_date = now.date()
+                state = (
+                    ScheduledTradingState.COMPLETED
+                    if self.last_exit_code in {None, 0}
+                    else ScheduledTradingState.FAILED
+                )
+                return self._publish(
+                    now=now,
+                    state=state,
+                    business_day=True,
+                    next_action_at=None,
+                    message=(
+                        "Paper Trading completed end-of-day shutdown."
+                        if state is ScheduledTradingState.COMPLETED
+                        else (
+                            "Paper Trading exited abnormally during "
+                            "end-of-day shutdown. "
+                            f"exit_code={self.last_exit_code}"
+                        )
+                    ),
+                )
+
+            return self._publish(
+                now=now,
+                state=ScheduledTradingState.STOPPING,
+                business_day=True,
+                next_action_at=self._at(
+                    now,
+                    self.settings.stop_at,
+                ),
+                message=(
+                    "Market is closed. Waiting for "
+                    "run_market_session to liquidate all positions "
+                    "and exit normally."
+                ),
+            )
 
         if self._completed_trading_date == now.date():
             return self._publish(
