@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import re
 import shutil
 import sqlite3
 from collections import defaultdict
@@ -230,12 +231,31 @@ class DynamicWatchlistService:
                 )
             return None
 
-        codes = {
-            line.strip()
+        raw_codes = {
+            line.strip().upper()
             for line in self.candidate_universe_path.read_text(
                 encoding="utf-8"
             ).splitlines()
             if line.strip()
+        }
+        invalid_codes = tuple(
+            sorted(
+                code
+                for code in raw_codes
+                if not self._is_valid_symbol_code(code)
+            )
+        )
+
+        if invalid_codes and self.require_candidate_universe:
+            raise RuntimeError(
+                "Universe candidate file contains invalid symbols: "
+                + ",".join(invalid_codes[:10])
+            )
+
+        codes = {
+            code
+            for code in raw_codes
+            if self._is_valid_symbol_code(code)
         }
 
         if not codes and self.require_candidate_universe:
@@ -801,8 +821,7 @@ class DynamicWatchlistService:
             or len(codes) > self.settings.maximum_symbols
             or len(codes) != len(set(codes))
             or any(
-                not code.isdigit()
-                or len(code) not in {4, 5}
+                not self._is_valid_symbol_code(code)
                 for code in codes
             )
         ):
@@ -813,6 +832,22 @@ class DynamicWatchlistService:
 
         temporary.replace(self.watchlist_path)
         return backup_path
+
+    @staticmethod
+    def _is_valid_symbol_code(
+        code: str,
+    ) -> bool:
+        """東証の数字・英字入り証券コードを検証する。"""
+
+        normalized = str(code).strip().upper()
+
+        return (
+            re.fullmatch(
+                r"[0-9A-Z]{4,5}",
+                normalized,
+            )
+            is not None
+        )
 
     def _write_reports(
         self,

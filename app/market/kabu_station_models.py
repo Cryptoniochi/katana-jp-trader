@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -31,18 +32,15 @@ class KabuStationSymbol:
     def __post_init__(self) -> None:
         """銘柄コードと市場コードを検証する。"""
 
-        normalized = self.code.strip()
+        normalized = str(self.code).strip().upper()
 
-        if not normalized.isdigit():
+        # 東証の新証券コード体系では、130A / 607A のような
+        # 英字入り4桁コードが存在する。
+        # 既存互換のため4～5桁の半角英数字を受け入れる。
+        if not re.fullmatch(r"[0-9A-Z]{4,5}", normalized):
             raise ValueError(
-                "銘柄コードは数字で指定してください。 "
-                f"value={self.code}"
-            )
-
-        if len(normalized) not in {4, 5}:
-            raise ValueError(
-                "銘柄コードは4桁または5桁で"
-                "指定してください。 "
+                "銘柄コードは4桁または5桁の"
+                "半角英数字で指定してください。 "
                 f"value={self.code}"
             )
 
@@ -65,11 +63,7 @@ class KabuStationSymbol:
 def parse_push_tick(
     payload: dict[str, Any],
 ) -> MarketDataTick | None:
-    """PUSHメッセージから約定価格更新を取り出す。
-
-    CurrentPriceまたはCurrentPriceTimeがない更新は、
-    取引判断に利用できないためNoneを返す。
-    """
+    """PUSHメッセージから約定価格更新を取り出す。"""
 
     symbol = str(payload.get("Symbol") or "").strip()
     price = payload.get("CurrentPrice")
@@ -97,7 +91,7 @@ def parse_push_tick(
 
 
 def _parse_datetime(value: object) -> datetime | None:
-    """API日時文字列をタイムゾーン付きdatetimeへ変換する。"""
+    """kabuステーションAPI日時文字列を解釈する。"""
 
     if value is None:
         return None

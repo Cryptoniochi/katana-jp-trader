@@ -1,4 +1,4 @@
-"""候補ユニバースの日足をkabuステーションから収集するCLI。"""
+"""全市場Universe Bootstrap CLI。"""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ from app.market.kabu_station_client import (
 )
 from app.universe.kabu_station_universe_daily_collector import (
     KabuStationUniverseDailyBarCollector,
-    UniverseDailyCollectionResult,
 )
+from app.universe.universe_bootstrap_service import UniverseBootstrapService
 
 
 TOKYO = ZoneInfo("Asia/Tokyo")
@@ -26,8 +26,7 @@ TOKYO = ZoneInfo("Asia/Tokyo")
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "DB内の候補ユニバースをBoard APIで照会し、"
-            "当日OHLCVをmarket_barsへ保存します。"
+            "listed_symbolsを起点に全市場の日足を段階的にBootstrapします。"
         )
     )
     parser.add_argument(
@@ -36,22 +35,31 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=Path("data/katana.db"),
     )
     parser.add_argument(
-        "--report-path",
-        type=Path,
-        default=Path(
-            "reports/universe/"
-            "kabu_station_daily_latest.json"
-        ),
-    )
-    parser.add_argument(
         "--env-file",
         type=Path,
         default=Path(".env"),
     )
     parser.add_argument(
-        "--exchange",
+        "--trading-date",
+        type=lambda value: datetime.fromisoformat(value).date(),
+        default=None,
+    )
+    parser.add_argument(
+        "--maximum-symbols-per-run",
         type=int,
-        default=1,
+        default=300,
+    )
+    parser.add_argument(
+        "--minimum-completion-ratio",
+        type=float,
+        default=0.99,
+    )
+    parser.add_argument(
+        "--unavailable-path",
+        type=Path,
+        default=Path(
+            "reports/universe/bootstrap_unavailable.json"
+        ),
     )
     parser.add_argument(
         "--request-interval-seconds",
@@ -76,109 +84,59 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--minimum-success-ratio",
         type=float,
-        default=0.80,
+        default=0.70,
     )
     parser.add_argument(
-        "--trading-date",
-        type=lambda value: datetime.fromisoformat(
-            value
-        ).date(),
-        default=None,
+        "--exchange",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
+        "--report-path",
+        type=Path,
+        default=Path(
+            "reports/universe/bootstrap_latest.json"
+        ),
     )
     return parser
 
 
-def read_setting(
-    key: str,
-    *,
-    env_file: Path,
-) -> str | None:
-    environment_value = os.environ.get(key)
-
-    if environment_value:
-        return environment_value.strip()
+def read_setting(key: str, *, env_file: Path) -> str | None:
+    value = os.environ.get(key)
+    if value:
+        return value.strip()
 
     if not env_file.exists():
         return None
 
-    for line in env_file.read_text(
-        encoding="utf-8"
-    ).splitlines():
+    for line in env_file.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
-
         if (
             not stripped
             or stripped.startswith("#")
             or "=" not in stripped
         ):
             continue
-
-        name, value = stripped.split("=", 1)
-
+        name, raw_value = stripped.split("=", 1)
         if name.strip() != key:
             continue
-
-        normalized = value.strip().strip('"').strip("'")
+        normalized = raw_value.strip().strip('"').strip("'")
         return normalized or None
 
     return None
 
 
-def write_report(
-    path: Path,
-    result: UniverseDailyCollectionResult,
-) -> None:
+def write_report(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(
-        json.dumps(
-            result.to_dict(),
-            ensure_ascii=False,
-            indent=2,
-        ),
+        json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     temporary.replace(path)
 
 
-def print_result(
-    result: UniverseDailyCollectionResult,
-) -> None:
-    print("Project KATANA Universe Daily Collection")
-    print("=" * 48)
-    print(f"trading_date={result.trading_date}")
-    print(f"requested={result.requested_count}")
-    print(f"collected={result.collected_count}")
-    print(f"saved={result.saved_count}")
-    print(f"skipped={result.skipped_count}")
-    print(f"failures={len(result.failures)}")
-    print(f"success_ratio={result.success_ratio:.3f}")
-    print(
-        "minimum_success_ratio="
-        f"{result.minimum_success_ratio:.3f}"
-    )
-    print(
-        "completed="
-        f"{result.completed}"
-    )
-
-    if result.skips:
-        print("Skipped symbols (first 10)")
-        for item in result.skips[:10]:
-            print(f"  {item.code}: {item.reason}")
-
-    if result.failures:
-        print("Failures (first 10)")
-        for item in result.failures[:10]:
-            print(
-                f"  {item.code}: {item.error_type}: "
-                f"{item.message} attempts={item.attempts}"
-            )
-
-
-def run(
-    arguments: Sequence[str] | None = None,
-) -> int:
+def run(arguments: Sequence[str] | None = None) -> int:
     parsed = build_argument_parser().parse_args(arguments)
 
     password = (
@@ -191,11 +149,9 @@ def run(
             env_file=parsed.env_file,
         )
     )
-
     if not password:
         raise RuntimeError(
-            "KABU_STATION_API_PASSWORDを"
-            "環境変数または.envに設定してください。"
+            "KABU_STATION_API_PASSWORDを環境変数または.envに設定してください。"
         )
 
     base_url = (
@@ -227,29 +183,43 @@ def run(
         client=client,
         database_path=parsed.database_path,
         exchange=parsed.exchange,
-        request_interval_seconds=(
-            parsed.request_interval_seconds
-        ),
-        minimum_success_ratio=(
-            parsed.minimum_success_ratio
-        ),
+        request_interval_seconds=parsed.request_interval_seconds,
+        minimum_success_ratio=parsed.minimum_success_ratio,
         maximum_attempts=parsed.maximum_attempts,
-        retry_backoff_seconds=(
-            parsed.retry_backoff_seconds
-        ),
-        progress_reporter=lambda message: print(
-            message,
-            flush=True,
-        ),
+        retry_backoff_seconds=parsed.retry_backoff_seconds,
+        progress_reporter=lambda message: print(message, flush=True),
     )
 
-    result = collector.collect(
-        trading_date=trading_date
+    service = UniverseBootstrapService(
+        database_path=parsed.database_path,
+        collector=collector,
+        maximum_symbols_per_run=parsed.maximum_symbols_per_run,
+        minimum_completion_ratio=parsed.minimum_completion_ratio,
+        unavailable_path=parsed.unavailable_path,
     )
-    write_report(parsed.report_path, result)
-    print_result(result)
 
-    return 0 if result.completed else 1
+    result = service.run_once(trading_date=trading_date)
+    write_report(parsed.report_path, result.to_dict())
+
+    print("Project KATANA Universe Bootstrap")
+    print("=" * 48)
+    print(f"trading_date={result.trading_date}")
+    print(f"universe={result.universe_count}")
+    print(f"already_collected={result.already_collected_count}")
+    print(f"attempted={result.attempted_count}")
+    print(f"collected={result.collected_count}")
+    print(f"remaining={result.remaining_count}")
+    print(f"retryable_remaining={result.retryable_remaining_count}")
+    print(f"terminal_skipped={result.terminal_skipped_count}")
+    print(f"coverage_ratio={result.coverage_ratio:.4f}")
+    print(f"completed={result.completed}")
+
+    if result.failed_codes:
+        print("Failed/Skipped codes (first 20)")
+        for code in result.failed_codes[:20]:
+            print(f"  {code}")
+
+    return 0
 
 
 if __name__ == "__main__":

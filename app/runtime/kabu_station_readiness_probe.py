@@ -26,13 +26,14 @@ class KabuStationReadinessResult:
     message: str
 
 
+
 def probe_kabu_station_readiness(
     *,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     environ: dict[str, str] | None = None,
     env_file: Path = ROOT_DIR / ".env",
 ) -> KabuStationReadinessResult:
-    """`/token`へ直接接続し、実際のAPI状態を確認する。"""
+    """トークンを発行せずTCP接続のみでReadinessを確認する。"""
 
     if timeout_seconds <= 0:
         raise ValueError(
@@ -43,117 +44,42 @@ def probe_kabu_station_readiness(
         environ=environ,
         env_file=env_file,
     )
-    password = (
-        environment.get("KABU_STATION_API_PASSWORD")
-        or environment.get("KABUSTATION_API_PASSWORD")
-        or ""
-    ).strip()
-
-    if not password:
-        return KabuStationReadinessResult(
-            state="disconnected",
-            exit_code=1,
-            message=(
-                "KABU_STATION_API_PASSWORDが設定されていません。"
-            ),
-        )
 
     base_url = environment.get(
         "KABU_STATION_BASE_URL",
         DEFAULT_BASE_URL,
     ).strip().rstrip("/")
-    token_url = f"{base_url}/token"
-    payload = json.dumps(
-        {"APIPassword": password}
-    ).encode("utf-8")
-    request = Request(
-        token_url,
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-        method="POST",
-    )
+
+    from urllib.parse import urlparse
+
+    parsed = urlparse(base_url)
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 18080
 
     try:
-        with urlopen(
-            request,
+        with socket.create_connection(
+            (host, port),
             timeout=timeout_seconds,
-        ) as response:
-            body = response.read().decode(
-                "utf-8",
-                errors="replace",
-            )
-    except HTTPError as error:
-        detail = _read_http_error(error)
-        return KabuStationReadinessResult(
-            state="disconnected",
-            exit_code=int(error.code),
-            message=(
-                "kabuステーションAPIのトークン取得に失敗しました。 "
-                f"http_status={error.code} detail={detail}"
-            ),
-        )
-    except (TimeoutError, socket.timeout):
+        ):
+            pass
+    except socket.timeout:
         return KabuStationReadinessResult(
             state="timeout",
             exit_code=None,
-            message=(
-                "kabuステーションAPIへの接続が"
-                "タイムアウトしました。"
-            ),
-        )
-    except URLError as error:
-        reason = getattr(error, "reason", error)
-        return KabuStationReadinessResult(
-            state="disconnected",
-            exit_code=1,
-            message=(
-                "kabuステーションAPIへ接続できません。 "
-                f"error={reason}"
-            ),
+            message="kabuステーションAPIへの接続がタイムアウトしました。",
         )
     except OSError as error:
         return KabuStationReadinessResult(
             state="disconnected",
             exit_code=1,
-            message=(
-                "kabuステーションAPIへ接続できません。 "
-                f"error={error}"
-            ),
-        )
-
-    try:
-        decoded = json.loads(body)
-    except json.JSONDecodeError:
-        return KabuStationReadinessResult(
-            state="error",
-            exit_code=1,
-            message=(
-                "kabuステーションAPIから不正なJSONが返されました。"
-            ),
-        )
-
-    token = decoded.get("Token")
-    if not isinstance(token, str) or not token.strip():
-        code = decoded.get("Code")
-        message = decoded.get("Message")
-        return KabuStationReadinessResult(
-            state="disconnected",
-            exit_code=1,
-            message=(
-                "kabuステーションAPIトークンを取得できませんでした。 "
-                f"code={code} message={message}"
-            ),
+            message=f"kabuステーションAPIへ接続できません。 error={error}",
         )
 
     return KabuStationReadinessResult(
         state="connected",
         exit_code=0,
-        message="kabuステーションAPI接続確認済み。",
+        message="kabuステーションAPI(TCP)接続確認済み。",
     )
-
 
 def _load_environment(
     *,

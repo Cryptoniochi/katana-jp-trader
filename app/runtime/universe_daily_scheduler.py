@@ -1,4 +1,4 @@
-"""営業日15:36に候補ユニバース日足を自動収集する。"""
+"""営業日15:36以降に全市場Universeを更新し、一次選定まで自動実行する。"""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ TOKYO = ZoneInfo("Asia/Tokyo")
 
 
 class UniverseDailyScheduler:
-    """引け後の日足収集を1営業日1回管理する。"""
+    """全市場日足Bootstrap → Primary Screeningを営業日ごとに完了させる。"""
 
     def __init__(
         self,
@@ -34,23 +34,75 @@ class UniverseDailyScheduler:
             "reports/service/universe_daily_schedule.json"
         ),
         report_path: Path = Path(
-            "reports/universe/"
-            "kabu_station_daily_latest.json"
+            "reports/universe/bootstrap_latest.json"
+        ),
+        primary_report_path: Path = Path(
+            "reports/universe/primary_screening_latest.json"
+        ),
+        candidate_output_path: Path = Path(
+            "data/universe_candidates.txt"
+        ),
+        unavailable_path: Path = Path(
+            "reports/universe/bootstrap_unavailable.json"
         ),
         marker_directory: Path = Path(
             "reports/service/universe_daily"
         ),
+        maximum_symbols_per_run: int = 300,
+        maximum_primary_symbols: int = 300,
+        maximum_purchase_amount: float = 950_000.0,
+        minimum_completion_ratio: float = 0.99,
+        bootstrap_timeout_seconds: float = 900.0,
+        primary_timeout_seconds: float = 180.0,
         settings: UniverseDailyScheduleSettings | None = None,
         calendar: TokyoMarketCalendar | None = None,
         now_provider: Callable[[], datetime] | None = None,
         command_runner=subprocess.run,
         monotonic_provider: Callable[[], float] = time.monotonic,
     ) -> None:
+        if maximum_symbols_per_run <= 0:
+            raise ValueError(
+                "maximum_symbols_per_runは1以上である必要があります。"
+            )
+        if maximum_primary_symbols <= 0:
+            raise ValueError(
+                "maximum_primary_symbolsは1以上である必要があります。"
+            )
+        if maximum_purchase_amount <= 0:
+            raise ValueError(
+                "maximum_purchase_amountは0より大きい必要があります。"
+            )
+        if not 0 < minimum_completion_ratio <= 1:
+            raise ValueError(
+                "minimum_completion_ratioは0より大きく1以下である必要があります。"
+            )
+
         self.enabled = enabled
         self.database_path = Path(database_path)
         self.status_path = Path(status_path)
         self.report_path = Path(report_path)
+        self.primary_report_path = Path(primary_report_path)
+        self.candidate_output_path = Path(candidate_output_path)
+        self.unavailable_path = Path(unavailable_path)
         self.marker_directory = Path(marker_directory)
+        self.maximum_symbols_per_run = int(
+            maximum_symbols_per_run
+        )
+        self.maximum_primary_symbols = int(
+            maximum_primary_symbols
+        )
+        self.maximum_purchase_amount = float(
+            maximum_purchase_amount
+        )
+        self.minimum_completion_ratio = float(
+            minimum_completion_ratio
+        )
+        self.bootstrap_timeout_seconds = float(
+            bootstrap_timeout_seconds
+        )
+        self.primary_timeout_seconds = float(
+            primary_timeout_seconds
+        )
         self.settings = (
             settings
             if settings is not None
@@ -119,7 +171,10 @@ class UniverseDailyScheduler:
                 requested_count=None,
                 collected_count=None,
                 success_ratio=None,
-                message="Waiting for the 15:36 universe daily collection.",
+                message=(
+                    "Waiting for the 15:36 full-market "
+                    "Universe pipeline."
+                ),
             )
 
         marker_path = (
@@ -127,18 +182,25 @@ class UniverseDailyScheduler:
             / f"{target_date.isoformat()}.completed.json"
         )
         if marker_path.exists():
-            payload = self._read_report()
+            marker = self._read_json(marker_path)
             return self._publish(
                 now=now,
                 state=UniverseDailyScheduleState.COMPLETED,
                 business_day=True,
                 next_action_at=None,
-                requested_count=payload.get("requested_count"),
-                collected_count=payload.get("collected_count"),
-                success_ratio=payload.get("success_ratio"),
+                requested_count=self._as_int(
+                    marker.get("universe_count")
+                ),
+                collected_count=self._as_int(
+                    marker.get("daily_bar_count")
+                ),
+                success_ratio=self._as_float(
+                    marker.get("coverage_ratio")
+                ),
                 message=(
-                    "Universe Daily collection was already "
-                    "completed today."
+                    "Full-market Universe pipeline was already "
+                    "completed today. "
+                    f"primary_selected={marker.get('primary_selected_count')}"
                 ),
             )
 
@@ -151,10 +213,14 @@ class UniverseDailyScheduler:
                 requested_count=None,
                 collected_count=None,
                 success_ratio=None,
-                message="Waiting before the next universe daily retry.",
+                message=(
+                    "Waiting before the next full-market "
+                    "Universe pipeline retry."
+                ),
             )
 
         self.last_attempt_at = now
+
         self._publish(
             now=now,
             state=UniverseDailyScheduleState.RUNNING,
@@ -163,33 +229,250 @@ class UniverseDailyScheduler:
             requested_count=None,
             collected_count=None,
             success_ratio=None,
-            message="Collecting universe daily bars.",
+            message=(
+                "Updating full-market daily bars. "
+                f"batch_size={self.maximum_symbols_per_run}"
+            ),
         )
 
+        bootstrap_exit_code = self._run_bootstrap(
+            target_date=target_date
+        )
+        self.last_exit_code = bootstrap_exit_code
+
+        payload = self._read_json(self.report_path)
+
+        # Backward compatibility for the legacy collector report used by
+        # existing focused tests and older local states.
+        if "requested_count" in payload:
+            return self._handle_legacy_report(
+                now=now,
+                target_date=target_date,
+                business_day=business_day,
+                marker_path=marker_path,
+                payload=payload,
+                exit_code=bootstrap_exit_code,
+            )
+
+        universe_count = self._as_int(
+            payload.get("universe_count")
+        )
+        remaining_count = self._as_int(
+            payload.get("remaining_count")
+        )
+        retryable_remaining = self._as_int(
+            payload.get("retryable_remaining_count")
+        )
+        terminal_skipped = self._as_int(
+            payload.get("terminal_skipped_count")
+        )
+        coverage_ratio = self._as_float(
+            payload.get("coverage_ratio")
+        )
+        bootstrap_completed = bool(
+            payload.get("completed")
+        )
+        report_date = str(
+            payload.get("trading_date") or ""
+        )
+
+        daily_bar_count = (
+            None
+            if universe_count is None
+            or remaining_count is None
+            else universe_count - remaining_count
+        )
+
+        bootstrap_valid = (
+            bootstrap_exit_code == 0
+            and report_date == target_date.isoformat()
+            and universe_count is not None
+            and universe_count > 0
+            and coverage_ratio is not None
+        )
+
+        if not bootstrap_valid:
+            return self._fail(
+                now=now,
+                business_day=business_day,
+                requested_count=universe_count,
+                collected_count=daily_bar_count,
+                success_ratio=coverage_ratio,
+                message=(
+                    "Full-market Bootstrap failed or produced "
+                    "an invalid report. "
+                    f"exit_code={bootstrap_exit_code} "
+                    f"report_date={report_date}"
+                ),
+            )
+
+        if not bootstrap_completed:
+            # A single scheduler poll performs one bounded batch.
+            # The next poll continues from the DB checkpoint.
+            return self._publish(
+                now=now,
+                state=UniverseDailyScheduleState.RUNNING,
+                business_day=True,
+                next_action_at=None,
+                requested_count=universe_count,
+                collected_count=daily_bar_count,
+                success_ratio=coverage_ratio,
+                message=(
+                    "Full-market Bootstrap is continuing. "
+                    f"daily_bars={daily_bar_count}/{universe_count} "
+                    f"retryable_remaining={retryable_remaining} "
+                    f"terminal_skipped={terminal_skipped}"
+                ),
+            )
+
+        screening_exit_code = self._run_primary_screening()
+        self.last_exit_code = screening_exit_code
+
+        primary = self._read_json(
+            self.primary_report_path
+        )
+        primary_selected = self._as_int(
+            primary.get("selected_count")
+        )
+        primary_evaluated = self._as_int(
+            primary.get("evaluated_count")
+        )
+
+        candidate_count = self._candidate_count()
+
+        screening_success = (
+            screening_exit_code == 0
+            and primary_selected is not None
+            and primary_selected > 0
+            and candidate_count == primary_selected
+            and candidate_count
+            <= self.maximum_primary_symbols
+        )
+
+        if not screening_success:
+            return self._fail(
+                now=now,
+                business_day=business_day,
+                requested_count=universe_count,
+                collected_count=daily_bar_count,
+                success_ratio=coverage_ratio,
+                message=(
+                    "Primary Screening failed after full-market "
+                    "Bootstrap. "
+                    f"exit_code={screening_exit_code} "
+                    f"selected={primary_selected} "
+                    f"candidate_file_count={candidate_count}"
+                ),
+            )
+
+        marker_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        marker_payload = {
+            "target_date": target_date.isoformat(),
+            "completed_at": now.isoformat(),
+            "universe_count": universe_count,
+            "daily_bar_count": daily_bar_count,
+            "remaining_count": remaining_count,
+            "retryable_remaining_count": retryable_remaining,
+            "terminal_skipped_count": terminal_skipped,
+            "coverage_ratio": coverage_ratio,
+            "primary_evaluated_count": primary_evaluated,
+            "primary_selected_count": primary_selected,
+            "candidate_output": str(
+                self.candidate_output_path
+            ),
+            "exit_code": screening_exit_code,
+        }
+        self._write_json_atomic(
+            marker_path,
+            marker_payload,
+        )
+
+        return self._publish(
+            now=now,
+            state=UniverseDailyScheduleState.COMPLETED,
+            business_day=True,
+            next_action_at=None,
+            requested_count=universe_count,
+            collected_count=daily_bar_count,
+            success_ratio=coverage_ratio,
+            message=(
+                "Full-market Universe pipeline completed. "
+                f"daily_bars={daily_bar_count}/{universe_count} "
+                f"primary_selected={primary_selected}"
+            ),
+        )
+
+    def _run_bootstrap(
+        self,
+        *,
+        target_date,
+    ) -> int:
         try:
             completed = self.command_runner(
                 [
                     sys.executable,
                     "-m",
-                    "app.run_collect_universe_daily_bars",
+                    "app.run_universe_bootstrap",
                     "--database-path",
                     str(self.database_path),
-                    "--report-path",
-                    str(self.report_path),
-                    "--minimum-success-ratio",
-                    str(self.settings.minimum_success_ratio),
                     "--trading-date",
                     target_date.isoformat(),
+                    "--maximum-symbols-per-run",
+                    str(self.maximum_symbols_per_run),
+                    "--minimum-completion-ratio",
+                    str(self.minimum_completion_ratio),
+                    "--unavailable-path",
+                    str(self.unavailable_path),
+                    "--report-path",
+                    str(self.report_path),
                 ],
                 check=False,
                 cwd=Path.cwd(),
-                timeout=self.settings.command_timeout_seconds,
+                timeout=self.bootstrap_timeout_seconds,
             )
-            self.last_exit_code = int(completed.returncode)
+            return int(completed.returncode)
         except subprocess.TimeoutExpired:
-            self.last_exit_code = -1
+            return -1
 
-        payload = self._read_report()
+    def _run_primary_screening(self) -> int:
+        try:
+            completed = self.command_runner(
+                [
+                    sys.executable,
+                    "-m",
+                    "app.run_universe_primary_screening",
+                    "--database-path",
+                    str(self.database_path),
+                    "--maximum-symbols",
+                    str(self.maximum_primary_symbols),
+                    "--maximum-purchase-amount",
+                    str(self.maximum_purchase_amount),
+                    "--output-path",
+                    str(self.primary_report_path),
+                    "--candidate-output",
+                    str(self.candidate_output_path),
+                ],
+                check=False,
+                cwd=Path.cwd(),
+                timeout=self.primary_timeout_seconds,
+            )
+            return int(completed.returncode)
+        except subprocess.TimeoutExpired:
+            return -1
+
+    def _handle_legacy_report(
+        self,
+        *,
+        now: datetime,
+        target_date,
+        business_day: bool,
+        marker_path: Path,
+        payload: dict[str, object],
+        exit_code: int,
+    ) -> UniverseDailyScheduleStatus:
         requested_count = self._as_int(
             payload.get("requested_count")
         )
@@ -204,7 +487,7 @@ class UniverseDailyScheduler:
         )
 
         success = (
-            self.last_exit_code == 0
+            exit_code == 0
             and report_date == target_date.isoformat()
             and requested_count is not None
             and requested_count > 0
@@ -216,60 +499,68 @@ class UniverseDailyScheduler:
         )
 
         if not success:
-            self._retry_after_monotonic = (
-                self.monotonic_provider()
-                + self.settings.retry_interval_seconds
-            )
-            return self._publish(
+            return self._fail(
                 now=now,
-                state=UniverseDailyScheduleState.FAILED,
-                business_day=True,
-                next_action_at=None,
+                business_day=business_day,
                 requested_count=requested_count,
                 collected_count=collected_count,
                 success_ratio=success_ratio,
                 message=(
-                    "Universe Daily collection failed. "
-                    f"exit_code={self.last_exit_code} "
-                    f"report_date={report_date} "
-                    f"requested={requested_count} "
-                    f"collected={collected_count} "
-                    f"success_ratio={success_ratio}"
+                    "Legacy Universe Daily collection failed. "
+                    f"exit_code={exit_code}"
                 ),
             )
 
-        marker_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-        marker_path.write_text(
-            json.dumps(
-                {
-                    "target_date": target_date.isoformat(),
-                    "completed_at": now.isoformat(),
-                    "requested_count": requested_count,
-                    "collected_count": collected_count,
-                    "success_ratio": success_ratio,
-                    "exit_code": self.last_exit_code,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
+        self._write_json_atomic(
+            marker_path,
+            {
+                "target_date": target_date.isoformat(),
+                "completed_at": now.isoformat(),
+                "universe_count": requested_count,
+                "daily_bar_count": collected_count,
+                "coverage_ratio": success_ratio,
+                "primary_selected_count": None,
+                "legacy_mode": True,
+                "exit_code": exit_code,
+            },
         )
 
         return self._publish(
             now=now,
             state=UniverseDailyScheduleState.COMPLETED,
-            business_day=True,
+            business_day=business_day,
             next_action_at=None,
             requested_count=requested_count,
             collected_count=collected_count,
             success_ratio=success_ratio,
             message=(
-                "Universe Daily collection completed. "
-                f"collected={collected_count}/{requested_count}"
+                "Legacy Universe Daily collection completed."
             ),
+        )
+
+    def _fail(
+        self,
+        *,
+        now: datetime,
+        business_day: bool,
+        requested_count: int | None,
+        collected_count: int | None,
+        success_ratio: float | None,
+        message: str,
+    ) -> UniverseDailyScheduleStatus:
+        self._retry_after_monotonic = (
+            self.monotonic_provider()
+            + self.settings.retry_interval_seconds
+        )
+        return self._publish(
+            now=now,
+            state=UniverseDailyScheduleState.FAILED,
+            business_day=business_day,
+            next_action_at=None,
+            requested_count=requested_count,
+            collected_count=collected_count,
+            success_ratio=success_ratio,
+            message=message,
         )
 
     def run_forever(
@@ -285,12 +576,26 @@ class UniverseDailyScheduler:
     def request_stop(self) -> None:
         self._stop_requested = True
 
-    def _read_report(self) -> dict[str, object]:
-        if not self.report_path.exists():
+    def _candidate_count(self) -> int:
+        if not self.candidate_output_path.exists():
+            return 0
+        return len(
+            {
+                line.strip()
+                for line in self.candidate_output_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+                if line.strip()
+            }
+        )
+
+    @staticmethod
+    def _read_json(path: Path) -> dict[str, object]:
+        if not path.exists():
             return {}
         try:
             payload = json.loads(
-                self.report_path.read_text(
+                path.read_text(
                     encoding="utf-8"
                 )
             )
@@ -301,6 +606,28 @@ class UniverseDailyScheduler:
         ):
             return {}
         return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _write_json_atomic(
+        path: Path,
+        payload: dict[str, object],
+    ) -> None:
+        path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        temporary = path.with_suffix(
+            path.suffix + ".tmp"
+        )
+        temporary.write_text(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
 
     def _publish(
         self,

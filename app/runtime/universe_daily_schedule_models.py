@@ -22,7 +22,7 @@ class UniverseDailyScheduleState(StrEnum):
 class UniverseDailyScheduleSettings:
     run_at: time = time(15, 36)
     retry_interval_seconds: float = 300.0
-    command_timeout_seconds: float = 180.0
+    command_timeout_seconds: float = 900.0
     minimum_success_ratio: float = 0.80
 
     def __post_init__(self) -> None:

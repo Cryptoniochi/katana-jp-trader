@@ -6,6 +6,8 @@ import argparse
 import signal
 import subprocess
 import sys
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from datetime import datetime, timezone
 from uuid import uuid4
 from pathlib import Path
@@ -274,6 +276,52 @@ def build_readiness_change_handler(
     return handle
 
 
+def create_dashboard_health_check(
+    *,
+    host: str,
+    port: int,
+    timeout_seconds: float = 2.0,
+):
+    """既存DashboardがKATANA自身かHTTPで確認する。"""
+
+    url = f"http://{host}:{port}/mobile"
+
+    def check() -> bool:
+        request = Request(
+            url,
+            headers={
+                "User-Agent": "Project-KATANA-Service-Manager",
+            },
+            method="GET",
+        )
+
+        try:
+            with urlopen(
+                request,
+                timeout=timeout_seconds,
+            ) as response:
+                body = response.read(
+                    65536
+                ).decode(
+                    "utf-8",
+                    errors="replace",
+                )
+        except (
+            HTTPError,
+            URLError,
+            TimeoutError,
+            OSError,
+        ):
+            return False
+
+        return (
+            200 <= int(response.status) < 300
+            and "Project KATANA" in body
+        )
+
+    return check
+
+
 def run_kabu_station_readiness_check() -> int:
     """既存のProduction Readiness Checkを実行する。"""
 
@@ -322,7 +370,13 @@ def run(
             enabled=True,
             restart_on_failure=True,
             restart_delay_seconds=10.0,
-            maximum_restarts=100,
+            maximum_restarts=5,
+            external_health_check=(
+                create_dashboard_health_check(
+                    host=tailscale_ip,
+                    port=parsed.dashboard_port,
+                )
+            ),
         ),
         ManagedProcessDefinition(
             name=ManagedComponentName.DYNAMIC_WATCHLIST_SCHEDULER,

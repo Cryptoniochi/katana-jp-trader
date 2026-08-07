@@ -37,6 +37,7 @@ class ManagedProcessDefinition:
     restart_on_failure: bool = True
     restart_delay_seconds: float = 10.0
     maximum_restarts: int = 100
+    external_health_check: Callable[[], bool] | None = None
 
     def __post_init__(self) -> None:
         if not self.command:
@@ -270,6 +271,33 @@ class KatanaServiceManager:
 
             elif (
                 component.state
+                is ManagedComponentState.RUNNING
+                and component.process is None
+                and component.definition.external_health_check
+                is not None
+            ):
+                try:
+                    externally_healthy = bool(
+                        component.definition.external_health_check()
+                    )
+                except Exception:
+                    externally_healthy = False
+
+                if externally_healthy:
+                    component.message = (
+                        "Existing healthy process is being adopted."
+                    )
+                    continue
+
+                component.state = ManagedComponentState.STARTING
+                component.message = (
+                    "Adopted process is no longer healthy; "
+                    "starting a managed process."
+                )
+                self._start_component(component)
+
+            elif (
+                component.state
                 is ManagedComponentState.RESTART_WAIT
                 and component.restart_after_monotonic
                 is not None
@@ -440,6 +468,35 @@ class KatanaServiceManager:
         self,
         component: _ManagedProcess,
     ) -> None:
+        health_check = (
+            component.definition.external_health_check
+        )
+
+        if health_check is not None:
+            try:
+                externally_healthy = bool(health_check())
+            except Exception:
+                externally_healthy = False
+
+            if externally_healthy:
+                component.process = None
+                component.started_at = self._current_time()
+                component.restart_after_monotonic = None
+                component.state = ManagedComponentState.RUNNING
+                component.message = (
+                    "Existing healthy process is being adopted."
+                )
+                component.has_started_once = True
+                self._record_event(
+                    ServiceEventType.COMPONENT_STARTED,
+                    component=component.definition.name,
+                    message=(
+                        f"{component.definition.name.value} "
+                        "adopted an existing healthy process."
+                    ),
+                )
+                return
+
         was_restart = component.has_started_once
         component.state = (
             ManagedComponentState.STARTING
