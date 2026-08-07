@@ -46,7 +46,13 @@ class DailyTradeRecord:
 
 
 class SQLiteDailyTradeRepository:
-    """SQLiteから日次決済取引を読み取るRepository。"""
+    """SQLiteから日次決済取引を読み取るRepository。
+
+    現行Paper Tradingではtrade_executionsが実際の約定記録であるため、
+    trade_executions + trade_signalsを第一ソースとしてFIFOで決済損益を
+    再構成する。旧形式DBとの互換性のため、約定テーブルが存在しない場合
+    のみtrade_journal等へフォールバックする。
+    """
 
     TABLE_CANDIDATES = (
         "trade_journal",
@@ -97,41 +103,247 @@ class SQLiteDailyTradeRepository:
             timeout=5.0,
         ) as connection:
             connection.row_factory = sqlite3.Row
-            table = self._resolve_table(connection)
-            columns = self._resolve_columns(
+
+            if self._supports_execution_source(
+                connection
+            ):
+                # 現行KATANAの正本。trade_journalの生成漏れがあっても、
+                # 実際の約定から損益を再構成できる。
+                return self._list_from_executions(
+                    connection,
+                    report_date,
+                )
+
+            return self._list_from_legacy_table(
                 connection,
-                table,
+                report_date,
             )
 
-            start = datetime.combine(
-                report_date,
-                time.min,
-                tzinfo=timezone.utc,
+    @classmethod
+    def _supports_execution_source(
+        cls,
+        connection: sqlite3.Connection,
+    ) -> bool:
+        return (
+            cls._table_exists(
+                connection,
+                "trade_executions",
             )
-            end = datetime.combine(
-                report_date,
-                time.max,
-                tzinfo=timezone.utc,
+            and cls._table_exists(
+                connection,
+                "trade_signals",
             )
+        )
 
-            query = (
-                f'SELECT '
-                f'"{columns["closed_at"]}" AS closed_at, '
-                f'"{columns["symbol"]}" AS symbol, '
-                f'"{columns["strategy"]}" AS strategy_name, '
-                f'"{columns["pnl"]}" AS realized_profit_loss '
-                f'FROM "{table}" '
-                f'WHERE "{columns["closed_at"]}" >= ? '
-                f'AND "{columns["closed_at"]}" <= ? '
-                f'ORDER BY "{columns["closed_at"]}" ASC'
+    @classmethod
+    def _list_from_executions(
+        cls,
+        connection: sqlite3.Connection,
+        report_date: date,
+    ) -> tuple[DailyTradeRecord, ...]:
+        """全約定をコード単位FIFOで照合し、対象日の決済取引を返す。"""
+
+        rows = connection.execute(
+            """
+            SELECT
+                e.id,
+                e.execution_id,
+                e.code,
+                e.side,
+                e.quantity,
+                e.execution_price,
+                e.executed_at,
+                e.commission,
+                e.slippage,
+                s.strategy_name,
+                s.action
+            FROM trade_executions AS e
+            JOIN trade_signals AS s
+              ON s.signal_id = e.signal_id
+            ORDER BY e.executed_at ASC, e.id ASC
+            """
+        ).fetchall()
+
+        open_entries: dict[
+            str,
+            list[dict[str, Any]],
+        ] = {}
+        records: list[DailyTradeRecord] = []
+
+        for row in rows:
+            code = str(row["code"]).strip()
+            side = str(row["side"]).strip().lower()
+            quantity = int(row["quantity"])
+            price = float(row["execution_price"])
+            executed_at = cls._parse_datetime(
+                row["executed_at"]
             )
-            rows = connection.execute(
-                query,
-                (
-                    start.isoformat(),
-                    end.isoformat(),
+            commission = float(
+                row["commission"] or 0.0
+            )
+            slippage = float(
+                row["slippage"] or 0.0
+            )
+            strategy_name = str(
+                row["strategy_name"]
+            ).strip()
+            action = str(
+                row["action"]
+            ).strip().lower()
+
+            if action == "buy" or side == "buy":
+                open_entries.setdefault(
+                    code,
+                    [],
+                ).append(
+                    {
+                        "quantity": quantity,
+                        "remaining": quantity,
+                        "price": price,
+                        "cost": commission + slippage,
+                        "strategy_name": strategy_name,
+                    }
+                )
+                continue
+
+            if (
+                action not in {"sell", "exit"}
+                and side != "sell"
+            ):
+                continue
+
+            remaining_exit = quantity
+            entries = open_entries.setdefault(
+                code,
+                [],
+            )
+            pnl_by_strategy: dict[str, float] = {}
+
+            while (
+                remaining_exit > 0
+                and entries
+            ):
+                entry = entries[0]
+                matched = min(
+                    int(entry["remaining"]),
+                    remaining_exit,
+                )
+
+                entry_cost = (
+                    float(entry["cost"])
+                    * matched
+                    / int(entry["quantity"])
+                )
+                exit_cost = (
+                    (commission + slippage)
+                    * matched
+                    / quantity
+                )
+                matched_pnl = (
+                    (
+                        price
+                        - float(entry["price"])
+                    )
+                    * matched
+                    - entry_cost
+                    - exit_cost
+                )
+
+                entry_strategy = str(
+                    entry["strategy_name"]
+                )
+                pnl_by_strategy[
+                    entry_strategy
+                ] = (
+                    pnl_by_strategy.get(
+                        entry_strategy,
+                        0.0,
+                    )
+                    + matched_pnl
+                )
+
+                entry["remaining"] = (
+                    int(entry["remaining"])
+                    - matched
+                )
+                remaining_exit -= matched
+
+                if int(entry["remaining"]) == 0:
+                    entries.pop(0)
+
+            # Entryを完全に照合できないExitを推測値としてレポートへ
+            # 混ぜない。これは不正な0円損益を作るより安全。
+            if remaining_exit != 0:
+                continue
+
+            if executed_at.date() != report_date:
+                continue
+
+            for (
+                entry_strategy,
+                realized_profit_loss,
+            ) in pnl_by_strategy.items():
+                records.append(
+                    DailyTradeRecord(
+                        closed_at=executed_at,
+                        symbol=code,
+                        strategy_name=entry_strategy,
+                        realized_profit_loss=float(
+                            realized_profit_loss
+                        ),
+                    )
+                )
+
+        return tuple(
+            sorted(
+                records,
+                key=lambda item: (
+                    item.closed_at,
+                    item.symbol,
+                    item.strategy_name,
                 ),
-            ).fetchall()
+            )
+        )
+
+    def _list_from_legacy_table(
+        self,
+        connection: sqlite3.Connection,
+        report_date: date,
+    ) -> tuple[DailyTradeRecord, ...]:
+        table = self._resolve_table(connection)
+        columns = self._resolve_columns(
+            connection,
+            table,
+        )
+
+        start = datetime.combine(
+            report_date,
+            time.min,
+            tzinfo=timezone.utc,
+        )
+        end = datetime.combine(
+            report_date,
+            time.max,
+            tzinfo=timezone.utc,
+        )
+        query = (
+            f'SELECT '
+            f'"{columns["closed_at"]}" AS closed_at, '
+            f'"{columns["symbol"]}" AS symbol, '
+            f'"{columns["strategy"]}" AS strategy_name, '
+            f'"{columns["pnl"]}" AS realized_profit_loss '
+            f'FROM "{table}" '
+            f'WHERE "{columns["closed_at"]}" >= ? '
+            f'AND "{columns["closed_at"]}" <= ? '
+            f'ORDER BY "{columns["closed_at"]}" ASC'
+        )
+        rows = connection.execute(
+            query,
+            (
+                start.isoformat(),
+                end.isoformat(),
+            ),
+        ).fetchall()
 
         return tuple(
             DailyTradeRecord(
@@ -148,6 +360,22 @@ class SQLiteDailyTradeRepository:
             )
             for row in rows
         )
+
+    @staticmethod
+    def _table_exists(
+        connection: sqlite3.Connection,
+        table_name: str,
+    ) -> bool:
+        row = connection.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name = ?
+            """,
+            (table_name,),
+        ).fetchone()
+        return row is not None
 
     def _resolve_table(
         self,
@@ -181,7 +409,6 @@ class SQLiteDailyTradeRepository:
                 f'PRAGMA table_info("{table}")'
             ).fetchall()
         }
-
         return {
             "closed_at": self._pick_column(
                 columns,
@@ -229,7 +456,7 @@ class SQLiteDailyTradeRepository:
                 tzinfo=timezone.utc
             )
 
-        return parsed
+        return parsed.astimezone(timezone.utc)
 
 
 class DailyReportService:
