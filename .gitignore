@@ -25,3 +25,5 @@ data/
 test_external_notifications.py
 katana_sprint*.zip
 .pytest_tmp/
+# Runtime-generated Dynamic Watchlist
+watchlist.txt
