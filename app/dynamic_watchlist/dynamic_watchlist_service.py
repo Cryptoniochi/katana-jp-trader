@@ -143,6 +143,7 @@ class DynamicWatchlistService:
                 candidate
                 for candidate in candidates
                 if not candidate.exclusion_reasons
+                and self._passes_trade_quality_gate(candidate)
             ),
             key=self._ranking_key,
         )
@@ -161,11 +162,10 @@ class DynamicWatchlistService:
         )
 
         if apply:
-            if len(selected) < self.settings.minimum_symbols:
+            if not selected:
                 message = (
                     "Dynamic Watchlist was not applied because "
-                    f"only {len(selected)} eligible symbols were found; "
-                    f"minimum={self.settings.minimum_symbols}."
+                    "no symbol passed the trade quality gate."
                 )
             else:
                 backup_path = self._apply_watchlist(
@@ -173,6 +173,13 @@ class DynamicWatchlistService:
                     target_date=target_date,
                 )
                 applied = True
+                if len(selected) < self.settings.minimum_symbols:
+                    message += (
+                        " Quality-first mode accepted fewer symbols "
+                        f"than the legacy minimum "
+                        f"({len(selected)} < "
+                        f"{self.settings.minimum_symbols})."
+                    )
                 message += " watchlist.txt was updated safely."
 
         result = DynamicWatchlistResult(
@@ -201,6 +208,12 @@ class DynamicWatchlistService:
             market_data_date=market_data_date,
             source_bar_count=source_bar_count,
             latest_market_bar_count=latest_market_bar_count,
+        )
+        self._write_explainability_reports(
+            result=result,
+            all_candidates=candidates,
+            eligible_candidates=eligible,
+            market_data_date=market_data_date,
         )
         return result
 
@@ -774,6 +787,35 @@ class DynamicWatchlistService:
         )
 
     @staticmethod
+    def _preferred_strategy_score(
+        candidate: DynamicWatchlistCandidate,
+    ) -> float:
+        scores = {
+            "orb": candidate.orb_score,
+            "pullback": candidate.pullback_score,
+            "high-breakout": candidate.high_breakout_score,
+        }
+        return float(scores.get(candidate.preferred_strategy, 0.0))
+
+    @classmethod
+    def _passes_trade_quality_gate(
+        cls,
+        candidate: DynamicWatchlistCandidate,
+    ) -> bool:
+        """候補数合わせより売買セットアップの質を優先する。
+
+        Sprint 125では個別銘柄を除外せず、Explainabilityで観測した
+        スコアだけを使う。履歴成熟度を反映済みのtotal_scoreが40以上、
+        かつ選択戦略そのもののscoreが4以上の候補だけを売買対象とする。
+        """
+
+        if candidate.exclusion_reasons:
+            return False
+        if candidate.total_score < 40.0:
+            return False
+        return cls._preferred_strategy_score(candidate) >= 4.0
+
+    @staticmethod
     def _resolve_rating_tier(
         total_score: float,
     ) -> str:
@@ -1007,6 +1049,222 @@ class DynamicWatchlistService:
                     }
                 )
 
+    def _write_explainability_reports(
+        self,
+        *,
+        result: DynamicWatchlistResult,
+        all_candidates: Iterable[DynamicWatchlistCandidate],
+        eligible_candidates: Iterable[DynamicWatchlistCandidate],
+        market_data_date: date | None,
+    ) -> None:
+        """候補銘柄の選定理由・除外理由を人間が追跡できる形で保存する。
+
+        Sprint 125では新しい売買フィルターは追加しない。
+        現在のDynamic Watchlist判定を可視化し、後続Sprintで
+        実データに基づいてTrade Eligibility閾値を決められるようにする。
+        """
+
+        candidates = tuple(all_candidates)
+        eligible = tuple(eligible_candidates)
+        eligible_rank = {
+            candidate.code: index
+            for index, candidate in enumerate(eligible, start=1)
+        }
+        selected_codes = {
+            candidate.code
+            for candidate in result.selected
+        }
+
+        rows = [
+            self._build_explainability_row(
+                candidate=candidate,
+                rank=eligible_rank.get(candidate.code),
+                selected=candidate.code in selected_codes,
+            )
+            for candidate in sorted(
+                candidates,
+                key=self._ranking_key,
+            )
+        ]
+
+        payload = {
+            "generated_at": result.generated_at.isoformat(),
+            "target_date": result.target_date.isoformat(),
+            "market_data_date": (
+                market_data_date.isoformat()
+                if market_data_date is not None
+                else None
+            ),
+            "evaluated_count": len(candidates),
+            "eligible_count": len(eligible),
+            "selected_count": len(result.selected),
+            "note": (
+                "Sprint 125 explainability only: trade_eligible reflects "
+                "the current Dynamic Watchlist eligibility rules. "
+                "No new ATR/range/volume hard filter is applied."
+            ),
+            "candidates": rows,
+        }
+
+        explainability_directory = (
+            self.report_directory / "explainability"
+        )
+        explainability_directory.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        dated_json = (
+            explainability_directory
+            / f"trade_candidates_{result.target_date.isoformat()}.json"
+        )
+        dated_csv = (
+            explainability_directory
+            / f"trade_candidates_{result.target_date.isoformat()}.csv"
+        )
+        latest_json = (
+            explainability_directory / "latest.json"
+        )
+        latest_csv = (
+            explainability_directory / "latest.csv"
+        )
+
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+        )
+        dated_json.write_text(serialized, encoding="utf-8")
+        latest_json.write_text(serialized, encoding="utf-8")
+
+        fieldnames = [
+            "code",
+            "selected",
+            "trade_eligible",
+            "eligibility_status",
+            "rank",
+            "final_score",
+            "rating_tier",
+            "preferred_strategy",
+            "selection_tier",
+            "latest_date",
+            "latest_price",
+            "purchase_amount",
+            "history_days",
+            "history_maturity",
+            "atr_percent",
+            "return_20d_percent",
+            "breakout_percent",
+            "volume_ratio",
+            "average_turnover_20d",
+            "liquidity_score",
+            "volatility_score",
+            "volume_score",
+            "orb_score",
+            "pullback_score",
+            "high_breakout_score",
+            "technical_score",
+            "historical_score",
+            "strengths",
+            "exclusion_reasons",
+        ]
+        for path in (dated_csv, latest_csv):
+            with path.open(
+                "w",
+                encoding="utf-8-sig",
+                newline="",
+            ) as file:
+                writer = csv.DictWriter(
+                    file,
+                    fieldnames=fieldnames,
+                )
+                writer.writeheader()
+                writer.writerows(rows)
+
+    def _build_explainability_row(
+        self,
+        *,
+        candidate: DynamicWatchlistCandidate,
+        rank: int | None,
+        selected: bool,
+    ) -> dict[str, object]:
+        base_eligible = not candidate.exclusion_reasons
+        quality_gate_passed = (
+            base_eligible
+            and self._passes_trade_quality_gate(candidate)
+        )
+        trade_eligible = quality_gate_passed
+        if selected:
+            status = "selected"
+        elif not base_eligible:
+            status = "excluded"
+        elif not quality_gate_passed:
+            status = "quality_gate_rejected"
+        else:
+            status = "eligible_not_selected"
+
+        history_maturity = self._history_maturity_multiplier(
+            history_days=candidate.history_days,
+            full_history_days=self.settings.minimum_history_days,
+        )
+
+        strengths: list[str] = []
+        if candidate.atr_ratio >= 0.03:
+            strengths.append("strong_volatility")
+        if candidate.volume_ratio >= 1.5:
+            strengths.append("strong_relative_volume")
+        if candidate.breakout_ratio >= 0.02:
+            strengths.append("positive_breakout_momentum")
+        if candidate.return_20d >= 0.05:
+            strengths.append("positive_20d_momentum")
+        if candidate.liquidity_score >= 15.0:
+            strengths.append("high_liquidity")
+        if candidate.orb_score >= 6.0:
+            strengths.append("orb_setup")
+        if candidate.pullback_score >= 6.0:
+            strengths.append("pullback_setup")
+        if candidate.high_breakout_score >= 4.0:
+            strengths.append("high_breakout_setup")
+
+        return {
+            "code": candidate.code,
+            "selected": selected,
+            "trade_eligible": trade_eligible,
+            "eligibility_status": status,
+            "rank": rank,
+            "final_score": candidate.total_score,
+            "rating_tier": candidate.rating_tier,
+            "preferred_strategy": candidate.preferred_strategy,
+            "selection_tier": candidate.selection_tier,
+            "latest_date": candidate.latest_date.isoformat(),
+            "latest_price": candidate.latest_price,
+            "purchase_amount": candidate.purchase_amount,
+            "history_days": candidate.history_days,
+            "history_maturity": round(history_maturity, 4),
+            "atr_percent": round(candidate.atr_ratio * 100.0, 4),
+            "return_20d_percent": round(
+                candidate.return_20d * 100.0,
+                4,
+            ),
+            "breakout_percent": round(
+                candidate.breakout_ratio * 100.0,
+                4,
+            ),
+            "volume_ratio": candidate.volume_ratio,
+            "average_turnover_20d": candidate.average_turnover_20d,
+            "liquidity_score": candidate.liquidity_score,
+            "volatility_score": candidate.volatility_score,
+            "volume_score": candidate.volume_score,
+            "orb_score": candidate.orb_score,
+            "pullback_score": candidate.pullback_score,
+            "high_breakout_score": candidate.high_breakout_score,
+            "technical_score": candidate.technical_score,
+            "historical_score": candidate.historical_score,
+            "strengths": ",".join(strengths),
+            "exclusion_reasons": ",".join(
+                candidate.exclusion_reasons
+            ),
+        }
+
     @staticmethod
     def _scale(
         value: float,
@@ -1031,11 +1289,20 @@ class DynamicWatchlistService:
         upper: float,
         maximum: float,
     ) -> float:
-        if value <= 0 or upper <= lower:
+        if value <= 0 or upper <= 0 or upper <= lower:
             return 0.0
+
+        safe_lower = max(
+            float(lower),
+            min(float(value), float(upper)) * 1e-6,
+            1.0,
+        )
+        if upper <= safe_lower:
+            return maximum if value >= upper else 0.0
+
         return DynamicWatchlistService._scale(
             math.log10(value),
-            lower=math.log10(lower),
+            lower=math.log10(safe_lower),
             upper=math.log10(upper),
             maximum=maximum,
         )
