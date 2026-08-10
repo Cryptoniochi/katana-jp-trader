@@ -1,4 +1,4 @@
-"""営業日15:36以降に全市場Universeを更新し、一次選定まで自動実行する。"""
+"""営業日15:36以降に全市場Universeを更新し、監査・一次選定まで自動実行する。"""
 
 from __future__ import annotations
 
@@ -12,6 +12,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from app.market.market_calendar import TokyoMarketCalendar
+from app.runtime.universe_daily_history_audit_service import (
+    UniverseDailyHistoryAuditService,
+)
 from app.runtime.universe_daily_schedule_models import (
     UniverseDailyScheduleSettings,
     UniverseDailyScheduleState,
@@ -23,7 +26,7 @@ TOKYO = ZoneInfo("Asia/Tokyo")
 
 
 class UniverseDailyScheduler:
-    """全市場日足Bootstrap → Primary Screeningを営業日ごとに完了させる。"""
+    """全市場Bootstrap → Audit → Primary Screeningを営業日ごとに完了させる。"""
 
     def __init__(
         self,
@@ -45,6 +48,9 @@ class UniverseDailyScheduler:
         unavailable_path: Path = Path(
             "reports/universe/bootstrap_unavailable.json"
         ),
+        audit_report_path: Path = Path(
+            "reports/universe/daily_history_audit_latest.json"
+        ),
         marker_directory: Path = Path(
             "reports/service/universe_daily"
         ),
@@ -59,6 +65,7 @@ class UniverseDailyScheduler:
         now_provider: Callable[[], datetime] | None = None,
         command_runner=subprocess.run,
         monotonic_provider: Callable[[], float] = time.monotonic,
+        history_audit_service: UniverseDailyHistoryAuditService | None = None,
     ) -> None:
         if maximum_symbols_per_run <= 0:
             raise ValueError(
@@ -84,25 +91,14 @@ class UniverseDailyScheduler:
         self.primary_report_path = Path(primary_report_path)
         self.candidate_output_path = Path(candidate_output_path)
         self.unavailable_path = Path(unavailable_path)
+        self.audit_report_path = Path(audit_report_path)
         self.marker_directory = Path(marker_directory)
-        self.maximum_symbols_per_run = int(
-            maximum_symbols_per_run
-        )
-        self.maximum_primary_symbols = int(
-            maximum_primary_symbols
-        )
-        self.maximum_purchase_amount = float(
-            maximum_purchase_amount
-        )
-        self.minimum_completion_ratio = float(
-            minimum_completion_ratio
-        )
-        self.bootstrap_timeout_seconds = float(
-            bootstrap_timeout_seconds
-        )
-        self.primary_timeout_seconds = float(
-            primary_timeout_seconds
-        )
+        self.maximum_symbols_per_run = int(maximum_symbols_per_run)
+        self.maximum_primary_symbols = int(maximum_primary_symbols)
+        self.maximum_purchase_amount = float(maximum_purchase_amount)
+        self.minimum_completion_ratio = float(minimum_completion_ratio)
+        self.bootstrap_timeout_seconds = float(bootstrap_timeout_seconds)
+        self.primary_timeout_seconds = float(primary_timeout_seconds)
         self.settings = (
             settings
             if settings is not None
@@ -120,6 +116,17 @@ class UniverseDailyScheduler:
         )
         self.command_runner = command_runner
         self.monotonic_provider = monotonic_provider
+        self.history_audit_service = (
+            history_audit_service
+            if history_audit_service is not None
+            else UniverseDailyHistoryAuditService(
+                database_path=self.database_path,
+                minimum_effective_coverage_ratio=(
+                    self.minimum_completion_ratio
+                ),
+                terminal_skip_path=self.unavailable_path,
+            )
+        )
         self.last_attempt_at: datetime | None = None
         self.last_exit_code: int | None = None
         self._retry_after_monotonic = 0.0
@@ -128,9 +135,7 @@ class UniverseDailyScheduler:
     def run_once(self) -> UniverseDailyScheduleStatus:
         now = self._current_time()
         target_date = now.date()
-        business_day = self.calendar.is_business_day(
-            target_date
-        )
+        business_day = self.calendar.is_business_day(target_date)
 
         if not self.enabled:
             return self._publish(
@@ -195,7 +200,8 @@ class UniverseDailyScheduler:
                     marker.get("daily_bar_count")
                 ),
                 success_ratio=self._as_float(
-                    marker.get("coverage_ratio")
+                    marker.get("effective_coverage_ratio")
+                    or marker.get("coverage_ratio")
                 ),
                 message=(
                     "Full-market Universe pipeline was already "
@@ -220,7 +226,6 @@ class UniverseDailyScheduler:
             )
 
         self.last_attempt_at = now
-
         self._publish(
             now=now,
             state=UniverseDailyScheduleState.RUNNING,
@@ -239,11 +244,9 @@ class UniverseDailyScheduler:
             target_date=target_date
         )
         self.last_exit_code = bootstrap_exit_code
-
         payload = self._read_json(self.report_path)
 
-        # Backward compatibility for the legacy collector report used by
-        # existing focused tests and older local states.
+        # 旧collector reportとの互換性は維持する。
         if "requested_count" in payload:
             return self._handle_legacy_report(
                 now=now,
@@ -254,32 +257,21 @@ class UniverseDailyScheduler:
                 exit_code=bootstrap_exit_code,
             )
 
-        universe_count = self._as_int(
-            payload.get("universe_count")
-        )
-        remaining_count = self._as_int(
-            payload.get("remaining_count")
-        )
+        universe_count = self._as_int(payload.get("universe_count"))
+        remaining_count = self._as_int(payload.get("remaining_count"))
         retryable_remaining = self._as_int(
             payload.get("retryable_remaining_count")
         )
         terminal_skipped = self._as_int(
             payload.get("terminal_skipped_count")
         )
-        coverage_ratio = self._as_float(
-            payload.get("coverage_ratio")
-        )
-        bootstrap_completed = bool(
-            payload.get("completed")
-        )
-        report_date = str(
-            payload.get("trading_date") or ""
-        )
+        coverage_ratio = self._as_float(payload.get("coverage_ratio"))
+        bootstrap_completed = bool(payload.get("completed"))
+        report_date = str(payload.get("trading_date") or "")
 
         daily_bar_count = (
             None
-            if universe_count is None
-            or remaining_count is None
+            if universe_count is None or remaining_count is None
             else universe_count - remaining_count
         )
 
@@ -307,8 +299,6 @@ class UniverseDailyScheduler:
             )
 
         if not bootstrap_completed:
-            # A single scheduler poll performs one bounded batch.
-            # The next poll continues from the DB checkpoint.
             return self._publish(
                 now=now,
                 state=UniverseDailyScheduleState.RUNNING,
@@ -325,31 +315,12 @@ class UniverseDailyScheduler:
                 ),
             )
 
-        screening_exit_code = self._run_primary_screening()
-        self.last_exit_code = screening_exit_code
-
-        primary = self._read_json(
-            self.primary_report_path
-        )
-        primary_selected = self._as_int(
-            primary.get("selected_count")
-        )
-        primary_evaluated = self._as_int(
-            primary.get("evaluated_count")
-        )
-
-        candidate_count = self._candidate_count()
-
-        screening_success = (
-            screening_exit_code == 0
-            and primary_selected is not None
-            and primary_selected > 0
-            and candidate_count == primary_selected
-            and candidate_count
-            <= self.maximum_primary_symbols
-        )
-
-        if not screening_success:
+        # Sprint 124: Bootstrapの自己申告だけで完了扱いにしない。
+        try:
+            audit = self.history_audit_service.audit(
+                trading_date=target_date
+            )
+        except Exception as error:
             return self._fail(
                 now=now,
                 business_day=business_day,
@@ -357,59 +328,110 @@ class UniverseDailyScheduler:
                 collected_count=daily_bar_count,
                 success_ratio=coverage_ratio,
                 message=(
-                    "Primary Screening failed after full-market "
+                    "Daily History Audit raised an error after "
                     "Bootstrap. "
+                    f"{type(error).__name__}: {error}"
+                ),
+            )
+
+        self._write_json_atomic(
+            self.audit_report_path,
+            audit.to_dict(),
+        )
+
+        if not audit.completed:
+            return self._fail(
+                now=now,
+                business_day=business_day,
+                requested_count=audit.active_universe_count,
+                collected_count=audit.collected_count,
+                success_ratio=audit.effective_coverage_ratio,
+                message=(
+                    "Daily History Audit failed. "
+                    f"collected={audit.collected_count}/"
+                    f"{audit.active_universe_count} "
+                    f"terminal_skipped={audit.terminal_skipped_count} "
+                    f"unexplained_missing={audit.unexplained_missing_count} "
+                    f"effective_coverage="
+                    f"{audit.effective_coverage_ratio:.4f}"
+                ),
+            )
+
+        screening_exit_code = self._run_primary_screening()
+        self.last_exit_code = screening_exit_code
+        primary = self._read_json(self.primary_report_path)
+        primary_selected = self._as_int(primary.get("selected_count"))
+        primary_evaluated = self._as_int(primary.get("evaluated_count"))
+        candidate_count = self._candidate_count()
+
+        screening_success = (
+            screening_exit_code == 0
+            and primary_selected is not None
+            and primary_selected > 0
+            and candidate_count == primary_selected
+            and candidate_count <= self.maximum_primary_symbols
+        )
+
+        if not screening_success:
+            return self._fail(
+                now=now,
+                business_day=business_day,
+                requested_count=audit.active_universe_count,
+                collected_count=audit.collected_count,
+                success_ratio=audit.effective_coverage_ratio,
+                message=(
+                    "Primary Screening failed after Daily "
+                    "History Audit. "
                     f"exit_code={screening_exit_code} "
                     f"selected={primary_selected} "
                     f"candidate_file_count={candidate_count}"
                 ),
             )
 
-        marker_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
         marker_payload = {
             "target_date": target_date.isoformat(),
             "completed_at": now.isoformat(),
-            "universe_count": universe_count,
-            "daily_bar_count": daily_bar_count,
-            "remaining_count": remaining_count,
-            "retryable_remaining_count": retryable_remaining,
-            "terminal_skipped_count": terminal_skipped,
-            "coverage_ratio": coverage_ratio,
+            "universe_count": audit.active_universe_count,
+            "daily_bar_count": audit.collected_count,
+            "remaining_count": audit.missing_count,
+            "retryable_remaining_count": (
+                audit.unexplained_missing_count
+            ),
+            "terminal_skipped_count": (
+                audit.terminal_skipped_count
+            ),
+            "coverage_ratio": audit.collection_ratio,
+            "effective_coverage_ratio": (
+                audit.effective_coverage_ratio
+            ),
+            "audit_completed": audit.completed,
+            "audit_report": str(self.audit_report_path),
             "primary_evaluated_count": primary_evaluated,
             "primary_selected_count": primary_selected,
-            "candidate_output": str(
-                self.candidate_output_path
-            ),
+            "candidate_output": str(self.candidate_output_path),
             "exit_code": screening_exit_code,
         }
-        self._write_json_atomic(
-            marker_path,
-            marker_payload,
-        )
+        self._write_json_atomic(marker_path, marker_payload)
 
         return self._publish(
             now=now,
             state=UniverseDailyScheduleState.COMPLETED,
             business_day=True,
             next_action_at=None,
-            requested_count=universe_count,
-            collected_count=daily_bar_count,
-            success_ratio=coverage_ratio,
+            requested_count=audit.active_universe_count,
+            collected_count=audit.collected_count,
+            success_ratio=audit.effective_coverage_ratio,
             message=(
-                "Full-market Universe pipeline completed. "
-                f"daily_bars={daily_bar_count}/{universe_count} "
+                "Full-market Universe pipeline completed after "
+                "Daily History Audit. "
+                f"daily_bars={audit.collected_count}/"
+                f"{audit.active_universe_count} "
+                f"terminal_skipped={audit.terminal_skipped_count} "
                 f"primary_selected={primary_selected}"
             ),
         )
 
-    def _run_bootstrap(
-        self,
-        *,
-        target_date,
-    ) -> int:
+    def _run_bootstrap(self, *, target_date) -> int:
         try:
             completed = self.command_runner(
                 [
@@ -473,18 +495,10 @@ class UniverseDailyScheduler:
         payload: dict[str, object],
         exit_code: int,
     ) -> UniverseDailyScheduleStatus:
-        requested_count = self._as_int(
-            payload.get("requested_count")
-        )
-        collected_count = self._as_int(
-            payload.get("collected_count")
-        )
-        success_ratio = self._as_float(
-            payload.get("success_ratio")
-        )
-        report_date = str(
-            payload.get("trading_date") or ""
-        )
+        requested_count = self._as_int(payload.get("requested_count"))
+        collected_count = self._as_int(payload.get("collected_count"))
+        success_ratio = self._as_float(payload.get("success_ratio"))
+        report_date = str(payload.get("trading_date") or "")
 
         success = (
             exit_code == 0
@@ -494,8 +508,7 @@ class UniverseDailyScheduler:
             and collected_count is not None
             and collected_count > 0
             and success_ratio is not None
-            and success_ratio
-            >= self.settings.minimum_success_ratio
+            and success_ratio >= self.settings.minimum_success_ratio
         )
 
         if not success:
@@ -533,9 +546,7 @@ class UniverseDailyScheduler:
             requested_count=requested_count,
             collected_count=collected_count,
             success_ratio=success_ratio,
-            message=(
-                "Legacy Universe Daily collection completed."
-            ),
+            message="Legacy Universe Daily collection completed.",
         )
 
     def _fail(
@@ -594,16 +605,8 @@ class UniverseDailyScheduler:
         if not path.exists():
             return {}
         try:
-            payload = json.loads(
-                path.read_text(
-                    encoding="utf-8"
-                )
-            )
-        except (
-            OSError,
-            UnicodeError,
-            json.JSONDecodeError,
-        ):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
             return {}
         return payload if isinstance(payload, dict) else {}
 
@@ -612,19 +615,10 @@ class UniverseDailyScheduler:
         path: Path,
         payload: dict[str, object],
     ) -> None:
-        path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-        temporary = path.with_suffix(
-            path.suffix + ".tmp"
-        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_text(
-            json.dumps(
-                payload,
-                ensure_ascii=False,
-                indent=2,
-            ),
+            json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         temporary.replace(path)
@@ -656,19 +650,12 @@ class UniverseDailyScheduler:
             message=message,
             settings=self.settings,
         )
-        self.status_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        self.status_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.status_path.with_suffix(
             self.status_path.suffix + ".tmp"
         )
         temporary.write_text(
-            json.dumps(
-                status.to_dict(),
-                ensure_ascii=False,
-                indent=2,
-            ),
+            json.dumps(status.to_dict(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         temporary.replace(self.status_path)
