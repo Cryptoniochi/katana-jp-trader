@@ -134,31 +134,18 @@ class DynamicWatchlistService:
             )
             for code, bars in sorted(series_by_code.items())
         )
-        strict = sorted(
+        # 履歴20日未満の銘柄も、履歴成熟度ペナルティを反映した
+        # total_scoreで成熟銘柄と同じランキングへ載せる。
+        # strictを常に先頭へ置く旧方式だと、全市場化直後の有望銘柄が
+        # スコアに関係なく大型の既存銘柄より後ろへ追いやられてしまう。
+        eligible = sorted(
             (
                 candidate
                 for candidate in candidates
-                if candidate.selection_tier == "strict"
-                and not candidate.exclusion_reasons
+                if not candidate.exclusion_reasons
             ),
             key=self._ranking_key,
         )
-        fallback = sorted(
-            (
-                candidate
-                for candidate in candidates
-                if candidate.selection_tier == "fallback"
-                and not candidate.exclusion_reasons
-            ),
-            key=self._ranking_key,
-        )
-        eligible = strict + [
-            candidate
-            for candidate in fallback
-            if candidate.code not in {
-                item.code for item in strict
-            }
-        ]
         selected = tuple(
             self._mark_selected(candidate)
             for candidate in eligible[
@@ -401,7 +388,15 @@ class DynamicWatchlistService:
             age_days <= settings.maximum_data_age_days
         )
 
-        if not strict_history or not strict_freshness:
+        # 既存のfallback互換性を維持しつつ、10～19営業日は
+        # developingとして履歴成熟度ペナルティ付きで評価する。
+        # fallback_minimum_history_days未満だけを履歴不足で除外する。
+        if not strict_history:
+            if len(bars) >= 10:
+                selection_tier = "developing"
+            else:
+                selection_tier = "fallback"
+        elif not strict_freshness:
             selection_tier = "fallback"
 
         if len(bars) < settings.fallback_minimum_history_days:
@@ -586,13 +581,22 @@ class DynamicWatchlistService:
             feature_scores=feature_scores,
             feedback=learning_feedback,
         )
+        raw_total_score = min(
+            100.0,
+            technical_score
+            + historical_score
+            * settings.learning_total_score_weight,
+        )
+        history_maturity = (
+            self._history_maturity_multiplier(
+                history_days=len(bars),
+                full_history_days=(
+                    settings.minimum_history_days
+                ),
+            )
+        )
         total_score = round(
-            min(
-                100.0,
-                technical_score
-                + historical_score
-                * settings.learning_total_score_weight,
-            ),
+            raw_total_score * history_maturity,
             4,
         )
         rating_tier = self._resolve_rating_tier(
@@ -655,6 +659,40 @@ class DynamicWatchlistService:
             selection_tier=selection_tier,
             selected=False,
             exclusion_reasons=tuple(exclusion_reasons),
+        )
+
+
+    @staticmethod
+    def _history_maturity_multiplier(
+        *,
+        history_days: int,
+        full_history_days: int,
+    ) -> float:
+        """履歴10～19日の暫定評価へ緩やかな信頼度ペナルティを掛ける。
+
+        10日で0.80、20日で1.00へ線形に上昇する。
+        10日未満は別途insufficient_historyで除外される。
+        """
+
+        if full_history_days <= 10:
+            return 1.0
+
+        if history_days >= full_history_days:
+            return 1.0
+
+        if history_days <= 10:
+            return 0.80
+
+        progress = (
+            (history_days - 10)
+            / (full_history_days - 10)
+        )
+        return min(
+            1.0,
+            max(
+                0.80,
+                0.80 + 0.20 * progress,
+            ),
         )
 
 
