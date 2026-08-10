@@ -24,6 +24,9 @@ from app.dashboard.dynamic_watchlist_status_reader import (
 from app.dashboard.morning_preflight_status_reader import (
     MorningPreflightStatusReader,
 )
+from app.dashboard.universe_history_status_reader import (
+    UniverseHistoryStatusReader,
+)
 from app.dashboard.paper_trading_schedule_status_reader import (
     PaperTradingScheduleStatusReader,
 )
@@ -39,7 +42,6 @@ from app.dashboard.dashboard_snapshot_file import (
 from app.dashboard.dashboard_strategy_service import (
     DashboardStrategyService,
 )
-from app.dashboard.symbol_name_reader import SymbolNameReader
 from app.dashboard.dashboard_web_app import (
     create_dashboard_app,
 )
@@ -268,7 +270,7 @@ def create_launcher_app(
     daily_report_reader = DailyReportReader(
         daily_report_directory
     )
-    symbol_name_reader = SymbolNameReader(
+    universe_history_reader = UniverseHistoryStatusReader(
         database_path
     )
     readiness_service = OperationalReadinessService(
@@ -294,7 +296,7 @@ def create_launcher_app(
         dynamic_watchlist_reader=dynamic_watchlist_reader,
         morning_preflight_reader=morning_preflight_reader,
         daily_report_reader=daily_report_reader,
-        symbol_name_reader=symbol_name_reader,
+        universe_history_reader=universe_history_reader,
     )
 
 

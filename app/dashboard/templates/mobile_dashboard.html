@@ -155,6 +155,30 @@
       </article>
     </section>
 
+
+    <section>
+      <div class="mobile-section-title">
+        <h2>Universe History</h2>
+        <span id="mobile-universe-history-date" class="muted">—</span>
+      </div>
+      <article class="mobile-detail-card">
+        <div class="mobile-detail-grid">
+          <div><span>Active</span><b id="mobile-universe-active">0</b></div>
+          <div><span>1+ days</span><b id="mobile-universe-1d">0</b></div>
+          <div><span>5+ days</span><b id="mobile-universe-5d">0</b></div>
+          <div><span>10+ days</span><b id="mobile-universe-10d">0</b></div>
+          <div><span>20+ days</span><b id="mobile-universe-20d">0</b></div>
+          <div><span>Fallback</span><b id="mobile-universe-fallback">0</b></div>
+          <div><span>Developing</span><b id="mobile-universe-developing">0</b></div>
+          <div><span>Strict</span><b id="mobile-universe-strict">0</b></div>
+          <div><span>No History</span><b id="mobile-universe-none">0</b></div>
+        </div>
+        <p id="mobile-universe-message" class="mobile-card-message">
+          Universe history coverage has not been loaded yet.
+        </p>
+      </article>
+    </section>
+
     <section>
       <div class="mobile-section-title">
         <h2>Dynamic Watchlist</h2>
@@ -182,11 +206,11 @@
             <b id="dynamic-watchlist-eligible">0</b>
           </div>
           <div>
-            <span>Selection Capital</span>
+            <span>Capital</span>
             <b id="dynamic-watchlist-capital">—</b>
           </div>
           <div>
-            <span>Purchase Budget</span>
+            <span>Budget</span>
             <b id="dynamic-watchlist-budget">—</b>
           </div>
         </div>
@@ -417,8 +441,7 @@
         <h2>Today's Executions</h2>
       </div>
       <p class="mobile-status-note">
-        Paper Brokerで本日（JST）に保存された約定を表示します。
-        金額は約定単価で、決済約定には実現損益も表示します。
+        Paper Brokerで本日（JST）に保存された約定だけを表示します。
       </p>
       <div id="mobile-recent-trades" class="mobile-card-list"></div>
     </section>
@@ -442,14 +465,6 @@
 
 
     const JST_TIME_ZONE = "Asia/Tokyo";
-    let symbolNames = {};
-
-    function symbolLabel(code) {
-      const normalized = String(code ?? "—");
-      const name = symbolNames[normalized];
-      return name ? `${normalized} ${name}` : normalized;
-    }
-
 
     function parseDateTime(value) {
       if (!value) return null;
@@ -539,6 +554,23 @@
       return `¥${Number(value).toLocaleString("ja-JP")}`;
     }
 
+
+    function renderMobileUniverseHistory(payload) {
+      document.getElementById("mobile-universe-active").textContent = payload.active_universe_count ?? 0;
+      document.getElementById("mobile-universe-1d").textContent = payload.symbols_with_1_day ?? 0;
+      document.getElementById("mobile-universe-5d").textContent = payload.symbols_with_5_days ?? 0;
+      document.getElementById("mobile-universe-10d").textContent = payload.symbols_with_10_days ?? 0;
+      document.getElementById("mobile-universe-20d").textContent = payload.symbols_with_20_days ?? 0;
+      document.getElementById("mobile-universe-fallback").textContent = payload.fallback_count ?? 0;
+      document.getElementById("mobile-universe-developing").textContent = payload.developing_count ?? 0;
+      document.getElementById("mobile-universe-strict").textContent = payload.strict_count ?? 0;
+      document.getElementById("mobile-universe-none").textContent = payload.no_history_count ?? 0;
+      document.getElementById("mobile-universe-history-date").textContent = payload.latest_market_data_date ?? "—";
+      document.getElementById("mobile-universe-message").textContent = payload.available
+        ? `20-day coverage: ${percent.format(payload.coverage_20_days ?? 0)}`
+        : (payload.message ?? "Universe history is unavailable.");
+    }
+
     function renderDynamicWatchlist(payload) {
       document.getElementById(
         "dynamic-watchlist-status"
@@ -599,7 +631,7 @@
           <div class="dynamic-watchlist-card-header">
             <div>
               <span class="dynamic-rank">#${index + 1}</span>
-              <strong>${symbolLabel(candidate.code)}</strong>
+              <strong>${candidate.code ?? "—"}</strong>
             </div>
             <b>${candidate.rating_tier ?? "C"}</b>
           </div>
@@ -932,15 +964,6 @@
         )
         : "";
 
-      const pnlWarning = (
-        payload.pnl_consistent === false
-      )
-        ? (
-          " WARNING: Session Equity Change and P/L "
-          + "reconciliation do not match."
-        )
-        : "";
-
       document.getElementById(
         "paper-runtime-message"
       ).textContent = (
@@ -951,7 +974,6 @@
             ? (
               "Runtime activity is being recorded."
               + inheritedPositionNote
-              + pnlWarning
             )
             : "Paper Trading Runtime has not reported yet."
         )
@@ -1412,47 +1434,26 @@
             No executions today.
           </article>
         `;
-        return 0;
+        return;
       }
 
       for (const trade of todaysExecutions.slice(0, 20)) {
         const element = document.createElement("article");
         element.className = "mobile-detail-card";
-        const realized = trade.realized_profit_loss;
-        const realizedLabel = (
-          realized === null || realized === undefined
-            ? "—"
-            : yen.format(realized)
-        );
         element.innerHTML = `
           <div class="mobile-card-heading">
             <strong>${trade.strategy_name ?? "—"}</strong>
             <span>${String(trade.side ?? "—").toUpperCase()}</span>
           </div>
-          <div class="mobile-detail-grid">
-            <div>
-              <span>Symbol</span>
-              <b>${symbolLabel(trade.code)}</b>
-            </div>
-            <div>
-              <span>Quantity</span>
-              <b>${trade.quantity ?? 0} shares</b>
-            </div>
-            <div>
-              <span>Execution Price</span>
-              <b>${yen.format(trade.execution_price ?? 0)}</b>
-            </div>
-            <div>
-              <span>Realized P/L</span>
-              <b>${realizedLabel}</b>
-            </div>
+          <div class="mobile-trade-row">
+            <span>${trade.code ?? "—"}</span>
+            <span>${trade.quantity ?? 0} shares</span>
+            <span>${yen.format(trade.execution_price ?? 0)}</span>
           </div>
           <small>${formatJstDateTime(trade.executed_at)}</small>
         `;
         list.appendChild(element);
       }
-
-      return todaysExecutions.length;
     }
 
     function renderPositions(positions) {
@@ -1475,7 +1476,7 @@
         element.className = "mobile-detail-card";
         element.innerHTML = `
           <div class="mobile-card-heading">
-            <strong>${symbolLabel(position.code)}</strong>
+            <strong>${position.code}</strong>
             <span>${position.side}</span>
           </div>
           <div class="mobile-detail-grid">
@@ -1499,31 +1500,23 @@
         readinessResponse,
         scheduleResponse,
         runtimeResponse,
-        positionsResponse,
-        symbolNamesResponse,
         dailyReportResponse,
         morningPreflightResponse,
-        dynamicWatchlistResponse
+        dynamicWatchlistResponse,
+        universeHistoryResponse
       ] = await Promise.all([
-        fetch("/api/dashboard/summary", { cache: "no-store" }),
+        fetch("/api/dashboard/summary"),
         fetch("/api/dashboard/strategies"),
         fetch("/api/dashboard/performance"),
         fetch("/api/dashboard/performance-breakdown"),
         fetch("/api/dashboard/service-status"),
         fetch("/api/dashboard/operational-readiness"),
         fetch("/api/dashboard/paper-trading-schedule"),
-        fetch("/api/dashboard/paper-trading-runtime", {
-          cache: "no-store"
-        }),
-        fetch("/api/dashboard/positions", {
-          cache: "no-store"
-        }),
-        fetch("/api/dashboard/symbol-names", {
-          cache: "no-store"
-        }),
+        fetch("/api/dashboard/paper-trading-runtime"),
         fetch("/api/dashboard/daily-report"),
         fetch("/api/dashboard/morning-preflight"),
-        fetch("/api/dashboard/dynamic-watchlist")
+        fetch("/api/dashboard/dynamic-watchlist"),
+        fetch("/api/dashboard/universe-history")
       ]);
 
       if (
@@ -1535,11 +1528,10 @@
         || !readinessResponse.ok
         || !scheduleResponse.ok
         || !runtimeResponse.ok
-        || !positionsResponse.ok
-        || !symbolNamesResponse.ok
         || !dailyReportResponse.ok
         || !morningPreflightResponse.ok
         || !dynamicWatchlistResponse.ok
+        || !universeHistoryResponse.ok
       ) {
         throw new Error(
           "Dashboard API request failed."
@@ -1562,13 +1554,6 @@
       const runtime = (
         await runtimeResponse.json()
       );
-      const positionsPayload = (
-        await positionsResponse.json()
-      );
-      const symbolNamesPayload = (
-        await symbolNamesResponse.json()
-      );
-      symbolNames = symbolNamesPayload?.names ?? {};
       const dailyReport = (
         await dailyReportResponse.json()
       );
@@ -1577,6 +1562,9 @@
       );
       const dynamicWatchlist = (
         await dynamicWatchlistResponse.json()
+      );
+      const universeHistory = (
+        await universeHistoryResponse.json()
       );
       const snapshot = summary.snapshot;
       const daily = summary.daily_history ?? [];
@@ -1606,11 +1594,6 @@
         ?? null
       );
       const portfolio = snapshot.portfolio;
-      const currentPositions = (
-        positionsPayload?.positions
-        ?? portfolio?.positions
-        ?? []
-      );
       const live = snapshot.live_summary;
       const health = snapshot.system_health;
       const status = health?.status ?? (
@@ -1636,7 +1619,7 @@
 
       document.getElementById(
         "mobile-position-count"
-      ).textContent = currentPositions.length;
+      ).textContent = portfolio?.position_count ?? "—";
 
       document.getElementById(
         "mobile-signal-count"
@@ -1666,6 +1649,7 @@
           : "Trading snapshot data is available."
       );
 
+      renderMobileUniverseHistory(universeHistory);
       renderDynamicWatchlist(dynamicWatchlist);
       renderMorningPreflight(morningPreflight);
       renderMobileDailyReport(dailyReport);
@@ -1677,16 +1661,8 @@
       currentBreakdownPayload = breakdown;
       renderMobileBreakdown();
       renderStrategies(strategies);
-      const todayExecutionCount = renderTrades(
-        strategies.recent_trades
-      );
-      document.getElementById(
-        "paper-runtime-executions"
-      ).textContent = todayExecutionCount;
-      document.getElementById(
-        "mobile-execution-count"
-      ).textContent = todayExecutionCount;
-      renderPositions(currentPositions);
+      renderTrades(strategies.recent_trades);
+      renderPositions(portfolio?.positions ?? []);
     }
 
     refreshMobileDashboard().catch(error => {

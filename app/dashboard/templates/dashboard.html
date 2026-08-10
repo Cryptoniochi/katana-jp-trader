@@ -194,6 +194,35 @@
 
 
 
+
+    <section class="panel universe-history-panel">
+      <div class="panel-heading">
+        <div>
+          <h2>Universe History Coverage</h2>
+          <span class="muted">
+            Full-market daily-bar history maturity
+          </span>
+        </div>
+        <span id="universe-history-date" class="muted">—</span>
+      </div>
+
+      <div class="morning-summary-grid">
+        <article><span>Active</span><strong id="universe-history-active">0</strong></article>
+        <article><span>1+ days</span><strong id="universe-history-1d">0</strong></article>
+        <article><span>5+ days</span><strong id="universe-history-5d">0</strong></article>
+        <article><span>10+ days</span><strong id="universe-history-10d">0</strong></article>
+        <article><span>20+ days</span><strong id="universe-history-20d">0</strong></article>
+        <article><span>Fallback</span><strong id="universe-history-fallback">0</strong></article>
+        <article><span>Developing</span><strong id="universe-history-developing">0</strong></article>
+        <article><span>Strict</span><strong id="universe-history-strict">0</strong></article>
+        <article><span>No History</span><strong id="universe-history-none">0</strong></article>
+      </div>
+
+      <p id="universe-history-message" class="muted">
+        Universe history coverage has not been loaded yet.
+      </p>
+    </section>
+
     <section class="panel dynamic-watchlist-panel">
       <div class="panel-heading">
         <div>
@@ -565,6 +594,23 @@
     }
 
 
+
+
+    function renderUniverseHistory(payload) {
+      document.getElementById("universe-history-active").textContent = payload.active_universe_count ?? 0;
+      document.getElementById("universe-history-1d").textContent = payload.symbols_with_1_day ?? 0;
+      document.getElementById("universe-history-5d").textContent = payload.symbols_with_5_days ?? 0;
+      document.getElementById("universe-history-10d").textContent = payload.symbols_with_10_days ?? 0;
+      document.getElementById("universe-history-20d").textContent = payload.symbols_with_20_days ?? 0;
+      document.getElementById("universe-history-fallback").textContent = payload.fallback_count ?? 0;
+      document.getElementById("universe-history-developing").textContent = payload.developing_count ?? 0;
+      document.getElementById("universe-history-strict").textContent = payload.strict_count ?? 0;
+      document.getElementById("universe-history-none").textContent = payload.no_history_count ?? 0;
+      document.getElementById("universe-history-date").textContent = payload.latest_market_data_date ?? "—";
+      document.getElementById("universe-history-message").textContent = payload.available
+        ? `20-day coverage: ${percent.format(payload.coverage_20_days ?? 0)}`
+        : (payload.message ?? "Universe history is unavailable.");
+    }
 
     function renderDesktopDynamicWatchlist(payload) {
       document.getElementById(
@@ -1446,7 +1492,8 @@
         runtimeResponse,
         dailyReportResponse,
         morningPreflightResponse,
-        dynamicWatchlistResponse
+        dynamicWatchlistResponse,
+        universeHistoryResponse
       ] = await Promise.all([
         fetch("/api/dashboard/summary"),
         fetch("/api/dashboard/strategies"),
@@ -1458,7 +1505,8 @@
         fetch("/api/dashboard/paper-trading-runtime"),
         fetch("/api/dashboard/daily-report"),
         fetch("/api/dashboard/morning-preflight"),
-        fetch("/api/dashboard/dynamic-watchlist")
+        fetch("/api/dashboard/dynamic-watchlist"),
+        fetch("/api/dashboard/universe-history")
       ]);
 
       if (
@@ -1473,6 +1521,7 @@
         || !dailyReportResponse.ok
         || !morningPreflightResponse.ok
         || !dynamicWatchlistResponse.ok
+        || !universeHistoryResponse.ok
       ) {
         throw new Error(
           "Dashboard API request failed."
@@ -1509,6 +1558,9 @@
       );
       const dynamicWatchlistData = (
         await dynamicWatchlistResponse.json()
+      );
+      const universeHistoryData = (
+        await universeHistoryResponse.json()
       );
       const snapshot = data.snapshot;
       const daily = data.daily_history ?? [];
@@ -1604,6 +1656,7 @@
       renderDesktopDynamicWatchlist(
         dynamicWatchlistData
       );
+      renderUniverseHistory(universeHistoryData);
       renderDesktopMorningPreflight(
         morningPreflightData
       );
