@@ -24,8 +24,14 @@ from app.dashboard.dynamic_watchlist_status_reader import (
 from app.dashboard.morning_preflight_status_reader import (
     MorningPreflightStatusReader,
 )
+from app.dashboard.symbol_name_reader import (
+    SymbolNameReader,
+)
 from app.dashboard.universe_history_status_reader import (
     UniverseHistoryStatusReader,
+)
+from app.dashboard.watchlist_execution_integrity_status_reader import (
+    WatchlistExecutionIntegrityStatusReader,
 )
 from app.dashboard.paper_trading_schedule_status_reader import (
     PaperTradingScheduleStatusReader,
@@ -88,6 +94,9 @@ DEFAULT_SERVICE_STATUS_PATH = Path(
 )
 DEFAULT_SNAPSHOT_PATH = Path(
     "reports/dashboard/dashboard.json"
+)
+DEFAULT_WATCHLIST_EXECUTION_INTEGRITY_PATH = Path(
+    "reports/service/watchlist_execution_integrity.json"
 )
 
 
@@ -153,6 +162,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_DAILY_REPORT_DIRECTORY,
     )
     parser.add_argument(
+        "--watchlist-execution-integrity",
+        type=Path,
+        default=DEFAULT_WATCHLIST_EXECUTION_INTEGRITY_PATH,
+    )
+    parser.add_argument(
         "--history-limit",
         type=int,
         default=30,
@@ -212,6 +226,9 @@ def create_launcher_app(
     daily_report_directory: Path = (
         DEFAULT_DAILY_REPORT_DIRECTORY
     ),
+    watchlist_execution_integrity_path: Path = (
+        DEFAULT_WATCHLIST_EXECUTION_INTEGRITY_PATH
+    ),
     recovery_service: RecoveryHistoryService | None = None,
 ) -> FastAPI:
     snapshot_reader = DashboardSqliteSnapshotReader(
@@ -270,8 +287,16 @@ def create_launcher_app(
     daily_report_reader = DailyReportReader(
         daily_report_directory
     )
+    symbol_name_reader = SymbolNameReader(
+        database_path
+    )
     universe_history_reader = UniverseHistoryStatusReader(
         database_path
+    )
+    watchlist_execution_integrity_reader = (
+        WatchlistExecutionIntegrityStatusReader(
+            watchlist_execution_integrity_path
+        )
     )
     readiness_service = OperationalReadinessService(
         database_path=database_path,
@@ -297,6 +322,10 @@ def create_launcher_app(
         morning_preflight_reader=morning_preflight_reader,
         daily_report_reader=daily_report_reader,
         universe_history_reader=universe_history_reader,
+        watchlist_execution_integrity_reader=(
+            watchlist_execution_integrity_reader
+        ),
+        symbol_name_reader=symbol_name_reader,
     )
 
 
@@ -372,6 +401,9 @@ def main(
         ),
         daily_report_directory=(
             args.daily_report_directory
+        ),
+        watchlist_execution_integrity_path=(
+            args.watchlist_execution_integrity
         ),
     )
     url = dashboard_url(

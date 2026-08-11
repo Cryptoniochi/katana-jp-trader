@@ -231,6 +231,46 @@
 
     <section>
       <div class="mobile-section-title">
+        <h2>Execution Integrity</h2>
+        <span
+          id="mobile-integrity-state"
+          class="status-pill"
+        >
+          UNKNOWN
+        </span>
+      </div>
+
+      <article class="mobile-detail-card">
+        <div class="mobile-card-heading">
+          <strong id="mobile-integrity-summary">—</strong>
+          <span id="mobile-integrity-date">—</span>
+        </div>
+
+        <div class="mobile-detail-grid">
+          <div><span>Selected</span><b id="mobile-integrity-selected">0</b></div>
+          <div><span>Loaded</span><b id="mobile-integrity-loaded">0</b></div>
+          <div><span>Monitored</span><b id="mobile-integrity-monitored">0</b></div>
+          <div><span>Signals</span><b id="mobile-integrity-signals">0</b></div>
+          <div><span>Executions</span><b id="mobile-integrity-executions">0</b></div>
+          <div><span>Trace</span><b id="mobile-integrity-trace">—</b></div>
+        </div>
+
+        <p
+          id="mobile-integrity-message"
+          class="mobile-card-message"
+        >
+          Execution Integrity has not reported yet.
+        </p>
+      </article>
+
+      <div
+        id="mobile-integrity-symbols"
+        class="mobile-card-list"
+      ></div>
+    </section>
+
+    <section>
+      <div class="mobile-section-title">
         <h2>Morning Check</h2>
         <span
           id="morning-preflight-status"
@@ -464,6 +504,14 @@
 
 
 
+    let symbolNames = {};
+
+    function symbolLabel(code) {
+      const normalized = String(code ?? "").trim();
+      const name = symbolNames[normalized];
+      return name ? `${normalized} ${name}` : (normalized || "—");
+    }
+
     const JST_TIME_ZONE = "Asia/Tokyo";
 
     function parseDateTime(value) {
@@ -631,7 +679,7 @@
           <div class="dynamic-watchlist-card-header">
             <div>
               <span class="dynamic-rank">#${index + 1}</span>
-              <strong>${candidate.code ?? "—"}</strong>
+              <strong>${symbolLabel(candidate.code)}</strong>
             </div>
             <b>${candidate.rating_tier ?? "C"}</b>
           </div>
@@ -650,6 +698,170 @@
         `;
         container.appendChild(card);
       });
+    }
+
+    function renderMobileExecutionIntegrity(payload) {
+      const state = document.getElementById(
+        "mobile-integrity-state"
+      );
+      const normalizedState = payload.state ?? "unknown";
+
+      state.textContent = normalizedState
+        .replaceAll("_", " ")
+        .toUpperCase();
+
+      state.dataset.status = (
+        normalizedState === "pass"
+          ? "healthy"
+          : (
+            normalizedState === "fail"
+              ? "failed"
+              : "neutral"
+          )
+      );
+
+      document.getElementById(
+        "mobile-integrity-summary"
+      ).textContent = (
+        normalizedState === "pass"
+          ? "PATH CONSISTENT"
+          : (
+            normalizedState === "fail"
+              ? "MISMATCH DETECTED"
+              : (
+                normalizedState === "not_yet_audited"
+                  ? "NOT YET AUDITED"
+                  : "NO AUDIT DATA"
+              )
+          )
+      );
+
+      document.getElementById(
+        "mobile-integrity-date"
+      ).textContent = (
+        payload.trading_date ?? "—"
+      );
+
+      document.getElementById(
+        "mobile-integrity-selected"
+      ).textContent = payload.selected_count ?? 0;
+      document.getElementById(
+        "mobile-integrity-loaded"
+      ).textContent = payload.loaded_count ?? 0;
+      document.getElementById(
+        "mobile-integrity-monitored"
+      ).textContent = payload.monitored_count ?? 0;
+      document.getElementById(
+        "mobile-integrity-signals"
+      ).textContent = payload.signal_count ?? 0;
+      document.getElementById(
+        "mobile-integrity-executions"
+      ).textContent = payload.execution_count ?? 0;
+      document.getElementById(
+        "mobile-integrity-trace"
+      ).textContent = (
+        payload.trace_available ? "AVAILABLE" : "NO TRACE"
+      );
+
+      const problems = [];
+      const problemSets = [
+        [
+          "Selected not loaded",
+          payload.selected_not_loaded_codes
+        ],
+        [
+          "Loaded not monitored",
+          payload.loaded_not_monitored_codes
+        ],
+        [
+          "Monitored not loaded",
+          payload.monitored_not_loaded_codes
+        ],
+        [
+          "Orphan signals",
+          payload.orphan_signal_codes
+        ],
+        [
+          "Orphan executions",
+          payload.orphan_execution_codes
+        ]
+      ];
+
+      for (const [label, codes] of problemSets) {
+        if ((codes ?? []).length > 0) {
+          problems.push(
+            `${label}: ${codes.join(", ")}`
+          );
+        }
+      }
+
+      document.getElementById(
+        "mobile-integrity-message"
+      ).textContent = (
+        problems.length > 0
+          ? `${payload.message ?? "Integrity mismatch."} ${problems.join(" / ")}`
+          : (
+            payload.message
+            ?? "Execution Integrity has not reported yet."
+          )
+      );
+
+      const container = document.getElementById(
+        "mobile-integrity-symbols"
+      );
+      container.innerHTML = "";
+
+      const symbols = payload.symbols ?? [];
+
+      if (symbols.length === 0) {
+        container.innerHTML = `
+          <article class="mobile-empty-card">
+            No audited symbols yet.
+          </article>
+        `;
+        return;
+      }
+
+      for (const item of symbols) {
+        const status = item.status ?? "unknown";
+        const abnormalStatuses = [
+          "not_loaded",
+          "not_monitored",
+          "signaled_no_execution"
+        ];
+        const card = document.createElement("article");
+        card.className = "mobile-detail-card";
+        card.dataset.state = (
+          abnormalStatuses.includes(status)
+            ? "failed"
+            : "healthy"
+        );
+
+        let statusLabel = status
+          .replaceAll("_", " ")
+          .toUpperCase();
+
+        if (status === "monitored_no_signal") {
+          statusLabel = "MONITORED / NO SIGNAL";
+        } else if (status === "executed") {
+          statusLabel = "EXECUTED";
+        }
+
+        card.innerHTML = `
+          <div class="mobile-card-heading">
+            <strong>${symbolLabel(item.code)}</strong>
+            <span>${statusLabel}</span>
+          </div>
+          <div class="mobile-detail-grid">
+            <div><span>Selected</span><b>${item.selected ? "YES" : "NO"}</b></div>
+            <div><span>Loaded</span><b>${item.loaded ? "YES" : "NO"}</b></div>
+            <div><span>Monitored</span><b>${item.monitored ? "YES" : "NO"}</b></div>
+            <div><span>Signals</span><b>${item.signal_count ?? 0}</b></div>
+            <div><span>Executions</span><b>${item.execution_count ?? 0}</b></div>
+          </div>
+        `;
+        container.appendChild(card);
+      }
     }
 
     function renderMorningPreflight(payload) {
@@ -1446,7 +1658,7 @@
             <span>${String(trade.side ?? "—").toUpperCase()}</span>
           </div>
           <div class="mobile-trade-row">
-            <span>${trade.code ?? "—"}</span>
+            <span>${symbolLabel(trade.code)}</span>
             <span>${trade.quantity ?? 0} shares</span>
             <span>${yen.format(trade.execution_price ?? 0)}</span>
           </div>
@@ -1476,7 +1688,7 @@
         element.className = "mobile-detail-card";
         element.innerHTML = `
           <div class="mobile-card-heading">
-            <strong>${position.code}</strong>
+            <strong>${symbolLabel(position.code)}</strong>
             <span>${position.side}</span>
           </div>
           <div class="mobile-detail-grid">
@@ -1503,7 +1715,9 @@
         dailyReportResponse,
         morningPreflightResponse,
         dynamicWatchlistResponse,
-        universeHistoryResponse
+        universeHistoryResponse,
+        integrityResponse,
+        symbolNamesResponse
       ] = await Promise.all([
         fetch("/api/dashboard/summary"),
         fetch("/api/dashboard/strategies"),
@@ -1516,7 +1730,9 @@
         fetch("/api/dashboard/daily-report"),
         fetch("/api/dashboard/morning-preflight"),
         fetch("/api/dashboard/dynamic-watchlist"),
-        fetch("/api/dashboard/universe-history")
+        fetch("/api/dashboard/universe-history"),
+        fetch("/api/dashboard/watchlist-execution-integrity"),
+        fetch("/api/dashboard/symbol-names", { cache: "no-store" })
       ]);
 
       if (
@@ -1532,6 +1748,8 @@
         || !morningPreflightResponse.ok
         || !dynamicWatchlistResponse.ok
         || !universeHistoryResponse.ok
+        || !integrityResponse.ok
+        || !symbolNamesResponse.ok
       ) {
         throw new Error(
           "Dashboard API request failed."
@@ -1566,6 +1784,13 @@
       const universeHistory = (
         await universeHistoryResponse.json()
       );
+      const integrity = (
+        await integrityResponse.json()
+      );
+      const symbolNamesPayload = (
+        await symbolNamesResponse.json()
+      );
+      symbolNames = symbolNamesPayload?.names ?? {};
       const snapshot = summary.snapshot;
       const daily = summary.daily_history ?? [];
       const todayKey = todayJstDateKey();
@@ -1651,6 +1876,7 @@
 
       renderMobileUniverseHistory(universeHistory);
       renderDynamicWatchlist(dynamicWatchlist);
+      renderMobileExecutionIntegrity(integrity);
       renderMorningPreflight(morningPreflight);
       renderMobileDailyReport(dailyReport);
       renderPaperTradingSchedule(schedule);

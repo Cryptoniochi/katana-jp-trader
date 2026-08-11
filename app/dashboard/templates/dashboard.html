@@ -223,6 +223,36 @@
       </p>
     </section>
 
+    <section class="panel">
+      <div class="panel-heading">
+        <div>
+          <h2>Watchlist → Runtime Integrity</h2>
+          <span class="muted">
+            Selected → loaded → monitored → signal → execution
+          </span>
+        </div>
+        <span
+          id="watchlist-integrity-state"
+          class="status-pill"
+        >
+          UNKNOWN
+        </span>
+      </div>
+
+      <div class="morning-summary-grid">
+        <article><span>Selected</span><strong id="integrity-selected">0</strong></article>
+        <article><span>Loaded</span><strong id="integrity-loaded">0</strong></article>
+        <article><span>Monitored</span><strong id="integrity-monitored">0</strong></article>
+        <article><span>Signals</span><strong id="integrity-signals">0</strong></article>
+        <article><span>Executions</span><strong id="integrity-executions">0</strong></article>
+      </div>
+
+      <div id="watchlist-integrity-symbols" class="morning-check-list"></div>
+      <p id="watchlist-integrity-message" class="muted">
+        Integrity audit has not been loaded yet.
+      </p>
+    </section>
+
     <section class="panel dynamic-watchlist-panel">
       <div class="panel-heading">
         <div>
@@ -510,6 +540,14 @@
       }
     );
 
+    let symbolNames = {};
+
+    function symbolLabel(code) {
+      const normalized = String(code ?? "").trim();
+      const name = symbolNames[normalized];
+      return name ? `${normalized} ${name}` : (normalized || "—");
+    }
+
     const JST_TIME_ZONE = "Asia/Tokyo";
 
     function parseDateTime(value) {
@@ -612,6 +650,102 @@
         : (payload.message ?? "Universe history is unavailable.");
     }
 
+    function renderWatchlistExecutionIntegrity(payload) {
+      const state = document.getElementById(
+        "watchlist-integrity-state"
+      );
+      const normalizedState = payload.state ?? "unknown";
+      state.textContent = normalizedState
+        .replaceAll("_", " ")
+        .toUpperCase();
+      state.dataset.status = (
+        normalizedState === "pass"
+          ? "healthy"
+          : (
+            normalizedState === "fail"
+              ? "failed"
+              : "neutral"
+          )
+      );
+
+      document.getElementById(
+        "integrity-selected"
+      ).textContent = payload.selected_count ?? 0;
+      document.getElementById(
+        "integrity-loaded"
+      ).textContent = payload.loaded_count ?? 0;
+      document.getElementById(
+        "integrity-monitored"
+      ).textContent = payload.monitored_count ?? 0;
+      document.getElementById(
+        "integrity-signals"
+      ).textContent = payload.signal_count ?? 0;
+      document.getElementById(
+        "integrity-executions"
+      ).textContent = payload.execution_count ?? 0;
+
+      const container = document.getElementById(
+        "watchlist-integrity-symbols"
+      );
+      container.innerHTML = "";
+
+      for (const item of payload.symbols ?? []) {
+        const row = document.createElement("div");
+        const mismatch = [
+          "not_loaded",
+          "not_monitored",
+          "signaled_no_execution"
+        ].includes(item.status);
+        row.className = (
+          "morning-check-row "
+          + (mismatch ? "level-error" : "level-ok")
+        );
+        row.innerHTML = `
+          <div>
+            <strong>${symbolLabel(item.code)}</strong>
+            <span>
+              selected=${item.selected ? "yes" : "no"} /
+              loaded=${item.loaded ? "yes" : "no"} /
+              monitored=${item.monitored ? "yes" : "no"} /
+              signals=${item.signal_count ?? 0} /
+              executions=${item.execution_count ?? 0}
+            </span>
+          </div>
+          <b>${(item.status ?? "unknown").replaceAll("_", " ").toUpperCase()}</b>
+        `;
+        container.appendChild(row);
+      }
+
+      if ((payload.symbols ?? []).length === 0) {
+        container.innerHTML = `
+          <div class="empty-state">
+            No audited symbols yet.
+          </div>
+        `;
+      }
+
+      const problems = [];
+      const labels = [
+        ["Selected not loaded", payload.selected_not_loaded_codes],
+        ["Loaded not monitored", payload.loaded_not_monitored_codes],
+        ["Monitored not loaded", payload.monitored_not_loaded_codes],
+        ["Orphan signals", payload.orphan_signal_codes],
+        ["Orphan executions", payload.orphan_execution_codes]
+      ];
+      for (const [label, codes] of labels) {
+        if ((codes ?? []).length > 0) {
+          problems.push(`${label}: ${codes.join(", ")}`);
+        }
+      }
+
+      const message = payload.message ?? "—";
+      document.getElementById(
+        "watchlist-integrity-message"
+      ).textContent = problems.length > 0
+        ? `${message} ${problems.join(" / ")}`
+        : message;
+    }
+
     function renderDesktopDynamicWatchlist(payload) {
       document.getElementById(
         "desktop-dynamic-status"
@@ -670,7 +804,7 @@
         row.className = "dynamic-watchlist-row";
         row.innerHTML = `
           <span>#${index + 1}</span>
-          <strong>${candidate.code ?? "—"}</strong>
+          <strong>${symbolLabel(candidate.code)}</strong>
           <b>${candidate.rating_tier ?? "C"}</b>
           <span>${candidate.preferred_strategy ?? "unknown"}</span>
           <strong>${Number(candidate.total_score ?? 0).toFixed(2)}</strong>
@@ -1207,7 +1341,7 @@
       for (const position of positions) {
         const row = document.createElement("tr");
         row.innerHTML = `
-          <td>${position.code}</td>
+          <td>${symbolLabel(position.code)}</td>
           <td>${position.side}</td>
           <td>${position.quantity}</td>
           <td>${yen.format(position.average_cost)}</td>
@@ -1466,7 +1600,7 @@
         row.innerHTML = `
           <td>${trade.executed_at}</td>
           <td>${trade.strategy_name}</td>
-          <td>${trade.code}</td>
+          <td>${symbolLabel(trade.code)}</td>
           <td>${trade.side}</td>
           <td>${trade.quantity}</td>
           <td>${yen.format(trade.execution_price)}</td>
@@ -1493,7 +1627,9 @@
         dailyReportResponse,
         morningPreflightResponse,
         dynamicWatchlistResponse,
-        universeHistoryResponse
+        universeHistoryResponse,
+        watchlistIntegrityResponse,
+        symbolNamesResponse
       ] = await Promise.all([
         fetch("/api/dashboard/summary"),
         fetch("/api/dashboard/strategies"),
@@ -1506,7 +1642,9 @@
         fetch("/api/dashboard/daily-report"),
         fetch("/api/dashboard/morning-preflight"),
         fetch("/api/dashboard/dynamic-watchlist"),
-        fetch("/api/dashboard/universe-history")
+        fetch("/api/dashboard/universe-history"),
+        fetch("/api/dashboard/watchlist-execution-integrity"),
+        fetch("/api/dashboard/symbol-names", { cache: "no-store" })
       ]);
 
       if (
@@ -1522,6 +1660,8 @@
         || !morningPreflightResponse.ok
         || !dynamicWatchlistResponse.ok
         || !universeHistoryResponse.ok
+        || !watchlistIntegrityResponse.ok
+        || !symbolNamesResponse.ok
       ) {
         throw new Error(
           "Dashboard API request failed."
@@ -1562,6 +1702,13 @@
       const universeHistoryData = (
         await universeHistoryResponse.json()
       );
+      const watchlistIntegrityData = (
+        await watchlistIntegrityResponse.json()
+      );
+      const symbolNamesPayload = (
+        await symbolNamesResponse.json()
+      );
+      symbolNames = symbolNamesPayload?.names ?? {};
       const snapshot = data.snapshot;
       const daily = data.daily_history ?? [];
       const analytics = data.analytics ?? {};
@@ -1657,6 +1804,9 @@
         dynamicWatchlistData
       );
       renderUniverseHistory(universeHistoryData);
+      renderWatchlistExecutionIntegrity(
+        watchlistIntegrityData
+      );
       renderDesktopMorningPreflight(
         morningPreflightData
       );

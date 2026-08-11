@@ -18,8 +18,14 @@ from app.dashboard.dynamic_watchlist_status_reader import (
 from app.dashboard.morning_preflight_status_reader import (
     MorningPreflightStatusReader,
 )
+from app.dashboard.symbol_name_reader import (
+    SymbolNameReader,
+)
 from app.dashboard.universe_history_status_reader import (
     UniverseHistoryStatusReader,
+)
+from app.dashboard.watchlist_execution_integrity_status_reader import (
+    WatchlistExecutionIntegrityStatusReader,
 )
 from app.dashboard.paper_trading_schedule_status_reader import (
     PaperTradingScheduleStatusReader,
@@ -73,6 +79,10 @@ def create_dashboard_app(
     morning_preflight_reader: MorningPreflightStatusReader | None = None,
     daily_report_reader: DailyReportReader | None = None,
     universe_history_reader: UniverseHistoryStatusReader | None = None,
+    watchlist_execution_integrity_reader: (
+        WatchlistExecutionIntegrityStatusReader | None
+    ) = None,
+    symbol_name_reader: SymbolNameReader | None = None,
 ) -> FastAPI:
     """Read-only Dashboard用FastAPI Appを作成する。"""
 
@@ -158,6 +168,59 @@ def create_dashboard_app(
             ),
         }
 
+    @app.get("/api/dashboard/symbol-names")
+    def dashboard_symbol_names() -> dict[str, object]:
+        if symbol_name_reader is None:
+            return {
+                "count": 0,
+                "names": {},
+            }
+
+        codes: list[str] = []
+
+        payload = service.create_payload().to_dict()
+        portfolio = payload["snapshot"].get("portfolio")
+        if portfolio is not None:
+            codes.extend(
+                str(position.get("code") or "")
+                for position in portfolio.get("positions", [])
+            )
+
+        if dynamic_watchlist_reader is not None:
+            watchlist = dynamic_watchlist_reader.read()
+            codes.extend(
+                str(candidate.get("code") or "")
+                for candidate in watchlist.get("candidates", [])
+            )
+
+        if watchlist_execution_integrity_reader is not None:
+            integrity = watchlist_execution_integrity_reader.read()
+            codes.extend(
+                str(item.get("code") or "")
+                for item in integrity.get("symbols", [])
+            )
+
+        if strategy_service is not None:
+            strategies = strategy_service.create_payload().to_dict()
+            codes.extend(
+                str(trade.get("code") or "")
+                for key in (
+                    "recent_trades",
+                    "recent_completed_trades",
+                )
+                for trade in strategies.get(key, [])
+            )
+
+        names = symbol_name_reader.resolve(
+            code
+            for code in codes
+            if code
+        )
+        return {
+            "count": len(names),
+            "names": names,
+        }
+
     @app.get("/api/dashboard/recovery")
     def dashboard_recovery() -> dict[str, object]:
         summary = (
@@ -217,6 +280,35 @@ def create_dashboard_app(
             }
 
         return universe_history_reader.read()
+
+    @app.get("/api/dashboard/watchlist-execution-integrity")
+    def dashboard_watchlist_execution_integrity() -> dict[str, object]:
+        if watchlist_execution_integrity_reader is None:
+            return {
+                "available": False,
+                "state": "not_configured",
+                "generated_at": None,
+                "trading_date": None,
+                "integrity_ok": False,
+                "trace_available": False,
+                "selected_count": 0,
+                "loaded_count": 0,
+                "monitored_count": 0,
+                "signal_count": 0,
+                "execution_count": 0,
+                "selected_not_loaded_codes": [],
+                "loaded_not_monitored_codes": [],
+                "monitored_not_loaded_codes": [],
+                "orphan_signal_codes": [],
+                "orphan_execution_codes": [],
+                "symbols": [],
+                "message": (
+                    "Watchlist-to-Execution Integrity reader "
+                    "is not configured."
+                ),
+            }
+
+        return watchlist_execution_integrity_reader.read()
 
     @app.get("/api/dashboard/morning-preflight")
     def dashboard_morning_preflight() -> dict[str, object]:
