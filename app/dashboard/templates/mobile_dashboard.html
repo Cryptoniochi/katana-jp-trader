@@ -271,6 +271,46 @@
 
     <section>
       <div class="mobile-section-title">
+        <h2>Full-Day Validation</h2>
+        <span
+          id="mobile-full-day-state"
+          class="status-pill"
+        >
+          UNKNOWN
+        </span>
+      </div>
+
+      <article class="mobile-detail-card">
+        <div class="mobile-card-heading">
+          <strong id="mobile-full-day-summary">—</strong>
+          <span id="mobile-full-day-date">—</span>
+        </div>
+
+        <div class="mobile-detail-grid">
+          <div><span>Failed Checks</span><b id="mobile-full-day-failed">0</b></div>
+          <div><span>Runtime</span><b id="mobile-full-day-runtime">—</b></div>
+          <div><span>Positions</span><b id="mobile-full-day-positions">—</b></div>
+          <div><span>Integrity</span><b id="mobile-full-day-integrity">—</b></div>
+          <div><span>Daily Report</span><b id="mobile-full-day-report">—</b></div>
+          <div><span>P/L</span><b id="mobile-full-day-pnl">—</b></div>
+        </div>
+
+        <p
+          id="mobile-full-day-message"
+          class="mobile-card-message"
+        >
+          Full-Day Validation has not reported yet.
+        </p>
+      </article>
+
+      <div
+        id="mobile-full-day-checks"
+        class="mobile-card-list"
+      ></div>
+    </section>
+
+    <section>
+      <div class="mobile-section-title">
         <h2>Morning Check</h2>
         <span
           id="morning-preflight-status"
@@ -859,6 +899,132 @@
             <div><span>Signals</span><b>${item.signal_count ?? 0}</b></div>
             <div><span>Executions</span><b>${item.execution_count ?? 0}</b></div>
           </div>
+        `;
+        container.appendChild(card);
+      }
+    }
+
+    function renderMobileFullDayValidation(payload) {
+      const state = document.getElementById(
+        "mobile-full-day-state"
+      );
+      const normalizedState = payload.state ?? "unknown";
+
+      state.textContent = normalizedState
+        .replaceAll("_", " ")
+        .toUpperCase();
+      state.dataset.status = (
+        normalizedState === "pass"
+          ? "healthy"
+          : (
+            normalizedState === "fail"
+              ? "failed"
+              : "neutral"
+          )
+      );
+
+      document.getElementById(
+        "mobile-full-day-summary"
+      ).textContent = (
+        normalizedState === "pass"
+          ? "FULL-DAY PASS"
+          : (
+            normalizedState === "fail"
+              ? "FULL-DAY FAIL"
+              : (
+                normalizedState === "not_yet_validated"
+                  ? "NOT YET VALIDATED"
+                  : "NO VALIDATION DATA"
+              )
+          )
+      );
+      document.getElementById(
+        "mobile-full-day-date"
+      ).textContent = payload.trading_date ?? "—";
+      document.getElementById(
+        "mobile-full-day-failed"
+      ).textContent = payload.failed_check_count ?? 0;
+
+      const runtime = payload.runtime ?? {};
+      const integrity = payload.integrity ?? {};
+      const dailyReport = payload.daily_report ?? {};
+
+      document.getElementById(
+        "mobile-full-day-runtime"
+      ).textContent = (
+        runtime.state ?? "—"
+      ).toString().toUpperCase();
+
+      const remainingPositions = Math.max(
+        Number(runtime.open_position_count ?? 0),
+        Number(runtime.portfolio_position_count ?? 0)
+      );
+      document.getElementById(
+        "mobile-full-day-positions"
+      ).textContent = remainingPositions;
+
+      document.getElementById(
+        "mobile-full-day-integrity"
+      ).textContent = (
+        integrity.integrity_ok === true
+          ? "PASS"
+          : (
+            integrity.integrity_ok === false
+              ? "FAIL"
+              : "—"
+          )
+      );
+
+      document.getElementById(
+        "mobile-full-day-report"
+      ).textContent = (
+        dailyReport.status ?? "—"
+      ).toString().toUpperCase();
+
+      const pnlCheck = (payload.checks ?? []).find(
+        check => check.key === "pnl_source_reconciliation"
+      );
+      document.getElementById(
+        "mobile-full-day-pnl"
+      ).textContent = (
+        pnlCheck
+          ? (pnlCheck.passed ? "MATCH" : "MISMATCH")
+          : "—"
+      );
+
+      document.getElementById(
+        "mobile-full-day-message"
+      ).textContent = payload.message ?? "—";
+
+      const container = document.getElementById(
+        "mobile-full-day-checks"
+      );
+      container.innerHTML = "";
+
+      const checks = payload.checks ?? [];
+      if (checks.length === 0) {
+        container.innerHTML = `
+          <article class="mobile-empty-card">
+            No Full-Day Validation checks yet.
+          </article>
+        `;
+        return;
+      }
+
+      for (const check of checks) {
+        const card = document.createElement("article");
+        card.className = "mobile-detail-card";
+        card.dataset.state = (
+          check.passed ? "healthy" : "failed"
+        );
+        card.innerHTML = `
+          <div class="mobile-card-heading">
+            <strong>${check.label ?? check.key ?? "Unknown"}</strong>
+            <span>${check.passed ? "PASS" : "FAIL"}</span>
+          </div>
+          <p class="mobile-card-message">
+            ${check.message ?? ""}
+          </p>
         `;
         container.appendChild(card);
       }
@@ -1717,7 +1883,8 @@
         dynamicWatchlistResponse,
         universeHistoryResponse,
         integrityResponse,
-        symbolNamesResponse
+        symbolNamesResponse,
+        fullDayValidationResponse
       ] = await Promise.all([
         fetch("/api/dashboard/summary"),
         fetch("/api/dashboard/strategies"),
@@ -1732,7 +1899,8 @@
         fetch("/api/dashboard/dynamic-watchlist"),
         fetch("/api/dashboard/universe-history"),
         fetch("/api/dashboard/watchlist-execution-integrity"),
-        fetch("/api/dashboard/symbol-names", { cache: "no-store" })
+        fetch("/api/dashboard/symbol-names", { cache: "no-store" }),
+        fetch("/api/dashboard/full-day-validation")
       ]);
 
       if (
@@ -1750,6 +1918,7 @@
         || !universeHistoryResponse.ok
         || !integrityResponse.ok
         || !symbolNamesResponse.ok
+        || !fullDayValidationResponse.ok
       ) {
         throw new Error(
           "Dashboard API request failed."
@@ -1789,6 +1958,9 @@
       );
       const symbolNamesPayload = (
         await symbolNamesResponse.json()
+      );
+      const fullDayValidation = (
+        await fullDayValidationResponse.json()
       );
       symbolNames = symbolNamesPayload?.names ?? {};
       const snapshot = summary.snapshot;
@@ -1877,6 +2049,9 @@
       renderMobileUniverseHistory(universeHistory);
       renderDynamicWatchlist(dynamicWatchlist);
       renderMobileExecutionIntegrity(integrity);
+      renderMobileFullDayValidation(
+        fullDayValidation
+      );
       renderMorningPreflight(morningPreflight);
       renderMobileDailyReport(dailyReport);
       renderPaperTradingSchedule(schedule);

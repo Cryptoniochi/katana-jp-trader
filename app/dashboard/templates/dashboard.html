@@ -253,6 +253,37 @@
       </p>
     </section>
 
+    <section class="panel">
+      <div class="panel-heading">
+        <div>
+          <h2>Full-Day Validation</h2>
+          <span class="muted">
+            End-of-day cross-check of runtime, integrity and reporting
+          </span>
+        </div>
+        <span
+          id="full-day-validation-state"
+          class="status-pill"
+        >
+          UNKNOWN
+        </span>
+      </div>
+
+      <div class="morning-summary-grid">
+        <article><span>Trading Date</span><strong id="full-day-date">—</strong></article>
+        <article><span>Failed Checks</span><strong id="full-day-failed-count">0</strong></article>
+        <article><span>Runtime</span><strong id="full-day-runtime-state">—</strong></article>
+        <article><span>Positions</span><strong id="full-day-positions">—</strong></article>
+        <article><span>Integrity</span><strong id="full-day-integrity">—</strong></article>
+        <article><span>Daily Report</span><strong id="full-day-report">—</strong></article>
+      </div>
+
+      <div id="full-day-checks" class="morning-check-list"></div>
+      <p id="full-day-message" class="muted">
+        Full-Day Validation has not been loaded yet.
+      </p>
+    </section>
+
     <section class="panel dynamic-watchlist-panel">
       <div class="panel-heading">
         <div>
@@ -744,6 +775,102 @@
       ).textContent = problems.length > 0
         ? `${message} ${problems.join(" / ")}`
         : message;
+    }
+
+    function renderFullDayValidation(payload) {
+      const state = document.getElementById(
+        "full-day-validation-state"
+      );
+      const normalizedState = payload.state ?? "unknown";
+      state.textContent = normalizedState
+        .replaceAll("_", " ")
+        .toUpperCase();
+      state.dataset.status = (
+        normalizedState === "pass"
+          ? "healthy"
+          : (
+            normalizedState === "fail"
+              ? "failed"
+              : "neutral"
+          )
+      );
+
+      document.getElementById(
+        "full-day-date"
+      ).textContent = payload.trading_date ?? "—";
+      document.getElementById(
+        "full-day-failed-count"
+      ).textContent = payload.failed_check_count ?? 0;
+
+      const runtime = payload.runtime ?? {};
+      const integrity = payload.integrity ?? {};
+      const dailyReport = payload.daily_report ?? {};
+
+      document.getElementById(
+        "full-day-runtime-state"
+      ).textContent = (
+        runtime.state ?? "—"
+      ).toString().toUpperCase();
+
+      const remainingPositions = Math.max(
+        Number(runtime.open_position_count ?? 0),
+        Number(runtime.portfolio_position_count ?? 0)
+      );
+      document.getElementById(
+        "full-day-positions"
+      ).textContent = remainingPositions;
+
+      document.getElementById(
+        "full-day-integrity"
+      ).textContent = (
+        integrity.integrity_ok === true
+          ? "PASS"
+          : (
+            integrity.integrity_ok === false
+              ? "FAIL"
+              : "—"
+          )
+      );
+
+      document.getElementById(
+        "full-day-report"
+      ).textContent = (
+        dailyReport.status ?? "—"
+      ).toString().toUpperCase();
+
+      const container = document.getElementById(
+        "full-day-checks"
+      );
+      container.innerHTML = "";
+
+      const checks = payload.checks ?? [];
+      if (checks.length === 0) {
+        container.innerHTML = `
+          <div class="empty-state">
+            No Full-Day Validation checks yet.
+          </div>
+        `;
+      } else {
+        for (const check of checks) {
+          const row = document.createElement("div");
+          row.className = (
+            "morning-check-row "
+            + (check.passed ? "level-ok" : "level-error")
+          );
+          row.innerHTML = `
+            <div>
+              <strong>${check.label ?? check.key ?? "Unknown"}</strong>
+              <span>${check.message ?? ""}</span>
+            </div>
+            <b>${check.passed ? "PASS" : "FAIL"}</b>
+          `;
+          container.appendChild(row);
+        }
+      }
+
+      document.getElementById(
+        "full-day-message"
+      ).textContent = payload.message ?? "—";
     }
 
     function renderDesktopDynamicWatchlist(payload) {
@@ -1629,7 +1756,8 @@
         dynamicWatchlistResponse,
         universeHistoryResponse,
         watchlistIntegrityResponse,
-        symbolNamesResponse
+        symbolNamesResponse,
+        fullDayValidationResponse
       ] = await Promise.all([
         fetch("/api/dashboard/summary"),
         fetch("/api/dashboard/strategies"),
@@ -1644,7 +1772,8 @@
         fetch("/api/dashboard/dynamic-watchlist"),
         fetch("/api/dashboard/universe-history"),
         fetch("/api/dashboard/watchlist-execution-integrity"),
-        fetch("/api/dashboard/symbol-names", { cache: "no-store" })
+        fetch("/api/dashboard/symbol-names", { cache: "no-store" }),
+        fetch("/api/dashboard/full-day-validation")
       ]);
 
       if (
@@ -1662,6 +1791,7 @@
         || !universeHistoryResponse.ok
         || !watchlistIntegrityResponse.ok
         || !symbolNamesResponse.ok
+        || !fullDayValidationResponse.ok
       ) {
         throw new Error(
           "Dashboard API request failed."
@@ -1707,6 +1837,9 @@
       );
       const symbolNamesPayload = (
         await symbolNamesResponse.json()
+      );
+      const fullDayValidationData = (
+        await fullDayValidationResponse.json()
       );
       symbolNames = symbolNamesPayload?.names ?? {};
       const snapshot = data.snapshot;
@@ -1806,6 +1939,9 @@
       renderUniverseHistory(universeHistoryData);
       renderWatchlistExecutionIntegrity(
         watchlistIntegrityData
+      );
+      renderFullDayValidation(
+        fullDayValidationData
       );
       renderDesktopMorningPreflight(
         morningPreflightData

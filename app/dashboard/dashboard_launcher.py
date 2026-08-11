@@ -33,6 +33,9 @@ from app.dashboard.universe_history_status_reader import (
 from app.dashboard.watchlist_execution_integrity_status_reader import (
     WatchlistExecutionIntegrityStatusReader,
 )
+from app.dashboard.full_day_validation_status_reader import (
+    FullDayValidationStatusReader,
+)
 from app.dashboard.paper_trading_schedule_status_reader import (
     PaperTradingScheduleStatusReader,
 )
@@ -97,6 +100,9 @@ DEFAULT_SNAPSHOT_PATH = Path(
 )
 DEFAULT_WATCHLIST_EXECUTION_INTEGRITY_PATH = Path(
     "reports/service/watchlist_execution_integrity.json"
+)
+DEFAULT_FULL_DAY_VALIDATION_PATH = Path(
+    "reports/service/full_day_validation.json"
 )
 
 
@@ -167,6 +173,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_WATCHLIST_EXECUTION_INTEGRITY_PATH,
     )
     parser.add_argument(
+        "--full-day-validation",
+        type=Path,
+        default=DEFAULT_FULL_DAY_VALIDATION_PATH,
+    )
+    parser.add_argument(
         "--history-limit",
         type=int,
         default=30,
@@ -228,6 +239,9 @@ def create_launcher_app(
     ),
     watchlist_execution_integrity_path: Path = (
         DEFAULT_WATCHLIST_EXECUTION_INTEGRITY_PATH
+    ),
+    full_day_validation_path: Path = (
+        DEFAULT_FULL_DAY_VALIDATION_PATH
     ),
     recovery_service: RecoveryHistoryService | None = None,
 ) -> FastAPI:
@@ -298,6 +312,11 @@ def create_launcher_app(
             watchlist_execution_integrity_path
         )
     )
+    full_day_validation_reader = (
+        FullDayValidationStatusReader(
+            full_day_validation_path
+        )
+    )
     readiness_service = OperationalReadinessService(
         database_path=database_path,
         watchlist_path=Path("watchlist.txt"),
@@ -326,6 +345,9 @@ def create_launcher_app(
             watchlist_execution_integrity_reader
         ),
         symbol_name_reader=symbol_name_reader,
+        full_day_validation_reader=(
+            full_day_validation_reader
+        ),
     )
 
 
@@ -404,6 +426,9 @@ def main(
         ),
         watchlist_execution_integrity_path=(
             args.watchlist_execution_integrity
+        ),
+        full_day_validation_path=(
+            args.full_day_validation
         ),
     )
     url = dashboard_url(

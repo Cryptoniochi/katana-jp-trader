@@ -27,6 +27,9 @@ from app.dashboard.universe_history_status_reader import (
 from app.dashboard.watchlist_execution_integrity_status_reader import (
     WatchlistExecutionIntegrityStatusReader,
 )
+from app.dashboard.full_day_validation_status_reader import (
+    FullDayValidationStatusReader,
+)
 from app.dashboard.paper_trading_schedule_status_reader import (
     PaperTradingScheduleStatusReader,
 )
@@ -83,6 +86,9 @@ def create_dashboard_app(
         WatchlistExecutionIntegrityStatusReader | None
     ) = None,
     symbol_name_reader: SymbolNameReader | None = None,
+    full_day_validation_reader: (
+        FullDayValidationStatusReader | None
+    ) = None,
 ) -> FastAPI:
     """Read-only Dashboard用FastAPI Appを作成する。"""
 
@@ -309,6 +315,29 @@ def create_dashboard_app(
             }
 
         return watchlist_execution_integrity_reader.read()
+
+    @app.get("/api/dashboard/full-day-validation")
+    def dashboard_full_day_validation() -> dict[str, object]:
+        if full_day_validation_reader is None:
+            return {
+                "available": False,
+                "state": "not_configured",
+                "generated_at": None,
+                "trading_date": None,
+                "passed": False,
+                "failed_check_count": 0,
+                "checks": [],
+                "runtime": {},
+                "integrity": {},
+                "daily_summary": {},
+                "daily_report": {},
+                "message": (
+                    "Full-Day Validation reader "
+                    "is not configured."
+                ),
+            }
+
+        return full_day_validation_reader.read()
 
     @app.get("/api/dashboard/morning-preflight")
     def dashboard_morning_preflight() -> dict[str, object]:
