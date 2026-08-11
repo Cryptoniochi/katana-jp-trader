@@ -72,6 +72,7 @@ class DailyReportScheduler:
 
         self.last_attempt_at: datetime | None = None
         self.report_exit_code: int | None = None
+        self.validation_exit_code: int | None = None
         self.notification_exit_code: int | None = None
         self._retry_after_monotonic = 0.0
         self._stop_requested = False
@@ -171,6 +172,25 @@ class DailyReportScheduler:
                 ),
             )
 
+        validation_result = (
+            self._run_full_day_validation_command(
+                report_date
+            )
+        )
+        self.validation_exit_code = int(
+            validation_result.returncode
+        )
+
+        if validation_result.returncode != 0:
+            return self._schedule_retry(
+                now=now,
+                business_day=True,
+                message=(
+                    "Full-Day Validation failed. "
+                    f"exit_code={validation_result.returncode}"
+                ),
+            )
+
         notification_result = (
             self._run_notification_command(
                 report_date
@@ -200,6 +220,9 @@ class DailyReportScheduler:
                     "report_date": report_date.isoformat(),
                     "completed_at": now.isoformat(),
                     "report_exit_code": self.report_exit_code,
+                    "validation_exit_code": (
+                        self.validation_exit_code
+                    ),
                     "notification_exit_code": (
                         self.notification_exit_code
                     ),
@@ -257,6 +280,27 @@ class DailyReportScheduler:
                     self.report_directory
                     / f"{report_date.isoformat()}.json"
                 ),
+            ],
+            check=False,
+            cwd=Path.cwd(),
+            timeout=self.settings.command_timeout_seconds,
+        )
+
+    def _run_full_day_validation_command(
+        self,
+        report_date,
+    ) -> subprocess.CompletedProcess:
+        return self.command_runner(
+            [
+                sys.executable,
+                "-m",
+                "app.run_full_day_validation",
+                "--database-path",
+                str(self.database_path),
+                "--trading-date",
+                report_date.isoformat(),
+                "--daily-report-directory",
+                str(self.report_directory),
             ],
             check=False,
             cwd=Path.cwd(),
