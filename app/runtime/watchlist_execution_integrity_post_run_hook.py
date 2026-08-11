@@ -36,9 +36,16 @@ class WatchlistExecutionIntegrityPostRunHook:
             "reports/service/"
             "watchlist_execution_integrity.json"
         ),
+        history_directory: Path = Path(
+            "reports/service/"
+            "watchlist_execution_integrity_history"
+        ),
     ) -> None:
         self.audit_service = audit_service
         self.report_path = Path(report_path)
+        self.history_directory = Path(
+            history_directory
+        )
 
     def handle(
         self,
@@ -49,18 +56,28 @@ class WatchlistExecutionIntegrityPostRunHook:
         audit_result = self.audit_service.audit(
             trading_date=result.trading_date
         )
-        self._write_report(audit_result)
+        self._write_report(
+            self.report_path,
+            audit_result,
+        )
+        self._write_report(
+            self.history_directory
+            / f"{result.trading_date.isoformat()}.json",
+            audit_result,
+        )
 
+    @staticmethod
     def _write_report(
-        self,
+        path: Path,
         result: WatchlistExecutionIntegrityResult,
     ) -> None:
-        self.report_path.parent.mkdir(
+        path = Path(path)
+        path.parent.mkdir(
             parents=True,
             exist_ok=True,
         )
-        temporary = self.report_path.with_suffix(
-            self.report_path.suffix + ".tmp"
+        temporary = path.with_suffix(
+            path.suffix + ".tmp"
         )
         temporary.write_text(
             json.dumps(
@@ -70,4 +87,4 @@ class WatchlistExecutionIntegrityPostRunHook:
             ),
             encoding="utf-8",
         )
-        temporary.replace(self.report_path)
+        temporary.replace(path)

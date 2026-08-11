@@ -133,6 +133,9 @@ def _service(
         database_path=tmp_path / "katana.db",
         runtime_status_path=runtime,
         integrity_report_path=integrity,
+        integrity_history_directory=(
+            tmp_path / "integrity_history"
+        ),
         daily_report_directory=reports,
         daily_repository=FakeRepository(
             record
@@ -327,3 +330,76 @@ def test_stale_integrity_is_not_reported_as_pass(
     )
     assert integrity_check.passed is False
     assert "stale" in integrity_check.message.lower()
+
+
+def test_date_scoped_integrity_history_prevents_latest_drift(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+
+    history_path = (
+        service.integrity_history_directory
+        / f"{DAY.isoformat()}.json"
+    )
+    history_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    correct_integrity = json.loads(
+        service.integrity_report_path.read_text(
+            encoding="utf-8"
+        )
+    )
+    history_path.write_text(
+        json.dumps(correct_integrity),
+        encoding="utf-8",
+    )
+
+    stale_latest = dict(correct_integrity)
+    stale_latest["trading_date"] = "2026-08-13"
+    stale_latest["integrity_ok"] = False
+    service.integrity_report_path.write_text(
+        json.dumps(stale_latest),
+        encoding="utf-8",
+    )
+
+    result = service.validate(
+        trading_date=DAY
+    )
+
+    assert result.passed is True
+    integrity_check = next(
+        check
+        for check in result.checks
+        if check.key == "integrity_date"
+    )
+    assert integrity_check.passed is True
+
+
+def test_missing_date_scoped_integrity_rejects_other_latest_day(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+
+    latest = json.loads(
+        service.integrity_report_path.read_text(
+            encoding="utf-8"
+        )
+    )
+    latest["trading_date"] = "2026-08-13"
+    service.integrity_report_path.write_text(
+        json.dumps(latest),
+        encoding="utf-8",
+    )
+
+    result = service.validate(
+        trading_date=DAY
+    )
+
+    assert result.passed is False
+    assert any(
+        check.key == "integrity_date"
+        and not check.passed
+        for check in result.checks
+    )

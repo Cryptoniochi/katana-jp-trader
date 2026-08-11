@@ -89,6 +89,10 @@ class FullDayValidationService:
         integrity_report_path: Path = Path(
             "reports/service/watchlist_execution_integrity.json"
         ),
+        integrity_history_directory: Path = Path(
+            "reports/service/"
+            "watchlist_execution_integrity_history"
+        ),
         daily_report_directory: Path = Path("reports/daily"),
         daily_repository: PaperTradingDailyRecordReader | None = None,
         now_provider=None,
@@ -97,6 +101,9 @@ class FullDayValidationService:
         self.database_path = Path(database_path)
         self.runtime_status_path = Path(runtime_status_path)
         self.integrity_report_path = Path(integrity_report_path)
+        self.integrity_history_directory = Path(
+            integrity_history_directory
+        )
         self.daily_report_directory = Path(daily_report_directory)
         self.now_provider = (
             now_provider
@@ -129,8 +136,8 @@ class FullDayValidationService:
         runtime = self._read_json(
             self.runtime_status_path
         )
-        integrity = self._read_json(
-            self.integrity_report_path
+        integrity = self._read_integrity_for_date(
+            trading_date
         )
         daily_report = self._read_json(
             self.daily_report_directory
@@ -637,6 +644,34 @@ class FullDayValidationService:
             "net_profit_loss": record.net_profit_loss,
             "error_message": record.error_message,
         }
+
+    def _read_integrity_for_date(
+        self,
+        trading_date: date,
+    ) -> dict[str, Any]:
+        archived_path = (
+            self.integrity_history_directory
+            / f"{trading_date.isoformat()}.json"
+        )
+        archived = self._read_json(
+            archived_path
+        )
+        if (
+            str(archived.get("trading_date") or "")
+            == trading_date.isoformat()
+        ):
+            return archived
+
+        latest = self._read_json(
+            self.integrity_report_path
+        )
+        if (
+            str(latest.get("trading_date") or "")
+            == trading_date.isoformat()
+        ):
+            return latest
+
+        return {}
 
     @staticmethod
     def _read_json(

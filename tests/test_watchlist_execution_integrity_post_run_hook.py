@@ -114,3 +114,82 @@ def test_post_run_hook_propagates_audit_errors(
         raise AssertionError("RuntimeError was not raised")
 
     assert not report.exists()
+
+
+def test_post_run_hook_writes_date_scoped_history(
+    tmp_path: Path,
+) -> None:
+    report = tmp_path / "latest.json"
+    history = tmp_path / "history"
+    auditor = FakeAuditService()
+    hook = WatchlistExecutionIntegrityPostRunHook(
+        audit_service=auditor,
+        report_path=report,
+        history_directory=history,
+    )
+
+    hook.handle(
+        SimpleNamespace(trading_date=DAY)
+    )
+
+    archived = history / "2026-08-12.json"
+    assert archived.exists()
+    payload = json.loads(
+        archived.read_text(encoding="utf-8")
+    )
+    assert payload["trading_date"] == "2026-08-12"
+    assert payload["integrity_ok"] is True
+
+
+def test_later_latest_report_does_not_overwrite_history(
+    tmp_path: Path,
+) -> None:
+    report = tmp_path / "latest.json"
+    history = tmp_path / "history"
+
+    first = FakeAuditService()
+    hook = WatchlistExecutionIntegrityPostRunHook(
+        audit_service=first,
+        report_path=report,
+        history_directory=history,
+    )
+    hook.handle(
+        SimpleNamespace(trading_date=DAY)
+    )
+
+    later_day = date(2026, 8, 13)
+
+    class LaterAuditService:
+        def audit(self, *, trading_date: date):
+            assert trading_date == later_day
+
+            class LaterResult:
+                def to_dict(self):
+                    return {
+                        "trading_date": later_day.isoformat(),
+                        "integrity_ok": False,
+                    }
+
+            return LaterResult()
+
+    WatchlistExecutionIntegrityPostRunHook(
+        audit_service=LaterAuditService(),
+        report_path=report,
+        history_directory=history,
+    ).handle(
+        SimpleNamespace(trading_date=later_day)
+    )
+
+    archived = json.loads(
+        (history / "2026-08-12.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    latest = json.loads(
+        report.read_text(encoding="utf-8")
+    )
+
+    assert archived["trading_date"] == "2026-08-12"
+    assert archived["integrity_ok"] is True
+    assert latest["trading_date"] == "2026-08-13"
+    assert latest["integrity_ok"] is False
