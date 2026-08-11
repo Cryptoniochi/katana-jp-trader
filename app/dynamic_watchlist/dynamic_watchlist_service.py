@@ -897,7 +897,7 @@ class DynamicWatchlistService:
         ]
 
         if (
-            len(codes) < self.settings.minimum_symbols
+            not codes
             or len(codes) > self.settings.maximum_symbols
             or len(codes) != len(set(codes))
             or any(
