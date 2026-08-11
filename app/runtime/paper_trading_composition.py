@@ -95,6 +95,12 @@ from app.market.realtime_signal_engine import (
 from app.runtime.end_of_day_liquidation_service import (
     EndOfDayLiquidationService,
 )
+from app.runtime.watchlist_execution_integrity_post_run_hook import (
+    WatchlistExecutionIntegrityPostRunHook,
+)
+from app.runtime.watchlist_execution_integrity_service import (
+    WatchlistExecutionIntegrityService,
+)
 from app.runtime.paper_trading_day_models import (
     PaperTradingDayResult,
     PaperTradingDaySettings,
@@ -182,6 +188,13 @@ class PaperTradingProductionSettings:
     risk_trace_enabled: bool = True
     risk_trace_path: Path = Path(
         "logs/risk/paper_trading_trace.jsonl"
+    )
+    watchlist_path: Path = Path("watchlist.txt")
+    watchlist_explainability_path: Path = Path(
+        "reports/watchlist/explainability/latest.json"
+    )
+    watchlist_execution_integrity_report_path: Path = Path(
+        "reports/service/watchlist_execution_integrity.json"
     )
 
     def __post_init__(self) -> None:
@@ -387,6 +400,35 @@ class PaperTradingProductionSettings:
                 ROOT_DIR / normalized_risk_trace_path
             )
 
+        normalized_watchlist_path = Path(
+            self.watchlist_path
+        )
+        if not normalized_watchlist_path.is_absolute():
+            normalized_watchlist_path = (
+                ROOT_DIR / normalized_watchlist_path
+            )
+
+        normalized_watchlist_explainability_path = Path(
+            self.watchlist_explainability_path
+        )
+        if not normalized_watchlist_explainability_path.is_absolute():
+            normalized_watchlist_explainability_path = (
+                ROOT_DIR
+                / normalized_watchlist_explainability_path
+            )
+
+        normalized_watchlist_execution_integrity_report_path = Path(
+            self.watchlist_execution_integrity_report_path
+        )
+        if (
+            not normalized_watchlist_execution_integrity_report_path
+            .is_absolute()
+        ):
+            normalized_watchlist_execution_integrity_report_path = (
+                ROOT_DIR
+                / normalized_watchlist_execution_integrity_report_path
+            )
+
         object.__setattr__(
             self,
             "database_path",
@@ -426,6 +468,21 @@ class PaperTradingProductionSettings:
             self,
             "risk_trace_path",
             normalized_risk_trace_path.resolve(),
+        )
+        object.__setattr__(
+            self,
+            "watchlist_path",
+            normalized_watchlist_path.resolve(),
+        )
+        object.__setattr__(
+            self,
+            "watchlist_explainability_path",
+            normalized_watchlist_explainability_path.resolve(),
+        )
+        object.__setattr__(
+            self,
+            "watchlist_execution_integrity_report_path",
+            normalized_watchlist_execution_integrity_report_path.resolve(),
         )
 
 
@@ -864,6 +921,23 @@ class PaperTradingComposition:
             now_provider=resolved_now_provider,
         )
 
+        watchlist_execution_integrity_hook = (
+            WatchlistExecutionIntegrityPostRunHook(
+                audit_service=WatchlistExecutionIntegrityService(
+                    database_path=settings.database_path,
+                    watchlist_path=settings.watchlist_path,
+                    explainability_path=(
+                        settings.watchlist_explainability_path
+                    ),
+                    trace_path=settings.risk_trace_path,
+                ),
+                report_path=(
+                    settings
+                    .watchlist_execution_integrity_report_path
+                ),
+            )
+        )
+
         day_service = PaperTradingDayService(
             runtime=runtime_bundle.runtime,
             persistence_service=(
@@ -874,7 +948,9 @@ class PaperTradingComposition:
             ),
             dashboard_publisher=None,
             end_of_day_liquidator=end_of_day_liquidator,
-            post_run_hooks=(),
+            post_run_hooks=(
+                watchlist_execution_integrity_hook,
+            ),
             settings=PaperTradingDaySettings(
                 cycle_interval_seconds=(
                     settings.cycle_interval_seconds
