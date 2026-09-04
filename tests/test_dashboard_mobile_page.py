@@ -1,36 +1,20 @@
-"""Dashboard mobile pageのテスト。"""
-
-from datetime import datetime, timezone
+"""Mobile Dashboard page tests."""
 
 from fastapi.testclient import TestClient
 
-from app.dashboard.dashboard_web_app import (
-    create_dashboard_app,
-)
-from app.dashboard.dashboard_web_models import (
-    DashboardWebPayload,
-)
-
-
-NOW = datetime(
-    2026,
-    8,
-    3,
-    tzinfo=timezone.utc,
-)
+from app.dashboard.dashboard_web_app import create_dashboard_app
 
 
 class FakeDashboardService:
     def create_payload(self):
-        return DashboardWebPayload(
-            generated_at=NOW,
-            snapshot={
-                "partial": False,
-                "portfolio": None,
-            },
-            daily_history=(),
-            cumulative_profit_loss=0.0,
-        )
+        class Payload:
+            def to_dict(self):
+                return {
+                    "generated_at": None,
+                    "snapshot": {},
+                }
+
+        return Payload()
 
 
 def test_mobile_dashboard_page_is_available() -> None:
@@ -43,5 +27,10 @@ def test_mobile_dashboard_page_is_available() -> None:
     response = client.get("/mobile")
 
     assert response.status_code == 200
-    assert "Mobile Monitor" in response.text
-    assert "mobile-strategy-list" in response.text
+    assert "PROJECT KATANA" in response.text
+    assert ">Monitor<" in response.text
+    assert "Today's P/L" in response.text
+    assert "Runtime" in response.text
+    assert "Watchlist" in response.text
+    assert "Today's Executions" in response.text
+    assert "Open Positions" in response.text

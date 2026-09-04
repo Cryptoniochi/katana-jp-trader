@@ -84,8 +84,9 @@ def test_dashboard_page_is_rendered() -> None:
     response = create_test_client().get("/")
 
     assert response.status_code == 200
-    assert "Project KATANA" in response.text
-    assert "Operations Dashboard" in response.text
+    assert "PROJECT KATANA" in response.text
+    assert "Trading Dashboard" in response.text
+    assert "Today's P/L" in response.text
 
 
 def test_summary_api_is_read_only_json() -> None:
@@ -304,9 +305,9 @@ def test_mobile_dashboard_contains_runtime_card(
     response = create_test_client().get("/mobile")
 
     assert response.status_code == 200
-    assert "Paper Trading Runtime" in response.text
-    assert 'id="paper-runtime-state"' in response.text
-    assert 'id="paper-runtime-pid"' in response.text
+    assert "Runtime" in response.text
+    assert 'id="mobile-runtime-state"' in response.text
+    assert 'id="mobile-runtime-pid"' in response.text
 
 
 
@@ -349,9 +350,9 @@ def test_mobile_dashboard_contains_runtime_activity_fields(
     response = create_test_client().get("/mobile")
 
     assert response.status_code == 200
-    assert 'id="paper-runtime-cycles"' in response.text
-    assert 'id="paper-runtime-signals"' in response.text
-    assert 'id="paper-runtime-executions"' in response.text
+    assert 'id="mobile-runtime-cycles"' in response.text
+    assert 'id="mobile-signals"' in response.text
+    assert 'id="mobile-executions"' in response.text
 
 
 
@@ -359,9 +360,9 @@ def test_mobile_dashboard_uses_jst_datetime_formatting() -> None:
     response = create_test_client().get("/mobile")
 
     assert response.status_code == 200
-    assert 'const JST_TIME_ZONE = "Asia/Tokyo"' in response.text
-    assert "function formatJstDateTime" in response.text
-    assert "function jstDateKey" in response.text
+    assert 'timeZone:"Asia/Tokyo"' in response.text
+    assert "function formatJst" in response.text
+    assert "function todayKey" in response.text
 
 
 def test_mobile_dashboard_shows_only_today_executions() -> None:
@@ -370,7 +371,8 @@ def test_mobile_dashboard_shows_only_today_executions() -> None:
     assert response.status_code == 200
     assert "Today's Executions" in response.text
     assert "No executions today." in response.text
-    assert "jstDateKey(trade.executed_at) === todayKey" in response.text
+    assert "if(!t.executed_at)return false;" in response.text
+    assert "===todayKey()" in response.text
 
 
 
@@ -378,13 +380,10 @@ def test_mobile_runtime_separates_pnl_and_labels_positions() -> None:
     response = create_test_client().get("/mobile")
 
     assert response.status_code == 200
-    assert "Portfolio Positions" in response.text
-    assert "Session Equity Change" in response.text
+    assert "Open Positions" in response.text
     assert "Realized P/L" in response.text
     assert "Unrealized P/L" in response.text
-    assert "Total Portfolio P/L" in response.text
-    assert 'id="paper-runtime-session-pnl"' in response.text
-    assert 'id="paper-runtime-realized-pnl"' in response.text
-    assert 'id="paper-runtime-unrealized-pnl"' in response.text
-    assert 'id="paper-runtime-total-pnl"' in response.text
-    assert "restored portfolio before today's executions" in response.text
+    assert 'id="mobile-realized"' in response.text
+    assert 'id="mobile-unrealized"' in response.text
+    assert 'id="mobile-position-list"' in response.text
+    assert 'id="mobile-today-pl"' in response.text

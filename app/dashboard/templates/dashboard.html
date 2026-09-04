@@ -2,544 +2,76 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8">
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1"
-  >
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ page_title }}</title>
-  <link
-    rel="stylesheet"
-    href="{{ url_for('static', path='/dashboard.css') }}"
-  >
+  <link rel="stylesheet" href="{{ url_for('static', path='/dashboard.css') }}">
 </head>
 <body>
   <main class="page">
     <header class="hero">
       <div>
         <p class="eyebrow">PROJECT KATANA</p>
-        <h1>Operations Dashboard</h1>
+        <h1>Trading Dashboard</h1>
         <p id="updated-at" class="muted">Loading...</p>
       </div>
-      <div id="system-status" class="status-card">
-        UNKNOWN
-      </div>
+      <div id="system-status" class="status-card">UNKNOWN</div>
     </header>
 
-
-    <section class="panel service-status-panel">
-      <div class="panel-heading">
-        <div>
-          <h2>KATANA Service Status</h2>
-          <span class="muted">
-            kabu Station readiness and managed processes
-          </span>
-        </div>
-        <span id="service-status-updated" class="muted">—</span>
-      </div>
-
-      <div class="service-overview">
-        <article class="service-overview-card">
-          <span>Service</span>
-          <strong id="service-state">—</strong>
-        </article>
-        <article class="service-overview-card">
-          <span>kabu Station</span>
-          <strong id="kabu-readiness">—</strong>
-        </article>
-      </div>
-
-      <div
-        id="service-components"
-        class="service-component-grid"
-      ></div>
-
-      <div class="service-runtime-summary">
-        <article>
-          <span>Service Uptime</span>
-          <strong id="service-uptime">—</strong>
-        </article>
-        <article>
-          <span>Recent Events</span>
-          <strong id="service-event-count">0</strong>
-        </article>
-      </div>
-
-      <div class="service-events-panel">
-        <h3>Recovery History</h3>
-        <div id="service-events"></div>
-      </div>
-    </section>
-
-
-
-    <section class="panel">
-      <div class="panel-heading">
-        <div>
-          <h2>Today's Paper Trading Schedule</h2>
-          <span class="muted">
-            Tokyo market business-day automation
-          </span>
-        </div>
-        <span id="paper-schedule-state" class="status-pill">UNKNOWN</span>
-      </div>
-      <div id="paper-schedule-grid" class="schedule-grid"></div>
-      <p id="paper-schedule-message" class="muted"></p>
-    </section>
-
-    <section class="panel">
-      <div class="panel-heading">
-        <div>
-          <h2>Operational Readiness</h2>
-          <span class="muted">
-            Daily checks before paper trading
-          </span>
-        </div>
-        <span
-          id="readiness-state"
-          class="status-pill"
-        >
-          UNKNOWN
-        </span>
-      </div>
-      <div class="readiness-summary">
-        <span>Paper Trading</span>
-        <strong id="paper-readiness">—</strong>
-      </div>
-      <div
-        id="readiness-checks"
-        class="readiness-grid"
-      ></div>
-    </section>
-
-
-    <section class="panel daily-report-panel">
-      <div class="panel-heading">
-        <div>
-          <h2>Daily Trading Report</h2>
-          <span class="muted">
-            Latest generated paper-trading report
-          </span>
-        </div>
-        <span
-          id="daily-report-status"
-          class="status-pill"
-        >
-          UNKNOWN
-        </span>
-      </div>
-
-      <div
-        id="daily-report-empty"
-        class="daily-report-empty"
-      >
-        Daily trading report has not been generated yet.
-      </div>
-
-      <div
-        id="daily-report-content"
-        class="daily-report-content"
-        hidden
-      >
-        <div class="daily-report-summary-grid">
-          <article>
-            <span>Report Date</span>
-            <strong id="daily-report-date">—</strong>
-          </article>
-          <article>
-            <span>Net P/L</span>
-            <strong id="daily-report-pnl">—</strong>
-          </article>
-          <article>
-            <span>Trades</span>
-            <strong id="daily-report-trades">—</strong>
-          </article>
-          <article>
-            <span>Win Rate</span>
-            <strong id="daily-report-win-rate">—</strong>
-          </article>
-          <article>
-            <span>Profit Factor</span>
-            <strong id="daily-report-profit-factor">—</strong>
-          </article>
-          <article>
-            <span>Maximum Drawdown</span>
-            <strong id="daily-report-drawdown">—</strong>
-          </article>
-        </div>
-
-        <div class="daily-report-ranking-grid">
-          <div>
-            <h3>Strategy Ranking</h3>
-            <div id="daily-report-strategies"></div>
-          </div>
-          <div>
-            <h3>Symbol Ranking</h3>
-            <div id="daily-report-symbols"></div>
-          </div>
-        </div>
-
-        <div class="daily-report-footer">
-          <span>
-            Errors:
-            <strong id="daily-report-errors">0</strong>
-          </span>
-          <span>
-            Recoveries:
-            <strong id="daily-report-recoveries">0</strong>
-          </span>
-          <span id="daily-report-generated-at" class="muted">—</span>
-        </div>
-      </div>
-    </section>
-
-
-
-
-    <section class="panel universe-history-panel">
-      <div class="panel-heading">
-        <div>
-          <h2>Universe History Coverage</h2>
-          <span class="muted">
-            Full-market daily-bar history maturity
-          </span>
-        </div>
-        <span id="universe-history-date" class="muted">—</span>
-      </div>
-
-      <div class="morning-summary-grid">
-        <article><span>Active</span><strong id="universe-history-active">0</strong></article>
-        <article><span>1+ days</span><strong id="universe-history-1d">0</strong></article>
-        <article><span>5+ days</span><strong id="universe-history-5d">0</strong></article>
-        <article><span>10+ days</span><strong id="universe-history-10d">0</strong></article>
-        <article><span>20+ days</span><strong id="universe-history-20d">0</strong></article>
-        <article><span>Fallback</span><strong id="universe-history-fallback">0</strong></article>
-        <article><span>Developing</span><strong id="universe-history-developing">0</strong></article>
-        <article><span>Strict</span><strong id="universe-history-strict">0</strong></article>
-        <article><span>No History</span><strong id="universe-history-none">0</strong></article>
-      </div>
-
-      <p id="universe-history-message" class="muted">
-        Universe history coverage has not been loaded yet.
-      </p>
-    </section>
-
-    <section class="panel">
-      <div class="panel-heading">
-        <div>
-          <h2>Watchlist → Runtime Integrity</h2>
-          <span class="muted">
-            Selected → loaded → monitored → signal → execution
-          </span>
-        </div>
-        <span
-          id="watchlist-integrity-state"
-          class="status-pill"
-        >
-          UNKNOWN
-        </span>
-      </div>
-
-      <div class="morning-summary-grid">
-        <article><span>Selected</span><strong id="integrity-selected">0</strong></article>
-        <article><span>Loaded</span><strong id="integrity-loaded">0</strong></article>
-        <article><span>Monitored</span><strong id="integrity-monitored">0</strong></article>
-        <article><span>Signals</span><strong id="integrity-signals">0</strong></article>
-        <article><span>Executions</span><strong id="integrity-executions">0</strong></article>
-      </div>
-
-      <div id="watchlist-integrity-symbols" class="morning-check-list"></div>
-      <p id="watchlist-integrity-message" class="muted">
-        Integrity audit has not been loaded yet.
-      </p>
-    </section>
-
-    <section class="panel">
-      <div class="panel-heading">
-        <div>
-          <h2>Full-Day Validation</h2>
-          <span class="muted">
-            End-of-day cross-check of runtime, integrity and reporting
-          </span>
-        </div>
-        <span
-          id="full-day-validation-state"
-          class="status-pill"
-        >
-          UNKNOWN
-        </span>
-      </div>
-
-      <div class="morning-summary-grid">
-        <article><span>Trading Date</span><strong id="full-day-date">—</strong></article>
-        <article><span>Failed Checks</span><strong id="full-day-failed-count">0</strong></article>
-        <article><span>Runtime</span><strong id="full-day-runtime-state">—</strong></article>
-        <article><span>Positions</span><strong id="full-day-positions">—</strong></article>
-        <article><span>Integrity</span><strong id="full-day-integrity">—</strong></article>
-        <article><span>Daily Report</span><strong id="full-day-report">—</strong></article>
-      </div>
-
-      <div id="full-day-checks" class="morning-check-list"></div>
-      <p id="full-day-message" class="muted">
-        Full-Day Validation has not been loaded yet.
-      </p>
-    </section>
-
-    <section class="panel dynamic-watchlist-panel">
-      <div class="panel-heading">
-        <div>
-          <h2>Dynamic Watchlist</h2>
-          <span class="muted">
-            Ranked candidates for ¥1,000,000 capital
-          </span>
-        </div>
-        <span
-          id="desktop-dynamic-status"
-          class="status-pill"
-        >
-          UNKNOWN
-        </span>
-      </div>
-
-      <div class="morning-summary-grid">
-        <article>
-          <span>Selected</span>
-          <strong id="desktop-dynamic-selected">0</strong>
-        </article>
-        <article>
-          <span>Eligible</span>
-          <strong id="desktop-dynamic-eligible">0</strong>
-        </article>
-        <article>
-          <span>Evaluated</span>
-          <strong id="desktop-dynamic-evaluated">0</strong>
-        </article>
-        <article>
-          <span>Applied</span>
-          <strong id="desktop-dynamic-applied">NO</strong>
-        </article>
-      </div>
-
-      <div
-        id="desktop-dynamic-candidates"
-        class="dynamic-watchlist-table"
-      ></div>
-
-      <p
-        id="desktop-dynamic-message"
-        class="muted"
-      >
-        Dynamic Watchlist has not reported yet.
-      </p>
-    </section>
-
-    <section class="panel morning-preflight-panel">
-      <div class="panel-heading">
-        <div>
-          <h2>Morning Pre-Flight</h2>
-          <span class="muted">
-            Automated 08:40 operation check
-          </span>
-        </div>
-        <span
-          id="desktop-morning-status"
-          class="status-pill"
-        >
-          UNKNOWN
-        </span>
-      </div>
-
-      <div class="morning-summary-grid">
-        <article>
-          <span>Overall</span>
-          <strong id="desktop-morning-overall">—</strong>
-        </article>
-        <article>
-          <span>Trading</span>
-          <strong id="desktop-morning-ready">—</strong>
-        </article>
-        <article>
-          <span>Schedule</span>
-          <strong id="desktop-morning-schedule">—</strong>
-        </article>
-        <article>
-          <span>Last Attempt</span>
-          <strong id="desktop-morning-attempt">—</strong>
-        </article>
-      </div>
-
-      <div
-        id="desktop-morning-checks"
-        class="morning-check-list"
-      ></div>
-
-      <p
-        id="desktop-morning-message"
-        class="muted"
-      >
-        Morning Pre-Flight has not reported yet.
-      </p>
-    </section>
-
     <section class="metrics">
-      <article class="metric">
-        <span>Today's P/L</span>
-        <strong id="today-pl">—</strong>
-      </article>
-      <article class="metric">
-        <span>Cumulative P/L</span>
-        <strong id="cumulative-pl">—</strong>
-      </article>
-      <article class="metric">
-        <span>Daily Win Rate</span>
-        <strong id="daily-win-rate">—</strong>
-      </article>
-      <article class="metric">
-        <span>Maximum Drawdown</span>
-        <strong id="maximum-drawdown">—</strong>
-      </article>
-      <article class="metric">
-        <span>Signals</span>
-        <strong id="signal-count">—</strong>
-      </article>
-      <article class="metric">
-        <span>Executions</span>
-        <strong id="execution-count">—</strong>
-      </article>
-      <article class="metric">
-        <span>Broker Equity</span>
-        <strong id="broker-equity">—</strong>
-      </article>
-      <article class="metric">
-        <span>Positions</span>
-        <strong id="position-count">—</strong>
-      </article>
-    </section>
-
-
-    <section class="panel">
-      <div class="panel-heading">
-        <div>
-          <h2>Strategy Performance Ranking</h2>
-          <span class="muted">
-            Trade Journal based all-period performance
-          </span>
-        </div>
-        <span id="performance-period" class="muted">—</span>
-      </div>
-      <div
-        id="performance-ranking"
-        class="performance-ranking"
-      ></div>
-    </section>
-
-
-    <section class="panel">
-      <div class="panel-heading">
-        <div>
-          <h2>Performance Breakdown</h2>
-          <span class="muted">
-            Weekday, entry hour, symbol and exit reason
-          </span>
-        </div>
-      </div>
-      <div class="breakdown-grid">
-        <article class="breakdown-panel">
-          <h3>Weekday</h3>
-          <div id="breakdown-weekday"></div>
-        </article>
-        <article class="breakdown-panel">
-          <h3>Entry Hour</h3>
-          <div id="breakdown-entry-hour"></div>
-        </article>
-        <article class="breakdown-panel">
-          <h3>Top Symbols</h3>
-          <div id="breakdown-symbol"></div>
-        </article>
-        <article class="breakdown-panel">
-          <h3>Exit Reasons</h3>
-          <div id="breakdown-exit-reason"></div>
-        </article>
-      </div>
+      <article class="metric"><span>Today's P/L</span><strong id="today-pl">—</strong></article>
+      <article class="metric"><span>Realized P/L</span><strong id="realized-pl">—</strong></article>
+      <article class="metric"><span>Unrealized P/L</span><strong id="unrealized-pl">—</strong></article>
+      <article class="metric"><span>Positions</span><strong id="position-count">—</strong></article>
+      <article class="metric"><span>Signals</span><strong id="signal-count">—</strong></article>
+      <article class="metric"><span>Executions</span><strong id="execution-count">—</strong></article>
     </section>
 
     <section class="panel">
       <div class="panel-heading">
-        <div>
-          <h2>Strategy Summary</h2>
-          <span class="muted">
-            Signals, executions and realized performance
-          </span>
-        </div>
-        <span id="strategy-date" class="muted">—</span>
+        <div><h2>Runtime</h2><span class="muted">Paper trading and service health</span></div>
+        <span id="runtime-state" class="status-pill">UNKNOWN</span>
       </div>
-      <div class="strategy-grid" id="strategy-grid"></div>
-    </section>
-
-    <section class="chart-grid">
-      <article class="panel">
-        <div class="panel-heading">
-          <h2>Equity Curve</h2>
-        </div>
-        <div id="equity-chart" class="chart"></div>
-      </article>
-      <article class="panel">
-        <div class="panel-heading">
-          <h2>Daily P/L</h2>
-        </div>
-        <div id="daily-pl-chart" class="chart"></div>
-      </article>
-      <article class="panel">
-        <div class="panel-heading">
-          <h2>Cumulative P/L</h2>
-        </div>
-        <div id="cumulative-pl-chart" class="chart"></div>
-      </article>
-      <article class="panel">
-        <div class="panel-heading">
-          <h2>Drawdown</h2>
-        </div>
-        <div id="drawdown-chart" class="chart"></div>
-      </article>
+      <div class="morning-summary-grid">
+        <article><span>Trading Date</span><strong id="runtime-date">—</strong></article>
+        <article><span>PID</span><strong id="runtime-pid">—</strong></article>
+        <article><span>Cycles</span><strong id="runtime-cycles">—</strong></article>
+        <article><span>Failed</span><strong id="runtime-failed">—</strong></article>
+        <article><span>kabu Station</span><strong id="kabu-state">—</strong></article>
+        <article><span>Service</span><strong id="service-state">—</strong></article>
+      </div>
+      <p id="runtime-message" class="muted">Runtime status has not been loaded yet.</p>
     </section>
 
     <section class="panel">
       <div class="panel-heading">
-        <h2>Recent Trades</h2>
+        <div><h2>Watchlist</h2><span class="muted">Today's selected candidates</span></div>
+        <span id="watchlist-state" class="status-pill">UNKNOWN</span>
       </div>
+      <div class="morning-summary-grid">
+        <article><span>Selected</span><strong id="watchlist-selected">0</strong></article>
+        <article><span>Eligible</span><strong id="watchlist-eligible">0</strong></article>
+        <article><span>Evaluated</span><strong id="watchlist-evaluated">0</strong></article>
+        <article><span>Applied</span><strong id="watchlist-applied">NO</strong></article>
+      </div>
+      <div id="watchlist-candidates"></div>
+      <p id="watchlist-message" class="muted">Dynamic Watchlist has not reported yet.</p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading"><h2>Today's Executions</h2></div>
       <div class="table-wrap">
         <table>
-          <thead>
-            <tr>
-              <th>Executed</th>
-              <th>Strategy</th>
-              <th>Code</th>
-              <th>Side</th>
-              <th>Quantity</th>
-              <th>Price</th>
-              <th>Costs</th>
-            </tr>
-          </thead>
+          <thead><tr><th>Executed</th><th>Strategy</th><th>Code</th><th>Side</th><th>Qty</th><th>Price</th></tr></thead>
           <tbody id="recent-trades-body"></tbody>
         </table>
       </div>
     </section>
 
     <section class="panel">
-      <div class="panel-heading">
-        <h2>Current Positions</h2>
-      </div>
+      <div class="panel-heading"><h2>Open Positions</h2></div>
       <div class="table-wrap">
         <table>
-          <thead>
-            <tr>
-              <th>Code</th>
-              <th>Side</th>
-              <th>Quantity</th>
-              <th>Average Cost</th>
-              <th>Market Price</th>
-              <th>Unrealized P/L</th>
-            </tr>
-          </thead>
+          <thead><tr><th>Code</th><th>Side</th><th>Qty</th><th>Average</th><th>Market</th><th>Unrealized P/L</th></tr></thead>
           <tbody id="positions-body"></tbody>
         </table>
       </div>
@@ -547,1473 +79,145 @@
 
     <section class="panel">
       <div class="panel-heading">
-        <h2>System Details</h2>
+        <div><h2>End-of-Day Check</h2><span class="muted">Full-Day Validation</span></div>
+        <span id="full-day-state" class="status-pill">UNKNOWN</span>
       </div>
-      <pre id="system-details">Loading...</pre>
+      <p id="full-day-message" class="muted">Full-Day Validation has not been loaded yet.</p>
     </section>
   </main>
 
   <script>
-    const yen = new Intl.NumberFormat(
-      "ja-JP",
-      {
-        style: "currency",
-        currency: "JPY",
-        maximumFractionDigits: 0
-      }
-    );
-    const percent = new Intl.NumberFormat(
-      "ja-JP",
-      {
-        style: "percent",
-        minimumFractionDigits: 1,
-        maximumFractionDigits: 1
-      }
-    );
+    const yen = new Intl.NumberFormat("ja-JP", {style:"currency", currency:"JPY", maximumFractionDigits:0});
+    const val = (v, f=String) => v === null || v === undefined ? "—" : f(v);
 
-    let symbolNames = {};
-
-    function symbolLabel(code) {
-      const normalized = String(code ?? "").trim();
-      const name = symbolNames[normalized];
-      return name ? `${normalized} ${name}` : (normalized || "—");
+    function formatJst(v) {
+      if (!v) return "—";
+      const d = new Date(v);
+      if (Number.isNaN(d.getTime())) return String(v);
+      return new Intl.DateTimeFormat("ja-JP", {
+        timeZone:"Asia/Tokyo", year:"numeric", month:"2-digit", day:"2-digit",
+        hour:"2-digit", minute:"2-digit", second:"2-digit"
+      }).format(d);
     }
 
-    const JST_TIME_ZONE = "Asia/Tokyo";
-
-    function parseDateTime(value) {
-      if (!value) return null;
-      const parsed = new Date(value);
-      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    function todayKey() {
+      const p = new Intl.DateTimeFormat("en-CA", {
+        timeZone:"Asia/Tokyo", year:"numeric", month:"2-digit", day:"2-digit"
+      }).formatToParts(new Date());
+      const g = t => p.find(x => x.type === t)?.value ?? "";
+      return `${g("year")}-${g("month")}-${g("day")}`;
     }
 
-    function jstDateKey(value) {
-      const parsed = parseDateTime(value);
-      if (parsed === null) return null;
-
-      const parts = new Intl.DateTimeFormat(
-        "en-CA",
-        {
-          timeZone: JST_TIME_ZONE,
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit"
-        }
-      ).formatToParts(parsed);
-      const values = Object.fromEntries(
-        parts.map(part => [part.type, part.value])
-      );
-      return `${values.year}-${values.month}-${values.day}`;
-    }
-
-    function todayJstDateKey() {
-      return jstDateKey(new Date().toISOString());
-    }
-
-
-
-
-
-    function formatDailyPercent(value) {
-      if (value === null || value === undefined) {
-        return "—";
-      }
-
-      return `${(Number(value) * 100).toFixed(1)}%`;
-    }
-
-    function formatDailyNumber(value, digits = 2) {
-      if (value === null || value === undefined) {
-        return "—";
-      }
-
-      return Number(value).toFixed(digits);
-    }
-
-    function renderDailyRanking(
-      elementId,
-      rows
-    ) {
-      const container = document.getElementById(
-        elementId
-      );
-      container.innerHTML = "";
-
-      if (!rows || rows.length === 0) {
-        container.innerHTML = `
-          <p class="daily-report-ranking-empty">
-            No breakdown rows.
-          </p>
-        `;
-        return;
-      }
-
-      for (const row of rows.slice(0, 5)) {
-        const item = document.createElement("div");
-        item.className = "daily-report-ranking-row";
-        item.innerHTML = `
-          <div>
-            <strong>${row.label ?? row.key ?? "—"}</strong>
-            <span>${row.trade_count ?? 0} trades</span>
-          </div>
-          <b>${yen.format(row.net_profit_loss ?? 0)}</b>
-        `;
-        container.appendChild(item);
+    async function getJson(url) {
+      try {
+        const r = await fetch(url, {cache:"no-store"});
+        return r.ok ? await r.json() : {};
+      } catch (_) {
+        return {};
       }
     }
 
-
-
-
-    function renderUniverseHistory(payload) {
-      document.getElementById("universe-history-active").textContent = payload.active_universe_count ?? 0;
-      document.getElementById("universe-history-1d").textContent = payload.symbols_with_1_day ?? 0;
-      document.getElementById("universe-history-5d").textContent = payload.symbols_with_5_days ?? 0;
-      document.getElementById("universe-history-10d").textContent = payload.symbols_with_10_days ?? 0;
-      document.getElementById("universe-history-20d").textContent = payload.symbols_with_20_days ?? 0;
-      document.getElementById("universe-history-fallback").textContent = payload.fallback_count ?? 0;
-      document.getElementById("universe-history-developing").textContent = payload.developing_count ?? 0;
-      document.getElementById("universe-history-strict").textContent = payload.strict_count ?? 0;
-      document.getElementById("universe-history-none").textContent = payload.no_history_count ?? 0;
-      document.getElementById("universe-history-date").textContent = payload.latest_market_data_date ?? "—";
-      document.getElementById("universe-history-message").textContent = payload.available
-        ? `20-day coverage: ${percent.format(payload.coverage_20_days ?? 0)}`
-        : (payload.message ?? "Universe history is unavailable.");
+    function status(el, value) {
+      const s = String(value ?? "unknown").toLowerCase();
+      el.textContent = s.replaceAll("_"," ").toUpperCase();
+      el.dataset.status = ["healthy","available","running","ready","pass"].includes(s)
+        ? "healthy" : ["failed","critical","error","fail"].includes(s) ? "failed" : "neutral";
     }
 
-    function renderWatchlistExecutionIntegrity(payload) {
-      const state = document.getElementById(
-        "watchlist-integrity-state"
-      );
-      const normalizedState = payload.state ?? "unknown";
-      state.textContent = normalizedState
-        .replaceAll("_", " ")
-        .toUpperCase();
-      state.dataset.status = (
-        normalizedState === "pass"
-          ? "healthy"
-          : (
-            normalizedState === "fail"
-              ? "failed"
-              : "neutral"
-          )
-      );
-
-      document.getElementById(
-        "integrity-selected"
-      ).textContent = payload.selected_count ?? 0;
-      document.getElementById(
-        "integrity-loaded"
-      ).textContent = payload.loaded_count ?? 0;
-      document.getElementById(
-        "integrity-monitored"
-      ).textContent = payload.monitored_count ?? 0;
-      document.getElementById(
-        "integrity-signals"
-      ).textContent = payload.signal_count ?? 0;
-      document.getElementById(
-        "integrity-executions"
-      ).textContent = payload.execution_count ?? 0;
-
-      const container = document.getElementById(
-        "watchlist-integrity-symbols"
-      );
-      container.innerHTML = "";
-
-      for (const item of payload.symbols ?? []) {
-        const row = document.createElement("div");
-        const mismatch = [
-          "not_loaded",
-          "not_monitored",
-          "signaled_no_execution"
-        ].includes(item.status);
-        row.className = (
-          "morning-check-row "
-          + (mismatch ? "level-error" : "level-ok")
-        );
-        row.innerHTML = `
-          <div>
-            <strong>${symbolLabel(item.code)}</strong>
-            <span>
-              selected=${item.selected ? "yes" : "no"} /
-              loaded=${item.loaded ? "yes" : "no"} /
-              monitored=${item.monitored ? "yes" : "no"} /
-              signals=${item.signal_count ?? 0} /
-              executions=${item.execution_count ?? 0}
-            </span>
-          </div>
-          <b>${(item.status ?? "unknown").replaceAll("_", " ").toUpperCase()}</b>
-        `;
-        container.appendChild(row);
-      }
-
-      if ((payload.symbols ?? []).length === 0) {
-        container.innerHTML = `
-          <div class="empty-state">
-            No audited symbols yet.
-          </div>
-        `;
-      }
-
-      const problems = [];
-      const labels = [
-        ["Selected not loaded", payload.selected_not_loaded_codes],
-        ["Loaded not monitored", payload.loaded_not_monitored_codes],
-        ["Monitored not loaded", payload.monitored_not_loaded_codes],
-        ["Orphan signals", payload.orphan_signal_codes],
-        ["Orphan executions", payload.orphan_execution_codes]
-      ];
-      for (const [label, codes] of labels) {
-        if ((codes ?? []).length > 0) {
-          problems.push(`${label}: ${codes.join(", ")}`);
-        }
-      }
-
-      const message = payload.message ?? "—";
-      document.getElementById(
-        "watchlist-integrity-message"
-      ).textContent = problems.length > 0
-        ? `${message} ${problems.join(" / ")}`
-        : message;
+    function renderWatchlist(p, names) {
+      status(document.getElementById("watchlist-state"), p.schedule_state ?? (p.available ? "available" : "unknown"));
+      document.getElementById("watchlist-selected").textContent = p.selected_count ?? 0;
+      document.getElementById("watchlist-eligible").textContent = p.eligible_count ?? 0;
+      document.getElementById("watchlist-evaluated").textContent = p.evaluated_count ?? 0;
+      document.getElementById("watchlist-applied").textContent = p.applied ? "YES" : "NO";
+      document.getElementById("watchlist-message").textContent = p.message ?? "—";
+      const rows = p.candidates ?? p.selected_candidates ?? [];
+      const c = document.getElementById("watchlist-candidates");
+      if (!rows.length) { c.innerHTML = '<p class="muted">No selected candidates.</p>'; return; }
+      c.innerHTML = `<div class="table-wrap"><table>
+        <thead><tr><th>#</th><th>Code</th><th>Strategy</th><th>Score</th><th>Tier</th></tr></thead>
+        <tbody>${rows.slice(0,10).map((r,i) => {
+          const code = String(r.code ?? "—");
+          const label = names[code] ? `${code} ${names[code]}` : code;
+          const strategy = r.preferred_strategy ?? r.strategy_name ?? r.strategy ?? "—";
+          const score = r.total_score ?? r.score ?? null;
+          return `<tr><td>${i+1}</td><td>${label}</td><td>${strategy}</td><td>${score===null?"—":Number(score).toFixed(1)}</td><td>${r.selection_tier ?? r.tier ?? "—"}</td></tr>`;
+        }).join("")}</tbody></table></div>`;
     }
 
-    function renderFullDayValidation(payload) {
-      const state = document.getElementById(
-        "full-day-validation-state"
-      );
-      const normalizedState = payload.state ?? "unknown";
-      state.textContent = normalizedState
-        .replaceAll("_", " ")
-        .toUpperCase();
-      state.dataset.status = (
-        normalizedState === "pass"
-          ? "healthy"
-          : (
-            normalizedState === "fail"
-              ? "failed"
-              : "neutral"
-          )
-      );
-
-      document.getElementById(
-        "full-day-date"
-      ).textContent = payload.trading_date ?? "—";
-      document.getElementById(
-        "full-day-failed-count"
-      ).textContent = payload.failed_check_count ?? 0;
-
-      const runtime = payload.runtime ?? {};
-      const integrity = payload.integrity ?? {};
-      const dailyReport = payload.daily_report ?? {};
-
-      document.getElementById(
-        "full-day-runtime-state"
-      ).textContent = (
-        runtime.state ?? "—"
-      ).toString().toUpperCase();
-
-      const remainingPositions = Math.max(
-        Number(runtime.open_position_count ?? 0),
-        Number(runtime.portfolio_position_count ?? 0)
-      );
-      document.getElementById(
-        "full-day-positions"
-      ).textContent = remainingPositions;
-
-      document.getElementById(
-        "full-day-integrity"
-      ).textContent = (
-        integrity.integrity_ok === true
-          ? "PASS"
-          : (
-            integrity.integrity_ok === false
-              ? "FAIL"
-              : "—"
-          )
-      );
-
-      document.getElementById(
-        "full-day-report"
-      ).textContent = (
-        dailyReport.status ?? "—"
-      ).toString().toUpperCase();
-
-      const container = document.getElementById(
-        "full-day-checks"
-      );
-      container.innerHTML = "";
-
-      const checks = payload.checks ?? [];
-      if (checks.length === 0) {
-        container.innerHTML = `
-          <div class="empty-state">
-            No Full-Day Validation checks yet.
-          </div>
-        `;
-      } else {
-        for (const check of checks) {
-          const row = document.createElement("div");
-          row.className = (
-            "morning-check-row "
-            + (check.passed ? "level-ok" : "level-error")
-          );
-          row.innerHTML = `
-            <div>
-              <strong>${check.label ?? check.key ?? "Unknown"}</strong>
-              <span>${check.message ?? ""}</span>
-            </div>
-            <b>${check.passed ? "PASS" : "FAIL"}</b>
-          `;
-          container.appendChild(row);
-        }
-      }
-
-      document.getElementById(
-        "full-day-message"
-      ).textContent = payload.message ?? "—";
-    }
-
-    function renderDesktopDynamicWatchlist(payload) {
-      document.getElementById(
-        "desktop-dynamic-status"
-      ).textContent = (
-        payload.schedule_state ?? "unknown"
-      ).toUpperCase();
-      document.getElementById(
-        "desktop-dynamic-selected"
-      ).textContent = payload.selected_count ?? 0;
-      document.getElementById(
-        "desktop-dynamic-eligible"
-      ).textContent = payload.eligible_count ?? 0;
-      document.getElementById(
-        "desktop-dynamic-evaluated"
-      ).textContent = payload.evaluated_count ?? 0;
-      document.getElementById(
-        "desktop-dynamic-applied"
-      ).textContent = payload.applied ? "YES" : "NO";
-      document.getElementById(
-        "desktop-dynamic-message"
-      ).textContent = payload.message ?? "—";
-
-      const container = document.getElementById(
-        "desktop-dynamic-candidates"
-      );
-      container.innerHTML = "";
-
-      const candidates = payload.candidates ?? [];
-
-      if (candidates.length === 0) {
-        container.innerHTML = `
-          <div class="empty-state">
-            No Dynamic Watchlist candidates.
-          </div>
-        `;
-        return;
-      }
-
-      const header = document.createElement("div");
-      header.className = "dynamic-watchlist-row header";
-      header.innerHTML = `
-        <span>Rank</span>
-        <span>Code</span>
-        <span>Tier</span>
-        <span>Strategy</span>
-        <span>Score</span>
-        <span>100 shares</span>
-        <span>ORB</span>
-        <span>Pullback</span>
-        <span>Breakout</span>
-      `;
-      container.appendChild(header);
-
-      candidates.forEach((candidate, index) => {
-        const row = document.createElement("div");
-        row.className = "dynamic-watchlist-row";
-        row.innerHTML = `
-          <span>#${index + 1}</span>
-          <strong>${symbolLabel(candidate.code)}</strong>
-          <b>${candidate.rating_tier ?? "C"}</b>
-          <span>${candidate.preferred_strategy ?? "unknown"}</span>
-          <strong>${Number(candidate.total_score ?? 0).toFixed(2)}</strong>
-          <span>¥${Number(candidate.purchase_amount ?? 0).toLocaleString("ja-JP")}</span>
-          <span>${Number(candidate.orb_score ?? 0).toFixed(1)}</span>
-          <span>${Number(candidate.pullback_score ?? 0).toFixed(1)}</span>
-          <span>${Number(candidate.high_breakout_score ?? 0).toFixed(1)}</span>
-        `;
-        container.appendChild(row);
+    function renderTrades(trades, names) {
+      const body = document.getElementById("recent-trades-body");
+      const rows = (trades ?? []).filter(t => {
+        if (!t.executed_at) return false;
+        const p = new Intl.DateTimeFormat("en-CA", {timeZone:"Asia/Tokyo", year:"numeric", month:"2-digit", day:"2-digit"}).formatToParts(new Date(t.executed_at));
+        const g = k => p.find(x => x.type === k)?.value ?? "";
+        return `${g("year")}-${g("month")}-${g("day")}` === todayKey();
       });
+      body.innerHTML = rows.length ? rows.slice(0,20).map(t => {
+        const code = String(t.code ?? "—");
+        const label = names[code] ? `${code} ${names[code]}` : code;
+        return `<tr><td>${formatJst(t.executed_at)}</td><td>${t.strategy_name ?? "—"}</td><td>${label}</td><td>${t.side ?? "—"}</td><td>${t.quantity ?? "—"}</td><td>${val(t.execution_price, yen.format)}</td></tr>`;
+      }).join("") : '<tr><td colspan="6" class="muted">No executions today.</td></tr>';
     }
 
-    function renderDesktopMorningPreflight(payload) {
-      document.getElementById(
-        "desktop-morning-status"
-      ).textContent = (
-        payload.schedule_state ?? "unknown"
-      ).toUpperCase();
-      document.getElementById(
-        "desktop-morning-overall"
-      ).textContent = (
-        payload.overall_state ?? "unknown"
-      ).toUpperCase();
-      document.getElementById(
-        "desktop-morning-ready"
-      ).textContent = (
-        payload.ready_for_trading
-          ? "READY"
-          : "NOT READY"
-      );
-      document.getElementById(
-        "desktop-morning-schedule"
-      ).textContent = (
-        payload.schedule_state ?? "—"
-      );
-      document.getElementById(
-        "desktop-morning-attempt"
-      ).textContent = payload.last_attempt_at ?? "—";
-      document.getElementById(
-        "desktop-morning-message"
-      ).textContent = payload.message ?? "—";
-
-      const container = document.getElementById(
-        "desktop-morning-checks"
-      );
-      container.innerHTML = "";
-
-      for (const check of payload.checks ?? []) {
-        const row = document.createElement("div");
-        row.className = (
-          "morning-check-row "
-          + `level-${check.level ?? "unknown"}`
-        );
-        row.innerHTML = `
-          <div>
-            <strong>${check.label ?? check.key ?? "Unknown"}</strong>
-            <span>${check.message ?? ""}</span>
-          </div>
-          <b>${(check.level ?? "unknown").toUpperCase()}</b>
-        `;
-        container.appendChild(row);
-      }
+    function renderPositions(rows, names) {
+      const body = document.getElementById("positions-body");
+      body.innerHTML = rows?.length ? rows.map(p => {
+        const code = String(p.code ?? "—");
+        const label = names[code] ? `${code} ${names[code]}` : code;
+        return `<tr><td>${label}</td><td>${p.side ?? "—"}</td><td>${p.quantity ?? "—"}</td><td>${val(p.average_cost,yen.format)}</td><td>${val(p.market_price,yen.format)}</td><td>${val(p.unrealized_profit_loss,yen.format)}</td></tr>`;
+      }).join("") : '<tr><td colspan="6" class="muted">No open positions.</td></tr>';
     }
 
-    function renderDailyReport(payload) {
-      const status = document.getElementById(
-        "daily-report-status"
-      );
-      status.textContent = (
-        payload.status ?? "unknown"
-      ).toUpperCase();
-
-      const empty = document.getElementById(
-        "daily-report-empty"
-      );
-      const content = document.getElementById(
-        "daily-report-content"
-      );
-
-      if (!payload.available) {
-        empty.hidden = false;
-        empty.textContent = (
-          payload.message
-          ?? "Daily trading report has not been generated yet."
-        );
-        content.hidden = true;
-        return;
-      }
-
-      empty.hidden = true;
-      content.hidden = false;
-
-      const summary = payload.summary ?? {};
-
-      document.getElementById(
-        "daily-report-date"
-      ).textContent = payload.report_date ?? "—";
-
-      const pnl = Number(
-        summary.net_profit_loss ?? 0
-      );
-      const pnlElement = document.getElementById(
-        "daily-report-pnl"
-      );
-      pnlElement.textContent = yen.format(pnl);
-      pnlElement.dataset.sign = (
-        pnl > 0
-          ? "positive"
-          : (
-            pnl < 0
-              ? "negative"
-              : "flat"
-          )
-      );
-
-      document.getElementById(
-        "daily-report-trades"
-      ).textContent = summary.trade_count ?? 0;
-      document.getElementById(
-        "daily-report-win-rate"
-      ).textContent = formatDailyPercent(
-        summary.win_rate
-      );
-      document.getElementById(
-        "daily-report-profit-factor"
-      ).textContent = formatDailyNumber(
-        summary.profit_factor
-      );
-      document.getElementById(
-        "daily-report-drawdown"
-      ).textContent = (
-        summary.maximum_drawdown === null
-        || summary.maximum_drawdown === undefined
-          ? "—"
-          : yen.format(summary.maximum_drawdown)
-      );
-
-      renderDailyRanking(
-        "daily-report-strategies",
-        payload.strategy_breakdown ?? []
-      );
-      renderDailyRanking(
-        "daily-report-symbols",
-        payload.symbol_breakdown ?? []
-      );
-
-      document.getElementById(
-        "daily-report-errors"
-      ).textContent = payload.error_count ?? 0;
-      document.getElementById(
-        "daily-report-recoveries"
-      ).textContent = payload.recovery_count ?? 0;
-      document.getElementById(
-        "daily-report-generated-at"
-      ).textContent = payload.generated_at ?? "—";
-    }
-
-    function renderPaperTradingSchedule(payload) {
-      const state = document.getElementById(
-        "paper-schedule-state"
-      );
-      state.textContent = (
-        payload.state ?? "unknown"
-      ).toUpperCase();
-
-      const settings = payload.settings ?? {};
-      const items = [
-        ["Start", settings.start_at],
-        ["Market Open", settings.morning_open_at],
-        ["Lunch", settings.lunch_start_at],
-        ["Resume", settings.lunch_end_at],
-        ["Market Close", settings.market_close_at],
-        ["Stop", settings.stop_at],
-      ];
-      const grid = document.getElementById(
-        "paper-schedule-grid"
-      );
-      grid.innerHTML = "";
-
-      for (const [label, value] of items) {
-        const card = document.createElement("article");
-        card.innerHTML = `
-          <span>${label}</span>
-          <strong>${value ?? "—"}</strong>
-        `;
-        grid.appendChild(card);
-      }
-
-      document.getElementById(
-        "paper-schedule-message"
-      ).textContent = payload.message ?? "—";
-    }
-
-    function renderOperationalReadiness(payload) {
-      const state = document.getElementById(
-        "readiness-state"
-      );
-      state.textContent = (
-        payload.overall_state ?? "unknown"
-      ).toUpperCase();
-      state.dataset.status = (
-        payload.overall_state === "ready"
-          ? "healthy"
-          : (
-            payload.overall_state === "attention"
-              ? "warning"
-              : "failed"
-          )
-      );
-
-      document.getElementById(
-        "paper-readiness"
-      ).textContent = (
-        payload.ready_for_paper_trading
-          ? "READY"
-          : "NOT READY"
-      );
-
-      const grid = document.getElementById(
-        "readiness-checks"
-      );
-      grid.innerHTML = "";
-
-      for (const check of payload.checks) {
-        const card = document.createElement("article");
-        card.className = "readiness-card";
-        card.dataset.level = check.level;
-        card.innerHTML = `
-          <div>
-            <strong>${check.label}</strong>
-            <span>${check.level.toUpperCase()}</span>
-          </div>
-          <p>${check.message}</p>
-        `;
-        grid.appendChild(card);
-      }
-    }
-
-    function formatUptime(seconds) {
-      if (seconds === null || seconds === undefined) {
-        return "—";
-      }
-
-      const total = Math.max(0, Math.floor(seconds));
-      const days = Math.floor(total / 86400);
-      const hours = Math.floor((total % 86400) / 3600);
-      const minutes = Math.floor((total % 3600) / 60);
-
-      if (days > 0) {
-        return `${days}d ${hours}h ${minutes}m`;
-      }
-
-      if (hours > 0) {
-        return `${hours}h ${minutes}m`;
-      }
-
-      return `${minutes}m`;
-    }
-
-    function renderServiceEvents(events) {
-      const list = document.getElementById(
-        "service-events"
-      );
-      list.innerHTML = "";
-
-      if (events.length === 0) {
-        list.innerHTML = `
-          <p class="service-events-empty">
-            No recovery events have been recorded.
-          </p>
-        `;
-        return;
-      }
-
-      for (const event of events.slice(0, 10)) {
-        const row = document.createElement("div");
-        row.className = "service-event-row";
-        row.innerHTML = `
-          <time>${event.occurred_at ?? "—"}</time>
-          <strong>${event.component ?? "service"}</strong>
-          <span>${event.message}</span>
-        `;
-        list.appendChild(row);
-      }
-    }
-
-    function serviceStateClass(state) {
-      if (["running", "healthy", "ready"].includes(state)) {
-        return "healthy";
-      }
-
-      if (["disabled", "not_checked", "not_running"].includes(state)) {
-        return "neutral";
-      }
-
-      if (["starting", "restart_wait", "degraded", "stale"].includes(state)) {
-        return "warning";
-      }
-
-      return "failed";
-    }
-
-    function renderServiceStatus(payload) {
-      document.getElementById(
-        "service-status-updated"
-      ).textContent = payload.generated_at ?? "—";
-
-      const serviceState = document.getElementById(
-        "service-state"
-      );
-      serviceState.textContent = (
-        payload.service_state ?? "unknown"
-      ).toUpperCase();
-      serviceState.dataset.state = serviceStateClass(
-        payload.service_state
-      );
-
-      if (payload.stale) {
-        serviceState.title = (
-          `Last Service update is ${
-            payload.status_age_seconds?.toFixed(1) ?? "unknown"
-          } seconds old.`
-        );
-      } else {
-        serviceState.title = "";
-      }
-
-      const kabuReadiness = document.getElementById(
-        "kabu-readiness"
-      );
-      kabuReadiness.textContent = (
-        payload.kabu_station_readiness ?? "unknown"
-      ).toUpperCase();
-      kabuReadiness.dataset.state = serviceStateClass(
-        payload.kabu_station_readiness
-      );
-
-      document.getElementById(
-        "service-uptime"
-      ).textContent = formatUptime(
-        payload.uptime_seconds
-      );
-      document.getElementById(
-        "service-event-count"
-      ).textContent = (
-        payload.recent_events?.length ?? 0
-      );
-      renderServiceEvents(
-        payload.recent_events ?? []
-      );
-
-      const grid = document.getElementById(
-        "service-components"
-      );
-      grid.innerHTML = "";
-
-      if (payload.components.length === 0) {
-        grid.innerHTML = `
-          <article class="service-empty">
-            ${
-              payload.message
-              ?? "Service Manager has not reported components yet."
-            }
-          </article>
-        `;
-        return;
-      }
-
-      for (const component of payload.components) {
-        const card = document.createElement("article");
-        card.className = "service-component-card";
-        card.dataset.state = serviceStateClass(
-          component.state
-        );
-        card.innerHTML = `
-          <div class="service-component-heading">
-            <div class="service-indicator"></div>
-            <div>
-              <h3>${component.name}</h3>
-              <span>${component.state}</span>
-            </div>
-          </div>
-          <dl>
-            <div><dt>Enabled</dt><dd>${component.enabled}</dd></div>
-            <div><dt>PID</dt><dd>${component.process_id ?? "—"}</dd></div>
-            <div><dt>Restarts</dt><dd>${component.restart_count}</dd></div>
-            <div><dt>Last Exit</dt><dd>${component.last_exit_code ?? "—"}</dd></div>
-          </dl>
-          ${
-            component.message
-              ? `<p>${component.message}</p>`
-              : ""
-          }
-        `;
-        grid.appendChild(card);
-      }
-    }
-
-    function valueOrDash(value, formatter = String) {
-      return value === null || value === undefined
-        ? "—"
-        : formatter(value);
-    }
-
-    function emptyChart(element, message) {
-      element.innerHTML =
-        `<p class="chart-empty">${message}</p>`;
-    }
-
-    function lineChart(
-      elementId,
-      points,
-      valueKey,
-      formatter
-    ) {
-      const element = document.getElementById(
-        elementId
-      );
-      const data = points
-        .map(point => ({
-          value: point[valueKey]
-        }))
-        .filter(point => point.value !== null);
-
-      if (data.length === 0) {
-        emptyChart(element, "No data yet.");
-        return;
-      }
-
-      const values = data.map(point => point.value);
-      const minimum = Math.min(...values);
-      const maximum = Math.max(...values);
-      const range = Math.max(
-        maximum - minimum,
-        1
-      );
-      const width = 820;
-      const height = 230;
-      const padding = 24;
-      const coordinates = data.map(
-        (point, index) => {
-          const x = padding + (
-            index
-            * (width - padding * 2)
-            / Math.max(data.length - 1, 1)
-          );
-          const y = height - padding - (
-            (point.value - minimum)
-            / range
-            * (height - padding * 2)
-          );
-          return `${x},${y}`;
-        }
-      ).join(" ");
-
-      element.innerHTML = `
-        <svg viewBox="0 0 ${width} ${height}">
-          <polyline
-            class="line-series"
-            points="${coordinates}"
-          />
-        </svg>
-        <div class="chart-range">
-          <span>${formatter(minimum)}</span>
-          <span>${formatter(maximum)}</span>
-        </div>
-      `;
-    }
-
-    function barChart(
-      elementId,
-      points,
-      valueKey,
-      formatter
-    ) {
-      const element = document.getElementById(
-        elementId
-      );
-      const values = points
-        .map(point => point[valueKey])
-        .filter(value => value !== null);
-
-      if (values.length === 0) {
-        emptyChart(element, "No data yet.");
-        return;
-      }
-
-      const maximum = Math.max(
-        ...values.map(Math.abs),
-        1
-      );
-
-      element.innerHTML = `
-        <div class="bar-chart">
-          ${values.map(value => `
-            <div class="bar-column">
-              <div
-                class="bar ${
-                  value >= 0
-                    ? "positive"
-                    : "negative"
-                }"
-                style="height:${
-                  Math.abs(value) / maximum * 100
-                }%"
-              ></div>
-            </div>
-          `).join("")}
-        </div>
-        <div class="chart-range">
-          <span>${formatter(-maximum)}</span>
-          <span>${formatter(maximum)}</span>
-        </div>
-      `;
-    }
-
-    function renderPositions(positions) {
-      const body = document.getElementById(
-        "positions-body"
-      );
-      body.innerHTML = "";
-
-      if (positions.length === 0) {
-        body.innerHTML = `
-          <tr>
-            <td colspan="6" class="muted">
-              No open positions.
-            </td>
-          </tr>
-        `;
-        return;
-      }
-
-      for (const position of positions) {
-        const row = document.createElement("tr");
-        row.innerHTML = `
-          <td>${symbolLabel(position.code)}</td>
-          <td>${position.side}</td>
-          <td>${position.quantity}</td>
-          <td>${yen.format(position.average_cost)}</td>
-          <td>${yen.format(position.market_price)}</td>
-          <td>${
-            yen.format(
-              position.unrealized_profit_loss
-            )
-          }</td>
-        `;
-        body.appendChild(row);
-      }
-    }
-
-    function renderStrategies(payload) {
-      document.getElementById(
-        "strategy-date"
-      ).textContent = payload.trading_date ?? "—";
-
-      const grid = document.getElementById(
-        "strategy-grid"
-      );
-      grid.innerHTML = "";
-
-      for (const strategy of payload.strategies) {
-        const card = document.createElement("article");
-        card.className = "strategy-card";
-        card.innerHTML = `
-          <div class="strategy-title">
-            <h3>${strategy.strategy_name}</h3>
-            <strong>${
-              yen.format(
-                strategy.net_profit_loss
-              )
-            }</strong>
-          </div>
-          <dl>
-            <div>
-              <dt>Signals</dt>
-              <dd>${strategy.signal_count}</dd>
-            </div>
-            <div>
-              <dt>Executions</dt>
-              <dd>${strategy.execution_count}</dd>
-            </div>
-            <div>
-              <dt>Trades</dt>
-              <dd>${strategy.completed_trade_count}</dd>
-            </div>
-            <div>
-              <dt>Win Rate</dt>
-              <dd>${
-                valueOrDash(
-                  strategy.win_rate,
-                  percent.format
-                )
-              }</dd>
-            </div>
-            <div>
-              <dt>Profit Factor</dt>
-              <dd>${
-                strategy.profit_factor === null
-                  ? "—"
-                  : (
-                    Number.isFinite(
-                      strategy.profit_factor
-                    )
-                      ? strategy.profit_factor.toFixed(2)
-                      : "∞"
-                  )
-              }</dd>
-            </div>
-            <div>
-              <dt>Candidates</dt>
-              <dd>${strategy.candidate_count}</dd>
-            </div>
-          </dl>
-        `;
-        grid.appendChild(card);
-      }
-    }
-
-
-
-    function renderBreakdownList(
-      elementId,
-      rows
-    ) {
-      const element = document.getElementById(
-        elementId
-      );
-      element.innerHTML = "";
-
-      if (rows.length === 0) {
-        element.innerHTML = `
-          <p class="breakdown-empty">No data yet.</p>
-        `;
-        return;
-      }
-
-      for (const row of rows) {
-        const item = document.createElement("div");
-        item.className = "breakdown-row";
-        item.innerHTML = `
-          <div>
-            <strong>${row.label}</strong>
-            <small>${row.trade_count} trades</small>
-          </div>
-          <div>
-            <b>${yen.format(row.net_profit_loss)}</b>
-            <small>${
-              row.win_rate === null
-                ? "—"
-                : percent.format(row.win_rate)
-            } win</small>
-          </div>
-        `;
-        element.appendChild(item);
-      }
-    }
-
-    function renderBreakdown(payload) {
-      renderBreakdownList(
-        "breakdown-weekday",
-        payload.weekday
-      );
-      renderBreakdownList(
-        "breakdown-entry-hour",
-        payload.entry_hour
-      );
-      renderBreakdownList(
-        "breakdown-symbol",
-        payload.symbol
-      );
-      renderBreakdownList(
-        "breakdown-exit-reason",
-        payload.exit_reason
-      );
-    }
-
-    function renderPerformance(payload) {
-      const period = document.getElementById(
-        "performance-period"
-      );
-      const ranking = document.getElementById(
-        "performance-ranking"
-      );
-
-      period.textContent = (
-        payload.period_start || payload.period_end
-          ? `${
-              payload.period_start ?? "—"
-            } → ${
-              payload.period_end ?? "—"
-            }`
-          : "All completed trades"
-      );
-      ranking.innerHTML = "";
-
-      if (payload.rankings.length === 0) {
-        ranking.innerHTML = `
-          <article class="performance-empty">
-            Trade Journalに完了トレードがまだありません。
-          </article>
-        `;
-        return;
-      }
-
-      payload.rankings.forEach(
-        (strategy, index) => {
-          const card = document.createElement("article");
-          card.className = "performance-card";
-          card.innerHTML = `
-            <div class="performance-rank">
-              <span>#${index + 1}</span>
-              <div>
-                <h3>${strategy.strategy_name}</h3>
-                <small>${strategy.trade_count} completed trades</small>
-              </div>
-              <strong>${strategy.score.toFixed(1)}</strong>
-            </div>
-            <div class="performance-score-bar">
-              <span style="width:${strategy.score}%"></span>
-            </div>
-            <dl class="performance-metrics">
-              <div>
-                <dt>Net P/L</dt>
-                <dd>${yen.format(strategy.net_profit_loss)}</dd>
-              </div>
-              <div>
-                <dt>Win Rate</dt>
-                <dd>${
-                  strategy.win_rate === null
-                    ? "—"
-                    : percent.format(strategy.win_rate)
-                }</dd>
-              </div>
-              <div>
-                <dt>Profit Factor</dt>
-                <dd>${
-                  strategy.profit_factor === null
-                    ? "—"
-                    : (
-                      Number.isFinite(strategy.profit_factor)
-                        ? strategy.profit_factor.toFixed(2)
-                        : "∞"
-                    )
-                }</dd>
-              </div>
-              <div>
-                <dt>Expectancy</dt>
-                <dd>${
-                  strategy.expectancy === null
-                    ? "—"
-                    : yen.format(strategy.expectancy)
-                }</dd>
-              </div>
-              <div>
-                <dt>Average Hold</dt>
-                <dd>${
-                  strategy.average_holding_minutes === null
-                    ? "—"
-                    : `${strategy.average_holding_minutes.toFixed(1)} min`
-                }</dd>
-              </div>
-              <div>
-                <dt>Max Drawdown</dt>
-                <dd>${yen.format(strategy.maximum_drawdown)}</dd>
-              </div>
-            </dl>
-          `;
-          ranking.appendChild(card);
-        }
-      );
-    }
-
-    function renderRecentTrades(trades) {
-      const body = document.getElementById(
-        "recent-trades-body"
-      );
-      body.innerHTML = "";
-
-      if (trades.length === 0) {
-        body.innerHTML = `
-          <tr>
-            <td colspan="7" class="muted">
-              No executions yet.
-            </td>
-          </tr>
-        `;
-        return;
-      }
-
-      for (const trade of trades) {
-        const row = document.createElement("tr");
-        row.innerHTML = `
-          <td>${trade.executed_at}</td>
-          <td>${trade.strategy_name}</td>
-          <td>${symbolLabel(trade.code)}</td>
-          <td>${trade.side}</td>
-          <td>${trade.quantity}</td>
-          <td>${yen.format(trade.execution_price)}</td>
-          <td>${
-            yen.format(
-              trade.commission + trade.slippage
-            )
-          }</td>
-        `;
-        body.appendChild(row);
-      }
-    }
-
-    async function refreshDashboard() {
-      const [
-        summaryResponse,
-        strategyResponse,
-        performanceResponse,
-        breakdownResponse,
-        serviceStatusResponse,
-        readinessResponse,
-        scheduleResponse,
-        runtimeResponse,
-        dailyReportResponse,
-        morningPreflightResponse,
-        dynamicWatchlistResponse,
-        universeHistoryResponse,
-        watchlistIntegrityResponse,
-        symbolNamesResponse,
-        fullDayValidationResponse
-      ] = await Promise.all([
-        fetch("/api/dashboard/summary"),
-        fetch("/api/dashboard/strategies"),
-        fetch("/api/dashboard/performance"),
-        fetch("/api/dashboard/performance-breakdown"),
-        fetch("/api/dashboard/service-status"),
-        fetch("/api/dashboard/operational-readiness"),
-        fetch("/api/dashboard/paper-trading-schedule"),
-        fetch("/api/dashboard/paper-trading-runtime"),
-        fetch("/api/dashboard/daily-report"),
-        fetch("/api/dashboard/morning-preflight"),
-        fetch("/api/dashboard/dynamic-watchlist"),
-        fetch("/api/dashboard/universe-history"),
-        fetch("/api/dashboard/watchlist-execution-integrity"),
-        fetch("/api/dashboard/symbol-names", { cache: "no-store" }),
-        fetch("/api/dashboard/full-day-validation")
+    async function refresh() {
+      const [summary,runtime,watchlist,strategies,service,fullDay,namesPayload] = await Promise.all([
+        getJson("/api/dashboard/summary"),
+        getJson("/api/dashboard/paper-trading-runtime"),
+        getJson("/api/dashboard/dynamic-watchlist"),
+        getJson("/api/dashboard/strategies"),
+        getJson("/api/dashboard/service-status"),
+        getJson("/api/dashboard/full-day-validation"),
+        getJson("/api/dashboard/symbol-names")
       ]);
 
-      if (
-        !summaryResponse.ok
-        || !strategyResponse.ok
-        || !performanceResponse.ok
-        || !breakdownResponse.ok
-        || !serviceStatusResponse.ok
-        || !readinessResponse.ok
-        || !scheduleResponse.ok
-        || !runtimeResponse.ok
-        || !dailyReportResponse.ok
-        || !morningPreflightResponse.ok
-        || !dynamicWatchlistResponse.ok
-        || !universeHistoryResponse.ok
-        || !watchlistIntegrityResponse.ok
-        || !symbolNamesResponse.ok
-        || !fullDayValidationResponse.ok
-      ) {
-        throw new Error(
-          "Dashboard API request failed."
-        );
-      }
+      const snapshot = summary.snapshot ?? {};
+      const portfolio = snapshot.portfolio ?? {};
+      const live = snapshot.live_summary ?? {};
+      const health = snapshot.system_health ?? {};
+      const names = namesPayload.symbol_names ?? namesPayload.names ?? namesPayload ?? {};
+      const runtimeToday = runtime.available === true && String(runtime.trading_date ?? "") === todayKey();
+      const todayPl = runtimeToday ? (runtime.realized_profit_loss ?? runtime.session_equity_change ?? runtime.net_profit_loss ?? null) : null;
 
-      const data = await summaryResponse.json();
-      const strategyData = (
-        await strategyResponse.json()
-      );
-      const performanceData = (
-        await performanceResponse.json()
-      );
-      const breakdownData = (
-        await breakdownResponse.json()
-      );
-      const serviceStatusData = (
-        await serviceStatusResponse.json()
-      );
-      const readinessData = (
-        await readinessResponse.json()
-      );
-      const scheduleData = (
-        await scheduleResponse.json()
-      );
-      const runtimeData = (
-        await runtimeResponse.json()
-      );
-      const dailyReportData = (
-        await dailyReportResponse.json()
-      );
-      const morningPreflightData = (
-        await morningPreflightResponse.json()
-      );
-      const dynamicWatchlistData = (
-        await dynamicWatchlistResponse.json()
-      );
-      const universeHistoryData = (
-        await universeHistoryResponse.json()
-      );
-      const watchlistIntegrityData = (
-        await watchlistIntegrityResponse.json()
-      );
-      const symbolNamesPayload = (
-        await symbolNamesResponse.json()
-      );
-      const fullDayValidationData = (
-        await fullDayValidationResponse.json()
-      );
-      symbolNames = symbolNamesPayload?.names ?? {};
-      const snapshot = data.snapshot;
-      const daily = data.daily_history ?? [];
-      const analytics = data.analytics ?? {};
-      const todayKey = todayJstDateKey();
-      const today = daily.find(row => (
-        String(
-          row.trading_date
-          ?? row.date
-          ?? row.report_date
-          ?? ""
-        ) === todayKey
-      )) ?? null;
-      const runtimeIsToday = (
-        runtimeData?.available === true
-        && String(runtimeData.trading_date ?? "") === todayKey
-      );
-      const runtimeTodayProfitLoss = runtimeIsToday
-        ? (
-          runtimeData.realized_profit_loss
-          ?? runtimeData.session_equity_change
-          ?? runtimeData.net_profit_loss
-        )
-        : null;
-      const todayProfitLoss = (
-        runtimeTodayProfitLoss
-        ?? today?.net_profit_loss
-        ?? null
-      );
-      const portfolio = snapshot.portfolio;
-      const live = snapshot.live_summary;
-      const health = snapshot.system_health;
+      document.getElementById("updated-at").textContent = `Updated: ${formatJst(summary.generated_at)}`;
+      document.getElementById("today-pl").textContent = val(todayPl, yen.format);
+      document.getElementById("realized-pl").textContent = val(runtime.realized_profit_loss, yen.format);
+      document.getElementById("unrealized-pl").textContent = val(runtime.unrealized_profit_loss, yen.format);
+      document.getElementById("position-count").textContent = runtime.portfolio_position_count ?? portfolio.position_count ?? 0;
+      document.getElementById("signal-count").textContent = runtime.signal_count ?? live.signal_count ?? 0;
+      document.getElementById("execution-count").textContent = runtime.execution_count ?? live.execution_count ?? 0;
 
-      document.getElementById(
-        "updated-at"
-      ).textContent = `Updated: ${data.generated_at}`;
-      document.getElementById(
-        "today-pl"
-      ).textContent = valueOrDash(
-        todayProfitLoss,
-        yen.format
-      );
-      document.getElementById(
-        "cumulative-pl"
-      ).textContent = yen.format(
-        data.cumulative_profit_loss
-      );
-      document.getElementById(
-        "daily-win-rate"
-      ).textContent = valueOrDash(
-        analytics.daily_win_rate,
-        percent.format
-      );
-      document.getElementById(
-        "maximum-drawdown"
-      ).textContent = valueOrDash(
-        analytics.maximum_drawdown,
-        percent.format
-      );
-      document.getElementById(
-        "signal-count"
-      ).textContent = valueOrDash(
-        live?.signal_count
-      );
-      document.getElementById(
-        "execution-count"
-      ).textContent = valueOrDash(
-        live?.execution_count
-      );
-      document.getElementById(
-        "broker-equity"
-      ).textContent = valueOrDash(
-        portfolio?.broker_equity,
-        yen.format
-      );
-      document.getElementById(
-        "position-count"
-      ).textContent = valueOrDash(
-        portfolio?.position_count
-      );
+      status(document.getElementById("system-status"), health.status ?? (snapshot.partial ? "partial" : "available"));
+      status(document.getElementById("runtime-state"), runtime.state ?? runtime.status ?? (runtime.available ? "running" : "unknown"));
+      document.getElementById("runtime-date").textContent = runtime.trading_date ?? "—";
+      document.getElementById("runtime-pid").textContent = runtime.pid ?? "—";
+      document.getElementById("runtime-cycles").textContent = runtime.cycle_count ?? runtime.cycles ?? "—";
+      document.getElementById("runtime-failed").textContent = runtime.failed_cycle_count ?? runtime.failed_cycles ?? "—";
+      document.getElementById("runtime-message").textContent = runtime.message ?? "—";
 
-      const status = health?.status ?? (
-        snapshot.partial
-          ? "partial"
-          : "available"
-      );
-      const statusElement = document.getElementById(
-        "system-status"
-      );
-      statusElement.textContent = status.toUpperCase();
-      statusElement.dataset.status = status;
+      const kabu = service.kabu_station ?? service.kabu ?? {};
+      document.getElementById("kabu-state").textContent = kabu.readiness ?? kabu.status ?? service.kabu_station_readiness ?? "—";
+      document.getElementById("service-state").textContent = service.state ?? service.status ?? "—";
 
-      renderDesktopDynamicWatchlist(
-        dynamicWatchlistData
-      );
-      renderUniverseHistory(universeHistoryData);
-      renderWatchlistExecutionIntegrity(
-        watchlistIntegrityData
-      );
-      renderFullDayValidation(
-        fullDayValidationData
-      );
-      renderDesktopMorningPreflight(
-        morningPreflightData
-      );
-      renderDailyReport(dailyReportData);
-      renderPaperTradingSchedule(scheduleData);
-      renderOperationalReadiness(readinessData);
-      renderServiceStatus(serviceStatusData);
-      renderPerformance(performanceData);
-      renderBreakdown(breakdownData);
-      renderStrategies(strategyData);
-      renderRecentTrades(
-        strategyData.recent_trades
-      );
-      renderPositions(
-        portfolio?.positions ?? []
-      );
-      lineChart(
-        "equity-chart",
-        daily,
-        "final_equity",
-        yen.format
-      );
-      barChart(
-        "daily-pl-chart",
-        daily,
-        "net_profit_loss",
-        yen.format
-      );
-      lineChart(
-        "cumulative-pl-chart",
-        daily,
-        "cumulative_profit_loss",
-        yen.format
-      );
-      lineChart(
-        "drawdown-chart",
-        daily,
-        "drawdown",
-        percent.format
-      );
+      renderWatchlist(watchlist, names);
+      renderTrades(strategies.recent_trades ?? [], names);
+      renderPositions(portfolio.positions ?? runtime.positions ?? [], names);
 
-      document.getElementById(
-        "system-details"
-      ).textContent = JSON.stringify(
-        {
-          broker: snapshot.broker,
-          runtime_resource: (
-            snapshot.runtime_resource
-          ),
-          analytics,
-          errors: snapshot.errors
-        },
-        null,
-        2
-      );
+      status(document.getElementById("full-day-state"), fullDay.state ?? "unknown");
+      document.getElementById("full-day-message").textContent = fullDay.message ?? "Full-Day Validation has not been loaded yet.";
     }
 
-    refreshDashboard().catch(error => {
-      document.getElementById(
-        "system-details"
-      ).textContent = (
-        error instanceof Error
-          ? error.message
-          : String(error)
-      );
-    });
-
-    window.setInterval(
-      refreshDashboard,
-      30000
-    );
+    refresh();
+    window.setInterval(refresh, 30000);
   </script>
 </body>
 </html>
