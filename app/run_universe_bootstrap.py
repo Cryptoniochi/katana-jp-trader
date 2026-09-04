@@ -70,6 +70,19 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--request-timeout-seconds",
         type=float,
         default=4.0,
+        help=(
+            "Board再試行を含む通常API要求のtimeout秒数。"
+            "現行本番値は4.0秒です。"
+        ),
+    )
+    parser.add_argument(
+        "--board-first-attempt-timeout-seconds",
+        type=float,
+        default=0.75,
+        help=(
+            "Board初回要求だけに使う短いtimeout秒数。"
+            "現行本番値は0.75秒です。"
+        ),
     )
     parser.add_argument(
         "--maximum-attempts",
@@ -80,6 +93,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--retry-backoff-seconds",
         type=float,
         default=1.0,
+        help=(
+            "Board再試行前の固定待機秒数。通常運用は1.0秒。"
+            "Sprint 131-13の実験では0.0秒を明示指定します。"
+        ),
     )
     parser.add_argument(
         "--minimum-success-ratio",
@@ -96,6 +113,28 @@ def build_argument_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path(
             "reports/universe/bootstrap_latest.json"
+        ),
+    )
+    parser.add_argument(
+        "--parallel-workers",
+        type=int,
+        default=1,
+        choices=(1, 2),
+        help=(
+            "Board取得の並列ワーカー数。通常は1。"
+            "実験時のみ2を指定します。"
+        ),
+    )
+    parser.add_argument(
+        "--board-metrics-report-path",
+        type=Path,
+        default=Path(
+            "reports/universe/board_metrics_latest.json"
+        ),
+        help=(
+            "Board API計測レポートの出力先。"
+            "Bootstrap CLIが明示的に所有し、Collector単体では"
+            "本番レポートを書きません。"
         ),
     )
     return parser
@@ -188,6 +227,11 @@ def run(arguments: Sequence[str] | None = None) -> int:
         maximum_attempts=parsed.maximum_attempts,
         retry_backoff_seconds=parsed.retry_backoff_seconds,
         progress_reporter=lambda message: print(message, flush=True),
+        metrics_report_path=parsed.board_metrics_report_path,
+        board_first_attempt_timeout_seconds=(
+            parsed.board_first_attempt_timeout_seconds
+        ),
+        parallel_workers=parsed.parallel_workers,
     )
 
     service = UniverseBootstrapService(

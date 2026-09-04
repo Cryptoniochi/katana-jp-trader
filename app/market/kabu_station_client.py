@@ -172,14 +172,21 @@ class KabuStationClient:
     def board(
         self,
         symbol: KabuStationSymbol,
+        *,
+        timeout_seconds: float | None = None,
     ) -> JsonObject:
-        """指定銘柄の現在値・板情報を取得する。"""
+        """指定銘柄の現在値・板情報を取得する。
+
+        timeout_secondsを指定した場合は、このBoard要求だけに適用する。
+        token/register/unregisterや他のBoard要求の既定timeoutは変更しない。
+        """
 
         self._ensure_token()
         return self._request(
             "GET",
             f"/board/{symbol.code}@{symbol.exchange}",
             payload=None,
+            timeout_seconds=timeout_seconds,
         )
 
     def symbol_name(
@@ -217,8 +224,19 @@ class KabuStationClient:
         *,
         payload: JsonObject | None,
         authenticated: bool = True,
+        timeout_seconds: float | None = None,
     ) -> JsonObject:
         """JSON APIを呼び出して応答を検証する。"""
+
+        resolved_timeout_seconds = (
+            self.settings.timeout_seconds
+            if timeout_seconds is None
+            else float(timeout_seconds)
+        )
+        if resolved_timeout_seconds <= 0:
+            raise ValueError(
+                "要求タイムアウト秒数は0より大きい必要があります。"
+            )
 
         headers = {
             "Content-Type": "application/json",
@@ -247,7 +265,7 @@ class KabuStationClient:
                 url,
                 headers,
                 body,
-                self.settings.timeout_seconds,
+                resolved_timeout_seconds,
             )
         except KabuStationConnectionError:
             raise

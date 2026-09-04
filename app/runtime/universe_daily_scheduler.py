@@ -54,7 +54,7 @@ class UniverseDailyScheduler:
         marker_directory: Path = Path(
             "reports/service/universe_daily"
         ),
-        maximum_symbols_per_run: int = 300,
+        maximum_symbols_per_run: int = 50,
         maximum_primary_symbols: int = 300,
         maximum_purchase_amount: float = 950_000.0,
         minimum_completion_ratio: float = 0.99,
@@ -246,7 +246,6 @@ class UniverseDailyScheduler:
         self.last_exit_code = bootstrap_exit_code
         payload = self._read_json(self.report_path)
 
-        # 旧collector reportとの互換性は維持する。
         if "requested_count" in payload:
             return self._handle_legacy_report(
                 now=now,
@@ -315,7 +314,6 @@ class UniverseDailyScheduler:
                 ),
             )
 
-        # Sprint 124: Bootstrapの自己申告だけで完了扱いにしない。
         try:
             audit = self.history_audit_service.audit(
                 trading_date=target_date
