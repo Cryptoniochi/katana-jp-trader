@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import time
+import traceback
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +52,9 @@ class UniverseDailyScheduler:
         audit_report_path: Path = Path(
             "reports/universe/daily_history_audit_latest.json"
         ),
+        crash_report_path: Path = Path(
+            "reports/service/universe_daily_scheduler_crash.json"
+        ),
         marker_directory: Path = Path(
             "reports/service/universe_daily"
         ),
@@ -92,6 +96,7 @@ class UniverseDailyScheduler:
         self.candidate_output_path = Path(candidate_output_path)
         self.unavailable_path = Path(unavailable_path)
         self.audit_report_path = Path(audit_report_path)
+        self.crash_report_path = Path(crash_report_path)
         self.marker_directory = Path(marker_directory)
         self.maximum_symbols_per_run = int(maximum_symbols_per_run)
         self.maximum_primary_symbols = int(maximum_primary_symbols)
@@ -578,9 +583,98 @@ class UniverseDailyScheduler:
         poll_interval_seconds: float = 30.0,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        """Schedulerを継続実行し、1サイクルの予期しない例外から自己復旧する。"""
+
         while not self._stop_requested:
-            self.run_once()
-            sleep(poll_interval_seconds)
+            try:
+                self.run_once()
+            except Exception as error:
+                self._handle_unexpected_cycle_error(error)
+
+            if not self._stop_requested:
+                sleep(poll_interval_seconds)
+
+    def _handle_unexpected_cycle_error(
+        self,
+        error: Exception,
+    ) -> UniverseDailyScheduleStatus:
+        """未捕捉例外を永続化し、FAILED状態にして次回再試行へつなぐ。"""
+
+        now = self._current_time()
+        business_day = self.calendar.is_business_day(now.date())
+        formatted_traceback = "".join(
+            traceback.format_exception(
+                type(error),
+                error,
+                error.__traceback__,
+            )
+        )
+
+        crash_payload = {
+            "generated_at": now.isoformat(),
+            "target_date": now.date().isoformat(),
+            "exception_type": type(error).__name__,
+            "exception_message": str(error),
+            "traceback": formatted_traceback,
+            "last_attempt_at": (
+                None
+                if self.last_attempt_at is None
+                else self.last_attempt_at.isoformat()
+            ),
+            "last_exit_code": self.last_exit_code,
+        }
+
+        try:
+            self._write_json_atomic(
+                self.crash_report_path,
+                crash_payload,
+            )
+        except Exception:
+            # 障害レポート書き込み失敗がScheduler本体を終了させないようにする。
+            pass
+
+        self._retry_after_monotonic = (
+            self.monotonic_provider()
+            + self.settings.retry_interval_seconds
+        )
+
+        try:
+            return self._publish(
+                now=now,
+                state=UniverseDailyScheduleState.FAILED,
+                business_day=business_day,
+                next_action_at=None,
+                requested_count=None,
+                collected_count=None,
+                success_ratio=None,
+                message=(
+                    "Universe Daily Scheduler recovered from an "
+                    "unexpected cycle error. "
+                    f"{type(error).__name__}: {error}"
+                ),
+            )
+        except Exception:
+            # status保存自体の障害でもrun_foreverを生存させる。
+            return UniverseDailyScheduleStatus(
+                generated_at=now,
+                target_date=now.date().isoformat(),
+                state=UniverseDailyScheduleState.FAILED,
+                business_day=business_day,
+                enabled=self.enabled,
+                next_action_at=None,
+                last_attempt_at=self.last_attempt_at,
+                last_exit_code=self.last_exit_code,
+                requested_count=None,
+                collected_count=None,
+                success_ratio=None,
+                message=(
+                    "Universe Daily Scheduler recovered from an "
+                    "unexpected cycle error, but status persistence "
+                    "also failed. "
+                    f"{type(error).__name__}: {error}"
+                ),
+                settings=self.settings,
+            )
 
     def request_stop(self) -> None:
         self._stop_requested = True
