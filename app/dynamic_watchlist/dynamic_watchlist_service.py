@@ -551,6 +551,8 @@ class DynamicWatchlistService:
                 breakout_ratio=breakout_ratio,
                 close_position_ratio=close_position_ratio,
                 pullback_depth_ratio=pullback_depth_ratio,
+                history_days=len(bars),
+                full_history_days=settings.minimum_history_days,
             )
         )
 
@@ -811,9 +813,33 @@ class DynamicWatchlistService:
 
         if candidate.exclusion_reasons:
             return False
+
+        # Dynamic Watchlist 2.0:
+        # Do not spend a scarce watchlist slot on a liquid but dormant stock.
+        # A candidate needs useful daily range, current participation, and a
+        # concrete strategy setup in addition to the aggregate score.
+        # Short-history fallback candidates are scored with an explicit
+        # history-maturity discount, and their volume/ATR estimates are not
+        # stable enough for the full opportunity gate.  Keep them available
+        # with a lower confidence threshold so the existing fallback contract
+        # remains intact while mature/developing names use the stricter gate.
+        if candidate.selection_tier == "fallback":
+            # Sprint 133-1:
+            # 履歴依存成分はFeature Engine側ですでに減衰済み。
+            # 当日情報で成立するORB等まで排除しないよう、
+            # aggregate thresholdだけをfallback向けに調整する。
+            return (
+                candidate.total_score >= 15.0
+                and cls._preferred_strategy_score(candidate) >= 2.5
+            )
+
         if candidate.total_score < 40.0:
             return False
-        return cls._preferred_strategy_score(candidate) >= 4.0
+        if candidate.atr_ratio < 0.012:
+            return False
+        if candidate.volume_ratio < 0.85:
+            return False
+        return cls._preferred_strategy_score(candidate) >= 5.0
 
     @staticmethod
     def _resolve_rating_tier(
@@ -827,13 +853,19 @@ class DynamicWatchlistService:
             return "B"
         return "C"
 
-    @staticmethod
+    @classmethod
     def _ranking_key(
+        cls,
         candidate: DynamicWatchlistCandidate,
-    ) -> tuple[float, float, str]:
+    ) -> tuple[float, float, float, float, str]:
+        # Prefer a concrete trade setup and current participation before
+        # falling back to long-run liquidity.  This prevents mega-cap names
+        # from occupying the list simply because they are always liquid.
         return (
             -candidate.total_score,
-            -candidate.average_turnover_20d,
+            -cls._preferred_strategy_score(candidate),
+            -candidate.volume_ratio,
+            -candidate.atr_ratio,
             candidate.code,
         )
 
@@ -1099,9 +1131,9 @@ class DynamicWatchlistService:
             "eligible_count": len(eligible),
             "selected_count": len(result.selected),
             "note": (
-                "Sprint 125 explainability only: trade_eligible reflects "
-                "the current Dynamic Watchlist eligibility rules. "
-                "No new ATR/range/volume hard filter is applied."
+                "Dynamic Watchlist 2.0: trade_eligible requires "
+                "aggregate quality, usable ATR, current relative volume, "
+                "and a concrete strategy setup."
             ),
             "candidates": rows,
         }

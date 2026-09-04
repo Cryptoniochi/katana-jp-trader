@@ -24,6 +24,8 @@ class DynamicWatchlistFeatureInput:
     breakout_ratio: float
     close_position_ratio: float
     pullback_depth_ratio: float
+    history_days: int = 20
+    full_history_days: int = 20
 
 
 class DynamicWatchlistFeatureEngine:
@@ -33,24 +35,33 @@ class DynamicWatchlistFeatureEngine:
         self,
         feature: DynamicWatchlistFeatureInput,
     ) -> DynamicWatchlistFeatureScores:
+        history_maturity = self._history_maturity(
+            history_days=feature.history_days,
+            full_history_days=feature.full_history_days,
+        )
+        # Dynamic Watchlist 2.0 / Sprint 133
+        #
+        # Static liquidity is necessary, but it must not dominate the ranking.
+        # Day-specific expansion (relative volume / volatility) receives more
+        # weight so that the list reacts to changing trading opportunities.
         liquidity = self._log_scale(
             feature.average_turnover_20d,
             lower=5_000_000.0,
             upper=5_000_000_000.0,
-            maximum=20.0,
+            maximum=10.0,
         )
         relative_volume = self._scale(
             feature.volume_ratio,
-            lower=0.5,
+            lower=0.75,
             upper=3.0,
-            maximum=15.0,
-        )
+            maximum=25.0,
+        ) * history_maturity
         volatility = self._bell_score(
             feature.atr_ratio,
-            ideal=0.035,
-            tolerance=0.03,
-            maximum=15.0,
-        )
+            ideal=0.04,
+            tolerance=0.035,
+            maximum=20.0,
+        ) * history_maturity
         gap = self._bell_score(
             abs(feature.gap_ratio),
             ideal=0.02,
@@ -61,14 +72,12 @@ class DynamicWatchlistFeatureEngine:
             abs(feature.vwap_distance_ratio),
             ideal=0.005,
             tolerance=0.025,
-            maximum=10.0,
-        )
+            maximum=5.0,
+        ) * history_maturity
 
         orb = self._orb_score(feature)
         pullback = self._pullback_score(feature)
-        high_breakout = self._high_breakout_score(
-            feature
-        )
+        high_breakout = self._high_breakout_score(feature)
 
         total = round(
             liquidity
@@ -112,77 +121,137 @@ class DynamicWatchlistFeatureEngine:
         self,
         feature: DynamicWatchlistFeatureInput,
     ) -> float:
-        score = fmean(
-            [
-                self._scale(
-                    feature.volume_ratio,
-                    lower=0.8,
-                    upper=2.5,
-                    maximum=5.0,
-                ),
-                self._bell_score(
-                    abs(feature.gap_ratio),
-                    ideal=0.02,
-                    tolerance=0.03,
-                    maximum=3.0,
-                ),
-                self._scale(
-                    feature.close_position_ratio,
-                    lower=0.45,
-                    upper=0.95,
-                    maximum=2.0,
-                ),
-            ]
-        ) * 3.0
-        return min(10.0, score)
+        """ORBは当日情報を残し、履歴依存部分だけ成熟度で減衰する。"""
+
+        maturity = self._history_maturity(
+            history_days=feature.history_days,
+            full_history_days=feature.full_history_days,
+        )
+        relative_volume = self._scale(
+            feature.volume_ratio,
+            lower=0.8,
+            upper=2.5,
+            maximum=4.0,
+        ) * maturity
+        gap = self._bell_score(
+            abs(feature.gap_ratio),
+            ideal=0.02,
+            tolerance=0.03,
+            maximum=2.0,
+        )
+        close_location = self._scale(
+            feature.close_position_ratio,
+            lower=0.45,
+            upper=0.95,
+            maximum=2.0,
+        )
+        volatility = self._bell_score(
+            feature.atr_ratio,
+            ideal=0.04,
+            tolerance=0.035,
+            maximum=2.0,
+        ) * maturity
+        return min(
+            10.0,
+            relative_volume + gap + close_location + volatility,
+        )
 
     def _pullback_score(
         self,
         feature: DynamicWatchlistFeatureInput,
     ) -> float:
+        """Pullbackは短期履歴では信頼度を下げて評価する。"""
+
+        maturity = self._history_maturity(
+            history_days=feature.history_days,
+            full_history_days=feature.full_history_days,
+        )
+        short_maturity = min(
+            1.0,
+            max(0.0, feature.history_days / 5.0),
+        )
         trend = self._scale(
             feature.return_20d,
-            lower=-0.05,
-            upper=0.20,
-            maximum=4.0,
-        )
+            lower=-0.03,
+            upper=0.18,
+            maximum=3.0,
+        ) * maturity
         pullback = self._bell_score(
             feature.pullback_depth_ratio,
             ideal=0.035,
             tolerance=0.04,
-            maximum=4.0,
-        )
-        vwap = self._bell_score(
-            abs(feature.vwap_distance_ratio),
-            ideal=0.005,
-            tolerance=0.02,
+            maximum=3.0,
+        ) * short_maturity
+        participation = self._scale(
+            feature.volume_ratio,
+            lower=0.75,
+            upper=2.0,
             maximum=2.0,
+        ) * maturity
+        volatility = self._bell_score(
+            feature.atr_ratio,
+            ideal=0.035,
+            tolerance=0.03,
+            maximum=2.0,
+        ) * maturity
+        return min(
+            10.0,
+            trend + pullback + participation + volatility,
         )
-        return min(10.0, trend + pullback + vwap)
 
     def _high_breakout_score(
         self,
         feature: DynamicWatchlistFeatureInput,
     ) -> float:
+        """High-breakoutは履歴依存部分を成熟度で減衰する。"""
+
+        maturity = self._history_maturity(
+            history_days=feature.history_days,
+            full_history_days=feature.full_history_days,
+        )
         breakout = self._scale(
             feature.breakout_ratio,
-            lower=-0.05,
+            lower=-0.02,
             upper=0.05,
-            maximum=3.0,
-        )
+            maximum=4.0,
+        ) * maturity
         trend = self._scale(
             feature.return_20d,
-            lower=-0.05,
-            upper=0.25,
-            maximum=1.0,
-        )
+            lower=-0.03,
+            upper=0.20,
+            maximum=2.0,
+        ) * maturity
         volume = self._scale(
             feature.volume_ratio,
             lower=0.8,
-            upper=3.0,
-            maximum=1.0,
+            upper=2.5,
+            maximum=2.5,
+        ) * maturity
+        volatility = self._bell_score(
+            feature.atr_ratio,
+            ideal=0.04,
+            tolerance=0.035,
+            maximum=1.5,
+        ) * maturity
+        return min(
+            10.0,
+            breakout + trend + volume + volatility,
         )
-        return min(5.0, breakout + trend + volume)
+
+    @staticmethod
+    def _history_maturity(
+        *,
+        history_days: int,
+        full_history_days: int,
+    ) -> float:
+        """履歴依存特徴量の信頼度を0～1で返す。"""
+
+        if full_history_days <= 0:
+            return 1.0
+        return min(
+            1.0,
+            max(0.0, history_days / full_history_days),
+        )
 
     @staticmethod
     def _preferred_strategy(
