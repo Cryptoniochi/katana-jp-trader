@@ -37,6 +37,7 @@ class ManagedProcessDefinition:
     restart_on_failure: bool = True
     restart_delay_seconds: float = 10.0
     maximum_restarts: int = 100
+    restart_budget_reset_after_seconds: float = 3600.0
     external_health_check: Callable[[], bool] | None = None
 
     def __post_init__(self) -> None:
@@ -56,6 +57,11 @@ class ManagedProcessDefinition:
             )
 
 
+
+        if self.restart_budget_reset_after_seconds <= 0:
+            raise ValueError(
+                "再起動予算の回復時間は0より大きい必要があります。"
+            )
 @dataclass(slots=True)
 class _ManagedProcess:
     definition: ManagedProcessDefinition
@@ -63,6 +69,7 @@ class _ManagedProcess:
     restart_count: int = 0
     last_exit_code: int | None = None
     started_at: datetime | None = None
+    started_monotonic: float | None = None
     restart_after_monotonic: float | None = None
     state: ManagedComponentState = (
         ManagedComponentState.STOPPED
@@ -216,12 +223,21 @@ class KatanaServiceManager:
                     component.state = (
                         ManagedComponentState.RUNNING
                     )
+                    self._reset_restart_budget_if_stable(
+                        component,
+                        now_monotonic,
+                    )
                     continue
 
+                self._reset_restart_budget_if_stable(
+                    component,
+                    now_monotonic,
+                )
                 component.last_exit_code = int(
                     exit_code
                 )
                 component.process = None
+                component.started_monotonic = None
 
                 if (
                     exit_code != 0
@@ -481,6 +497,9 @@ class KatanaServiceManager:
             if externally_healthy:
                 component.process = None
                 component.started_at = self._current_time()
+                component.started_monotonic = (
+                    self.monotonic_provider()
+                )
                 component.restart_after_monotonic = None
                 component.state = ManagedComponentState.RUNNING
                 component.message = (
@@ -525,6 +544,9 @@ class KatanaServiceManager:
 
         component.process = process
         component.started_at = self._current_time()
+        component.started_monotonic = (
+            self.monotonic_provider()
+        )
         component.restart_after_monotonic = None
         component.state = (
             ManagedComponentState.RUNNING
@@ -543,6 +565,34 @@ class KatanaServiceManager:
                 f"started. pid={process.pid}"
             ),
         )
+
+    def _reset_restart_budget_if_stable(
+        self,
+        component: _ManagedProcess,
+        now_monotonic: float,
+    ) -> None:
+        """十分に安定稼働した子プロセスの再起動回数を回復する。"""
+
+        if component.restart_count <= 0:
+            return
+
+        started_monotonic = component.started_monotonic
+
+        if started_monotonic is None:
+            return
+
+        stable_runtime_seconds = max(
+            0.0,
+            now_monotonic - started_monotonic,
+        )
+
+        if (
+            stable_runtime_seconds
+            < component.definition.restart_budget_reset_after_seconds
+        ):
+            return
+
+        component.restart_count = 0
 
     def _run_readiness_probe_if_due(
         self,
