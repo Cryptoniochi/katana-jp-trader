@@ -24,37 +24,24 @@ class ListedSymbol:
 
     def __post_init__(self) -> None:
         normalized = self.code.strip()
-
         if not normalized:
-            raise ValueError(
-                "銘柄コードを指定してください。"
-            )
-
+            raise ValueError("銘柄コードを指定してください。")
         if self.trading_unit <= 0:
-            raise ValueError(
-                "売買単位は0より大きい必要があります。"
-            )
-
+            raise ValueError("売買単位は0より大きい必要があります。")
         if self.updated_at.tzinfo is None:
-            raise ValueError(
-                "更新日時にはタイムゾーンが必要です。"
-            )
+            raise ValueError("更新日時にはタイムゾーンが必要です。")
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["listed_date"] = (
             self.listed_date.isoformat()
-            if self.listed_date is not None
-            else None
+            if self.listed_date is not None else None
         )
         payload["delisted_date"] = (
             self.delisted_date.isoformat()
-            if self.delisted_date is not None
-            else None
+            if self.delisted_date is not None else None
         )
-        payload["updated_at"] = (
-            self.updated_at.isoformat()
-        )
+        payload["updated_at"] = self.updated_at.isoformat()
         return payload
 
 
@@ -62,14 +49,8 @@ class ListedSymbol:
 class UniverseScreeningSettings:
     """全市場一次スクリーニング設定。"""
 
-    allowed_markets: tuple[str, ...] = (
-        "Prime",
-        "Standard",
-        "Growth",
-    )
-    allowed_security_types: tuple[str, ...] = (
-        "common_stock",
-    )
+    allowed_markets: tuple[str, ...] = ("Prime", "Standard", "Growth")
+    allowed_security_types: tuple[str, ...] = ("common_stock",)
     maximum_purchase_amount: float = 950_000.0
     minimum_latest_price: float = 100.0
     maximum_latest_price: float = 9_500.0
@@ -77,27 +58,19 @@ class UniverseScreeningSettings:
     minimum_average_volume: float = 5_000.0
     maximum_symbols: int = 300
     maximum_data_age_days: int = 45
+    lookback_days: int = 20
 
     def __post_init__(self) -> None:
         if self.maximum_purchase_amount <= 0:
-            raise ValueError(
-                "最大購入金額は0より大きい必要があります。"
-            )
+            raise ValueError("最大購入金額は0より大きい必要があります。")
         if self.minimum_latest_price < 0:
-            raise ValueError(
-                "最低株価は0以上です。"
-            )
-        if (
-            self.maximum_latest_price
-            <= self.minimum_latest_price
-        ):
-            raise ValueError(
-                "最高株価は最低株価より大きい必要があります。"
-            )
+            raise ValueError("最低株価は0以上です。")
+        if self.maximum_latest_price <= self.minimum_latest_price:
+            raise ValueError("最高株価は最低株価より大きい必要があります。")
         if self.maximum_symbols <= 0:
-            raise ValueError(
-                "最大候補数は0より大きい必要があります。"
-            )
+            raise ValueError("最大候補数は0より大きい必要があります。")
+        if self.lookback_days <= 0:
+            raise ValueError("参照日数は0より大きい必要があります。")
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,12 +90,19 @@ class UniverseScreeningCandidate:
     score: float
     exclusion_reasons: tuple[str, ...]
     selected: bool
+    atr_ratio: float = 0.0
+    volume_ratio: float = 0.0
+    return_5d: float = 0.0
+    breakout_ratio: float = 0.0
+    range_expansion_ratio: float = 0.0
+    gap_ratio: float = 0.0
+    close_position_ratio: float = 0.5
+    opportunity_score: float = 0.0
+    liquidity_score: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
-        payload["latest_trading_date"] = (
-            self.latest_trading_date.isoformat()
-        )
+        payload["latest_trading_date"] = self.latest_trading_date.isoformat()
         return payload
 
 
@@ -136,14 +116,8 @@ class UniverseScreeningReport:
     eligible_count: int
     selected_count: int
     settings: UniverseScreeningSettings
-    selected: tuple[
-        UniverseScreeningCandidate,
-        ...,
-    ]
-    excluded: tuple[
-        UniverseScreeningCandidate,
-        ...,
-    ]
+    selected: tuple[UniverseScreeningCandidate, ...]
+    excluded: tuple[UniverseScreeningCandidate, ...]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -153,12 +127,6 @@ class UniverseScreeningReport:
             "eligible_count": self.eligible_count,
             "selected_count": self.selected_count,
             "settings": asdict(self.settings),
-            "selected": [
-                item.to_dict()
-                for item in self.selected
-            ],
-            "excluded": [
-                item.to_dict()
-                for item in self.excluded
-            ],
+            "selected": [item.to_dict() for item in self.selected],
+            "excluded": [item.to_dict() for item in self.excluded],
         }
