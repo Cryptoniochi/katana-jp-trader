@@ -546,6 +546,66 @@ class RuntimeWatchlistSynchronizer:
         return runtime_codes
 
 
+class RuntimeStrategyRoutingSynchronizer:
+    """Dynamic Watchlistの戦略RoutingをCycle境界で同期する。"""
+
+    def __init__(
+        self,
+        *,
+        repository: DynamicWatchlistStrategyRoutingRepository,
+        signal_engine: RealtimeSignalEngine,
+        current_snapshot: StrategyRoutingSnapshot | None = None,
+        fail_open: bool = True,
+    ) -> None:
+        self.repository = repository
+        self.signal_engine = signal_engine
+        self.current_snapshot = current_snapshot
+        self.fail_open = fail_open
+
+    def synchronize(
+        self,
+    ) -> StrategyRoutingSnapshot | None:
+        """有効な新SnapshotだけをSignal Engineへ反映する。"""
+
+        try:
+            snapshot = self.repository.load()
+        except DynamicWatchlistStrategyRoutingError:
+            if self.fail_open:
+                return self.current_snapshot
+            raise
+
+        if self._routing_signature(snapshot) == self._routing_signature(
+            self.current_snapshot
+        ):
+            return self.current_snapshot
+
+        router = SymbolStrategyRouter(snapshot)
+        self.signal_engine.update_symbol_strategy_router(router)
+        self.current_snapshot = snapshot
+        return snapshot
+
+    @staticmethod
+    def _routing_signature(
+        snapshot: StrategyRoutingSnapshot | None,
+    ) -> tuple[object, ...] | None:
+        if snapshot is None:
+            return None
+
+        return (
+            snapshot.fallback_strategy_names,
+            tuple(
+                (
+                    route.code,
+                    route.strategy_name,
+                    route.rating_tier,
+                    route.total_score,
+                    route.strategy_score,
+                )
+                for route in snapshot.routes
+            ),
+        )
+
+
 class RuntimeWatchlistCycleRunner:
     """各Trading Cycle直前にRuntime Watchlistを同期する。"""
 
@@ -554,12 +614,20 @@ class RuntimeWatchlistCycleRunner:
         *,
         cycle_runner: TradingLoopComponent,
         synchronizer: RuntimeWatchlistSynchronizer,
+        strategy_routing_synchronizer: (
+            RuntimeStrategyRoutingSynchronizer | None
+        ) = None,
     ) -> None:
         self.cycle_runner = cycle_runner
         self.synchronizer = synchronizer
+        self.strategy_routing_synchronizer = (
+            strategy_routing_synchronizer
+        )
 
     def run_cycle(self):
         self.synchronizer.synchronize()
+        if self.strategy_routing_synchronizer is not None:
+            self.strategy_routing_synchronizer.synchronize()
         return self.cycle_runner.run_cycle()
 
 
@@ -901,27 +969,31 @@ class PaperTradingComposition:
 
         strategy_routing_snapshot = None
         symbol_strategy_router = None
+        strategy_routing_repository = None
 
         if settings.strategy_routing_enabled:
+            strategy_routing_repository = (
+                DynamicWatchlistStrategyRoutingRepository(
+                    report_path=(
+                        settings.strategy_routing_report_path
+                    ),
+                    minimum_rating_tier=(
+                        settings
+                        .strategy_routing_minimum_rating_tier
+                    ),
+                    minimum_total_score=(
+                        settings
+                        .strategy_routing_minimum_total_score
+                    ),
+                    fallback_strategy_names=(
+                        settings.enabled_strategy_names
+                    ),
+                    now_provider=resolved_now_provider,
+                )
+            )
             try:
                 strategy_routing_snapshot = (
-                    DynamicWatchlistStrategyRoutingRepository(
-                        report_path=(
-                            settings.strategy_routing_report_path
-                        ),
-                        minimum_rating_tier=(
-                            settings
-                            .strategy_routing_minimum_rating_tier
-                        ),
-                        minimum_total_score=(
-                            settings
-                            .strategy_routing_minimum_total_score
-                        ),
-                        fallback_strategy_names=(
-                            settings.enabled_strategy_names
-                        ),
-                        now_provider=resolved_now_provider,
-                    ).load()
+                    strategy_routing_repository.load()
                 )
                 symbol_strategy_router = SymbolStrategyRouter(
                     strategy_routing_snapshot
@@ -998,9 +1070,23 @@ class PaperTradingComposition:
             paper_broker=paper_broker,
             maximum_registered_symbols=50,
         )
+        runtime_strategy_routing_synchronizer = None
+        if strategy_routing_repository is not None:
+            runtime_strategy_routing_synchronizer = (
+                RuntimeStrategyRoutingSynchronizer(
+                    repository=strategy_routing_repository,
+                    signal_engine=signal_engine,
+                    current_snapshot=strategy_routing_snapshot,
+                    fail_open=settings.strategy_routing_fail_open,
+                )
+            )
+
         runtime_watchlist_cycle_runner = RuntimeWatchlistCycleRunner(
             cycle_runner=trading_loop_component,
             synchronizer=runtime_watchlist_synchronizer,
+            strategy_routing_synchronizer=(
+                runtime_strategy_routing_synchronizer
+            ),
         )
 
         runtime_bundle = PaperTradingRuntimeFactory.create(

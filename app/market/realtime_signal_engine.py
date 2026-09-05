@@ -160,6 +160,36 @@ class RealtimeSignalEngine:
             StrategyRouteDecision,
         ] = {}
 
+    def update_symbol_strategy_router(
+        self,
+        symbol_strategy_router: SymbolStrategyRouter | None,
+    ) -> tuple[str, ...]:
+        """Routerを更新し、実効Routeが変わった銘柄だけ再生成対象にする。"""
+
+        changed_codes: list[str] = []
+
+        for code in tuple(self._strategies):
+            previous = self._route_decisions.get(code)
+            next_decision = self._resolve_route_with_router(
+                code,
+                symbol_strategy_router,
+            )
+
+            if (
+                previous is None
+                or previous.strategy_names
+                != next_decision.strategy_names
+                or previous.routed != next_decision.routed
+            ):
+                strategy = self._strategies.pop(code, None)
+                if strategy is not None:
+                    strategy.reset()
+                self._route_decisions.pop(code, None)
+                changed_codes.append(code)
+
+        self.symbol_strategy_router = symbol_strategy_router
+        return tuple(changed_codes)
+
     def process(
         self,
         prices: Iterable[StockPrice],
@@ -374,7 +404,17 @@ class RealtimeSignalEngine:
         self,
         code: str,
     ) -> StrategyRouteDecision:
-        if self.symbol_strategy_router is None:
+        return self._resolve_route_with_router(
+            code,
+            self.symbol_strategy_router,
+        )
+
+    def _resolve_route_with_router(
+        self,
+        code: str,
+        symbol_strategy_router: SymbolStrategyRouter | None,
+    ) -> StrategyRouteDecision:
+        if symbol_strategy_router is None:
             return StrategyRouteDecision(
                 code=code,
                 strategy_names=self.enabled_strategy_names,
@@ -385,7 +425,7 @@ class RealtimeSignalEngine:
                 ),
             )
 
-        routed = self.symbol_strategy_router.resolve(code)
+        routed = symbol_strategy_router.resolve(code)
         allowed = tuple(
             name
             for name in routed.strategy_names

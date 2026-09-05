@@ -32,6 +32,19 @@ class SymbolStrategyRouter:
             for route in snapshot.routes
         }
 
+    def update_snapshot(
+        self,
+        snapshot: StrategyRoutingSnapshot,
+    ) -> None:
+        """以後の解決に使うRouting Snapshotを差し替える。"""
+
+        routes = {
+            route.code: route
+            for route in snapshot.routes
+        }
+        self.snapshot = snapshot
+        self._routes = routes
+
     def resolve(
         self,
         code: str,
