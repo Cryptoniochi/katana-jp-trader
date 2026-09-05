@@ -105,6 +105,27 @@ class TradingLoopComponent:
         self._next_cycle_number = 1
         self._last_session_report = None
 
+    def update_codes(
+        self,
+        codes: Iterable[str],
+    ) -> tuple[str, ...]:
+        """次回Cycleから監視対象銘柄を更新する。"""
+
+        normalized_codes = tuple(
+            dict.fromkeys(
+                code.strip()
+                for code in codes
+                if code.strip()
+            )
+        )
+        if not normalized_codes:
+            raise ValueError(
+                "監視対象銘柄を1件以上指定してください。"
+            )
+
+        self.codes = normalized_codes
+        return self.codes
+
     def run_cycle(self) -> TradingLoopCycleResult:
         """次のTrading Cycleを1回実行する。"""
 

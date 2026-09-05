@@ -141,6 +141,7 @@ from app.trading.signal_repository import SignalRepository
 from app.trading.trade_execution_repository import (
     TradeExecutionRepository,
 )
+from app.watchlist import WatchlistError, load_watchlist
 
 
 NowProvider = Callable[[], datetime]
@@ -484,6 +485,82 @@ class PaperTradingProductionSettings:
             "watchlist_execution_integrity_report_path",
             normalized_watchlist_execution_integrity_report_path.resolve(),
         )
+
+
+class RuntimeWatchlistSynchronizer:
+    """Watchlistと保有銘柄から稼働中Universeを同期する。"""
+
+    def __init__(
+        self,
+        *,
+        watchlist_path: Path,
+        trading_loop_component: TradingLoopComponent,
+        kabu_station_service: KabuStationRealtimeService,
+        paper_broker: PaperBroker,
+        maximum_registered_symbols: int = 50,
+    ) -> None:
+        if maximum_registered_symbols <= 0:
+            raise ValueError(
+                "最大登録銘柄数は0より大きい必要があります。"
+            )
+        self.watchlist_path = Path(watchlist_path)
+        self.trading_loop_component = trading_loop_component
+        self.kabu_station_service = kabu_station_service
+        self.paper_broker = paper_broker
+        self.maximum_registered_symbols = maximum_registered_symbols
+        self._last_watchlist_codes: tuple[str, ...] | None = None
+
+    def synchronize(self) -> tuple[str, ...]:
+        """変更時だけ保有銘柄優先でRuntime Universeを同期する。"""
+
+        try:
+            watchlist_codes = tuple(
+                load_watchlist(self.watchlist_path)
+            )
+        except (FileNotFoundError, WatchlistError):
+            return self.trading_loop_component.codes
+
+        if not watchlist_codes:
+            return self.trading_loop_component.codes
+
+        position_codes = tuple(
+            dict.fromkeys(
+                str(position.code).strip()
+                for position in self.paper_broker.list_positions()
+                if str(position.code).strip()
+            )
+        )
+        runtime_codes = tuple(
+            dict.fromkeys((*position_codes, *watchlist_codes))
+        )[: self.maximum_registered_symbols]
+
+        if (
+            watchlist_codes == self._last_watchlist_codes
+            and runtime_codes == self.trading_loop_component.codes
+        ):
+            return runtime_codes
+
+        self.kabu_station_service.update_registered_codes(runtime_codes)
+        self.trading_loop_component.update_codes(runtime_codes)
+        self._last_watchlist_codes = watchlist_codes
+        return runtime_codes
+
+
+class RuntimeWatchlistCycleRunner:
+    """各Trading Cycle直前にRuntime Watchlistを同期する。"""
+
+    def __init__(
+        self,
+        *,
+        cycle_runner: TradingLoopComponent,
+        synchronizer: RuntimeWatchlistSynchronizer,
+    ) -> None:
+        self.cycle_runner = cycle_runner
+        self.synchronizer = synchronizer
+
+    def run_cycle(self):
+        self.synchronizer.synchronize()
+        return self.cycle_runner.run_cycle()
 
 
 @dataclass(frozen=True, slots=True)
@@ -914,9 +991,21 @@ class PaperTradingComposition:
             continue_on_notification_error=True,
         )
 
+        runtime_watchlist_synchronizer = RuntimeWatchlistSynchronizer(
+            watchlist_path=settings.watchlist_path,
+            trading_loop_component=trading_loop_component,
+            kabu_station_service=kabu_station_service,
+            paper_broker=paper_broker,
+            maximum_registered_symbols=50,
+        )
+        runtime_watchlist_cycle_runner = RuntimeWatchlistCycleRunner(
+            cycle_runner=trading_loop_component,
+            synchronizer=runtime_watchlist_synchronizer,
+        )
+
         runtime_bundle = PaperTradingRuntimeFactory.create(
             database_path=settings.database_path,
-            cycle_runner=trading_loop_component,
+            cycle_runner=runtime_watchlist_cycle_runner,
             portfolio_reader=portfolio_service,
             now_provider=resolved_now_provider,
         )

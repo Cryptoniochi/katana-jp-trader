@@ -97,6 +97,49 @@ class KabuStationRealtimeService:
         websocket_client.start()
         return self._registered_codes
 
+    def update_registered_codes(
+        self,
+        codes: Iterable[str],
+    ) -> tuple[str, ...]:
+        """PUSH受信を継続したまま登録銘柄集合を更新する。"""
+
+        normalized_codes = tuple(
+            dict.fromkeys(
+                code.strip()
+                for code in codes
+                if code.strip()
+            )
+        )
+        if not normalized_codes:
+            raise ValueError(
+                "リアルタイム配信対象を指定してください。"
+            )
+        if normalized_codes == self._registered_codes:
+            return self._registered_codes
+
+        previous_codes = self._registered_codes
+        try:
+            self.provider.unregister_all()
+            registered = self.provider.register_codes(
+                normalized_codes
+            )
+        except Exception:
+            if previous_codes:
+                try:
+                    self.provider.unregister_all()
+                    self._registered_codes = (
+                        self.provider.register_codes(previous_codes)
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "kabuステーション登録銘柄の"
+                        "ロールバックに失敗しました。"
+                    )
+            raise
+
+        self._registered_codes = registered
+        return self._registered_codes
+
     def stop(self) -> tuple[RealtimeBar, ...]:
         """PUSH受信を停止し、途中バーを返す。"""
 
