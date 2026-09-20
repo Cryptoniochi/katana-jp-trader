@@ -119,7 +119,7 @@ def test_initialize_database_creates_recovery_tables(
     assert "recovery_history" in tables
     assert "recovery_attempts" in tables
     assert version_row == (SCHEMA_VERSION,)
-    assert SCHEMA_VERSION == 12
+    assert SCHEMA_VERSION == 14
 
 
 def test_repository_is_empty_initially(

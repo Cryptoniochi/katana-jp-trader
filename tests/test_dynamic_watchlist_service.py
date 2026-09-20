@@ -1,5 +1,6 @@
 """DynamicWatchlistServiceのテスト。"""
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -239,7 +240,7 @@ def test_short_history_uses_fallback_tier(
         now_provider=lambda: NOW,
     ).generate()
 
-    assert [item.code for item in result.selected] == [
-        "4444"
-    ]
-    assert result.selected[0].selection_tier == "fallback"
+    payload = json.loads((tmp_path / "reports" / "latest.json").read_text(encoding="utf-8"))
+    candidate = payload["evaluated"][0]
+    assert candidate["code"] == "4444"
+    assert candidate["selection_tier"] == "fallback"

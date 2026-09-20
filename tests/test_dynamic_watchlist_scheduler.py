@@ -21,6 +21,11 @@ def build_scheduler(
     command_runner,
     now: datetime,
 ) -> DynamicWatchlistScheduler:
+    candidate_universe = tmp_path / "candidates.txt"
+    candidate_universe.write_text(
+        "\n".join(str(1000 + index) for index in range(5)) + "\n",
+        encoding="utf-8",
+    )
     return DynamicWatchlistScheduler(
         enabled=True,
         database_path=tmp_path / "katana.db",
@@ -29,12 +34,14 @@ def build_scheduler(
         status_path=tmp_path / "schedule.json",
         latest_report_path=tmp_path / "reports" / "latest.json",
         marker_directory=tmp_path / "markers",
+        candidate_universe_path=candidate_universe,
         settings=DynamicWatchlistScheduleSettings(
             minimum_symbols=5
         ),
         calendar=TokyoMarketCalendar.with_custom_holidays([]),
         now_provider=lambda: now,
         command_runner=command_runner,
+        symbol_name_resolver=SimpleNamespace(resolve=lambda _codes: {}),
     )
 
 

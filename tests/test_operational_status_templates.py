@@ -7,7 +7,7 @@ from app.dashboard.dashboard_web_app import (
 )
 
 
-def test_mobile_labels_data_status_separately() -> None:
+def test_mobile_displays_runtime_and_watchlist_status() -> None:
     content = (
         Path(TEMPLATE_DIRECTORY)
         / "mobile_dashboard.html"
@@ -15,12 +15,12 @@ def test_mobile_labels_data_status_separately() -> None:
         encoding="utf-8"
     )
 
-    assert 'class="mobile-data-status"' in content
-    assert "Data completeness and service health" in content
-    assert '"stale"' in content
+    assert "mobile-runtime-state" in content
+    assert "mobile-watchlist-state" in content
+    assert "dataset.status" in content
 
 
-def test_desktop_supports_stale_service_state() -> None:
+def test_desktop_displays_service_state() -> None:
     content = (
         Path(TEMPLATE_DIRECTORY)
         / "dashboard.html"
@@ -28,5 +28,5 @@ def test_desktop_supports_stale_service_state() -> None:
         encoding="utf-8"
     )
 
-    assert '"stale"' in content
-    assert "status_age_seconds" in content
+    assert "/api/dashboard/service-status" in content
+    assert "service-state" in content

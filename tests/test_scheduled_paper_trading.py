@@ -77,6 +77,7 @@ def test_business_day_starts_market_session(
         ),
         popen_factory=lambda *_args, **_kwargs: process,
         readiness_check_enabled=False,
+        autonomous_guard_enabled=False,
     )
 
     status = controller.run_once()

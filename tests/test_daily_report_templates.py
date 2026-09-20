@@ -7,7 +7,7 @@ from app.dashboard.dashboard_web_app import (
 )
 
 
-def test_desktop_contains_daily_report_panel() -> None:
+def test_desktop_contains_end_of_day_panel() -> None:
     content = (
         Path(TEMPLATE_DIRECTORY)
         / "dashboard.html"
@@ -15,13 +15,12 @@ def test_desktop_contains_daily_report_panel() -> None:
         encoding="utf-8"
     )
 
-    assert "Daily Trading Report" in content
-    assert "/api/dashboard/daily-report" in content
-    assert "daily-report-strategies" in content
-    assert "daily-report-symbols" in content
+    assert "End-of-Day Check" in content
+    assert "/api/dashboard/full-day-validation" in content
+    assert "full-day-state" in content
 
 
-def test_mobile_contains_daily_report_panel() -> None:
+def test_mobile_contains_end_of_day_panel() -> None:
     content = (
         Path(TEMPLATE_DIRECTORY)
         / "mobile_dashboard.html"
@@ -29,7 +28,6 @@ def test_mobile_contains_daily_report_panel() -> None:
         encoding="utf-8"
     )
 
-    assert "Daily Report" in content
-    assert "/api/dashboard/daily-report" in content
-    assert "mobile-daily-report-strategies" in content
-    assert "mobile-daily-report-symbols" in content
+    assert "End-of-Day Check" in content
+    assert "/api/dashboard/full-day-validation" in content
+    assert "mobile-full-day-state" in content

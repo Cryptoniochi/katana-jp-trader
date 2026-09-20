@@ -7,7 +7,7 @@ from app.dashboard.dashboard_web_app import (
 )
 
 
-def test_mobile_contains_readiness_panel() -> None:
+def test_mobile_contains_runtime_health_panel() -> None:
     content = (
         Path(TEMPLATE_DIRECTORY)
         / "mobile_dashboard.html"
@@ -15,12 +15,12 @@ def test_mobile_contains_readiness_panel() -> None:
         encoding="utf-8"
     )
 
-    assert "Operational Readiness" in content
-    assert "/api/dashboard/operational-readiness" in content
-    assert "mobile-readiness-checks" in content
+    assert "Runtime" in content
+    assert "/api/dashboard/paper-trading-runtime" in content
+    assert "mobile-runtime-state" in content
 
 
-def test_desktop_contains_readiness_panel() -> None:
+def test_desktop_contains_runtime_health_panel() -> None:
     content = (
         Path(TEMPLATE_DIRECTORY)
         / "dashboard.html"
@@ -28,6 +28,6 @@ def test_desktop_contains_readiness_panel() -> None:
         encoding="utf-8"
     )
 
-    assert "Operational Readiness" in content
-    assert "/api/dashboard/operational-readiness" in content
-    assert "readiness-checks" in content
+    assert "Paper trading and service health" in content
+    assert "/api/dashboard/service-status" in content
+    assert "runtime-state" in content

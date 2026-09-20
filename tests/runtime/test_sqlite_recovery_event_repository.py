@@ -111,7 +111,7 @@ def test_initialize_database_creates_recovery_event_table(
         "idx_recovery_events_status_started_at",
     } <= indexes
     assert version_row == (SCHEMA_VERSION,)
-    assert SCHEMA_VERSION == 12
+    assert SCHEMA_VERSION == 14
 
 
 def test_repository_is_empty_initially(tmp_path) -> None:

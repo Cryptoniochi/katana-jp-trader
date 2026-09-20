@@ -74,10 +74,9 @@ def test_health_check_returns_ready(
             str(tmp_path / "katana.db"),
             "--watchlist",
             str(watchlist),
-            "--jquants-api-key",
-            "test-key",
         ],
         environ={
+            "KABU_STATION_API_PASSWORD": "test-password",
             "KATANA_DISCORD_WEBHOOK_URL": (
                 "https://discord.test/webhook"
             ),
@@ -116,10 +115,8 @@ def test_health_check_reports_missing_notification(
             str(tmp_path / "katana.db"),
             "--watchlist",
             str(watchlist),
-            "--jquants-api-key",
-            "test-key",
         ],
-        environ={},
+        environ={"KABU_STATION_API_PASSWORD": "test-password"},
         output=output,
         error_output=StringIO(),
         composition_factory=FakeCompositionFactory,

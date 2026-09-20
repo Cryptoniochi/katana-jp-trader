@@ -78,6 +78,12 @@ def test_completed_bootstrap_runs_primary_screening(
     primary_report = tmp_path / "primary.json"
     candidates = tmp_path / "candidates.txt"
     calls = []
+    audit = SimpleNamespace(
+        completed=True, active_universe_count=3706, collected_count=3679,
+        missing_count=27, unexplained_missing_count=0,
+        terminal_skipped_count=27, collection_ratio=3679 / 3706,
+        effective_coverage_ratio=1.0, to_dict=lambda: {"completed": True},
+    )
 
     def runner(command, **_kwargs):
         calls.append(command)
@@ -130,6 +136,7 @@ def test_completed_bootstrap_runs_primary_screening(
         calendar=TokyoMarketCalendar.with_custom_holidays([]),
         now_provider=lambda: NOW,
         command_runner=runner,
+        history_audit_service=SimpleNamespace(audit=lambda **_kwargs: audit),
     )
 
     status = scheduler.run_once()

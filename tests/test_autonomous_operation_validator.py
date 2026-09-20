@@ -40,6 +40,7 @@ def create_validator(
     service = tmp_path / "service.json"
     paper = tmp_path / "paper.json"
     daily = tmp_path / "daily.json"
+    dynamic = tmp_path / "dynamic.json"
     watchlist = tmp_path / "watchlist.txt"
     database = tmp_path / "katana.db"
 
@@ -90,6 +91,7 @@ def create_validator(
             "business_day": False,
         },
     )
+    write_json(dynamic, {"enabled": True, "state": "closed_day", "business_day": False})
     watchlist.write_text(
         "7203\n6758\n",
         encoding="utf-8",
@@ -100,6 +102,7 @@ def create_validator(
         service_status_path=service,
         paper_schedule_status_path=paper,
         daily_report_schedule_status_path=daily,
+        dynamic_watchlist_schedule_status_path=dynamic,
         watchlist_path=watchlist,
         database_path=database,
         now_provider=lambda: NOW,

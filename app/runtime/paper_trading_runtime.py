@@ -427,15 +427,30 @@ class PaperTradingRuntime:
             unrealized_profit_loss
             - initial_unrealized_profit_loss
         )
-        realized_profit_loss = (
+        position_realized_profit_loss = sum(
+            float(getattr(position, "realized_profit_loss", 0.0) or 0.0)
+            for position in portfolio_snapshot.positions
+        )
+        reconciled_realized_profit_loss = (
             None
             if session_equity_change is None
-            else (
-                session_equity_change
-                - unrealized_profit_loss_change
-            )
+            else session_equity_change - unrealized_profit_loss_change
         )
-        total_portfolio_profit_loss = session_equity_change
+        use_position_realized = any(
+            abs(float(getattr(position, "realized_profit_loss", 0.0) or 0.0))
+            >= 0.01
+            for position in portfolio_snapshot.positions
+        )
+        realized_profit_loss = (
+            position_realized_profit_loss
+            if use_position_realized
+            else reconciled_realized_profit_loss
+        )
+        total_portfolio_profit_loss = (
+            None
+            if realized_profit_loss is None
+            else realized_profit_loss + unrealized_profit_loss
+        )
         pnl_reconciliation_difference = (
             None
             if (
@@ -499,7 +514,9 @@ class PaperTradingRuntime:
             "session_equity_change": session_equity_change,
             "realized_profit_loss": realized_profit_loss,
             "realized_profit_loss_source": (
-                "equity_reconciliation"
+                "portfolio_positions"
+                if use_position_realized
+                else "equity_reconciliation"
             ),
             "initial_unrealized_profit_loss": (
                 initial_unrealized_profit_loss

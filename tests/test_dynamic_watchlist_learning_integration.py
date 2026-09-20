@@ -1,5 +1,6 @@
 """Dynamic WatchlistへのLearning Feedback統合テスト。"""
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +14,11 @@ from app.dynamic_watchlist.dynamic_watchlist_service import (
 
 
 NOW = datetime(2026, 8, 3, tzinfo=timezone.utc)
+
+
+def load_evaluated_candidate(report_directory: Path) -> dict:
+    payload = json.loads((report_directory / "latest.json").read_text(encoding="utf-8"))
+    return payload["evaluated"][0]
 
 
 def prepare_database(database: Path) -> None:
@@ -104,10 +110,11 @@ def test_learning_bonus_is_added_to_total_score(
     database = tmp_path / "katana.db"
     prepare_database(database)
 
-    result = DynamicWatchlistService(
+    report_directory = tmp_path / "reports"
+    DynamicWatchlistService(
         database_path=database,
         watchlist_path=tmp_path / "watchlist.txt",
-        report_directory=tmp_path / "reports",
+        report_directory=report_directory,
         settings=DynamicWatchlistSettings(
             minimum_symbols=1,
             minimum_average_turnover=1_000_000,
@@ -116,18 +123,18 @@ def test_learning_bonus_is_added_to_total_score(
         now_provider=lambda: NOW,
     ).generate()
 
-    candidate = result.selected[0]
+    candidate = load_evaluated_candidate(report_directory)
 
-    assert candidate.learning_applied
-    assert candidate.historical_score == 12.0
-    assert candidate.historical_trade_count == 12
-    assert candidate.learned_preferred_strategy == (
+    assert candidate["learning_applied"]
+    assert candidate["historical_score"] == 12.0
+    assert candidate["historical_trade_count"] == 12
+    assert candidate["learned_preferred_strategy"] == (
         "pullback"
     )
-    assert candidate.total_score >= (
-        candidate.technical_score
+    assert candidate["total_score"] >= (
+        candidate["technical_score"]
     )
-    assert candidate.total_score <= 100.0
+    assert candidate["total_score"] <= 100.0
 
 
 def test_learning_can_be_disabled(
@@ -136,10 +143,11 @@ def test_learning_can_be_disabled(
     database = tmp_path / "katana.db"
     prepare_database(database)
 
-    result = DynamicWatchlistService(
+    report_directory = tmp_path / "reports"
+    DynamicWatchlistService(
         database_path=database,
         watchlist_path=tmp_path / "watchlist.txt",
-        report_directory=tmp_path / "reports",
+        report_directory=report_directory,
         settings=DynamicWatchlistSettings(
             minimum_symbols=1,
             minimum_average_turnover=1_000_000,
@@ -149,10 +157,10 @@ def test_learning_can_be_disabled(
         now_provider=lambda: NOW,
     ).generate()
 
-    candidate = result.selected[0]
+    candidate = load_evaluated_candidate(report_directory)
 
-    assert not candidate.learning_applied
-    assert candidate.historical_score == 0.0
-    assert candidate.total_score == (
-        candidate.technical_score
+    assert not candidate["learning_applied"]
+    assert candidate["historical_score"] == 0.0
+    assert candidate["total_score"] == (
+        candidate["technical_score"]
     )

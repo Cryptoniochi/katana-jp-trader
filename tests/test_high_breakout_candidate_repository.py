@@ -97,7 +97,7 @@ def test_initialize_database_creates_candidate_table(
     assert version == (
         SCHEMA_VERSION,
     )
-    assert SCHEMA_VERSION == 13
+    assert SCHEMA_VERSION == 14
 
 
 def test_repository_saves_and_gets_candidate(

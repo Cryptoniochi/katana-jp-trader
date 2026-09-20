@@ -52,6 +52,10 @@ def test_parse_push_tick_returns_none_without_price() -> None:
     ) is None
 
 
-def test_symbol_rejects_non_numeric_code() -> None:
-    with pytest.raises(ValueError, match="数字"):
-        KabuStationSymbol("ABCD")
+def test_symbol_accepts_new_alphanumeric_code() -> None:
+    assert KabuStationSymbol("130a").code == "130A"
+
+
+def test_symbol_rejects_invalid_code_format() -> None:
+    with pytest.raises(ValueError, match="半角英数字"):
+        KabuStationSymbol("12-3")

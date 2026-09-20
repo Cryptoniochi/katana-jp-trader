@@ -1,116 +1,59 @@
-"""kabuステーション直接Readiness Probeのテスト。"""
+"""kabuステーションTCP Readiness Probeのテスト。"""
 
-import json
+import socket
 from pathlib import Path
-from urllib.error import HTTPError, URLError
 
 import app.runtime.kabu_station_readiness_probe as module
-from app.runtime.kabu_station_readiness_probe import (
-    probe_kabu_station_readiness,
-)
+from app.runtime.kabu_station_readiness_probe import probe_kabu_station_readiness
 
 
-class FakeResponse:
-    def __init__(self, payload: dict) -> None:
-        self.payload = payload
-
+class FakeConnection:
     def __enter__(self):
         return self
 
     def __exit__(self, *_args):
         return False
 
-    def read(self) -> bytes:
-        return json.dumps(self.payload).encode("utf-8")
 
-
-def test_probe_returns_connected_when_token_is_issued(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "KABU_STATION_API_PASSWORD=secret\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        module,
-        "urlopen",
-        lambda *_args, **_kwargs: FakeResponse(
-            {"Token": "token-value"}
-        ),
-    )
-
-    result = probe_kabu_station_readiness(
-        environ={},
-        env_file=env_file,
-    )
-
+def test_probe_returns_connected_when_port_is_open(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(module.socket, "create_connection", lambda *_args, **_kwargs: FakeConnection())
+    result = probe_kabu_station_readiness(environ={}, env_file=tmp_path / "missing.env")
     assert result.state == "connected"
     assert result.exit_code == 0
 
 
-def test_probe_returns_disconnected_when_port_is_closed(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "KABU_STATION_API_PASSWORD=secret\n",
-        encoding="utf-8",
-    )
-
+def test_probe_returns_disconnected_when_port_is_closed(tmp_path: Path, monkeypatch) -> None:
     def fail(*_args, **_kwargs):
-        raise URLError("connection refused")
+        raise ConnectionRefusedError("connection refused")
 
-    monkeypatch.setattr(module, "urlopen", fail)
-
-    result = probe_kabu_station_readiness(
-        environ={},
-        env_file=env_file,
-    )
-
+    monkeypatch.setattr(module.socket, "create_connection", fail)
+    result = probe_kabu_station_readiness(environ={}, env_file=tmp_path / "missing.env")
     assert result.state == "disconnected"
     assert "connection refused" in result.message
+    assert result.exit_code == 1
 
 
-def test_probe_returns_disconnected_on_authentication_error(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "KABU_STATION_API_PASSWORD=wrong\n",
-        encoding="utf-8",
-    )
+def test_probe_returns_timeout_when_connection_times_out(tmp_path: Path, monkeypatch) -> None:
+    def fail(*_args, **_kwargs):
+        raise socket.timeout()
 
-    def fail(request, **_kwargs):
-        raise HTTPError(
-            request.full_url,
-            400,
-            "Bad Request",
-            hdrs=None,
-            fp=None,
-        )
+    monkeypatch.setattr(module.socket, "create_connection", fail)
+    result = probe_kabu_station_readiness(environ={}, env_file=tmp_path / "missing.env")
+    assert result.state == "timeout"
+    assert result.exit_code is None
 
-    monkeypatch.setattr(module, "urlopen", fail)
 
+def test_probe_uses_configured_base_url(tmp_path: Path, monkeypatch) -> None:
+    calls = []
+
+    def connect(address, **kwargs):
+        calls.append((address, kwargs))
+        return FakeConnection()
+
+    monkeypatch.setattr(module.socket, "create_connection", connect)
     result = probe_kabu_station_readiness(
-        environ={},
-        env_file=env_file,
-    )
-
-    assert result.state == "disconnected"
-    assert result.exit_code == 400
-
-
-def test_probe_requires_api_password(
-    tmp_path: Path,
-) -> None:
-    result = probe_kabu_station_readiness(
-        environ={},
+        environ={"KABU_STATION_BASE_URL": "http://127.0.0.1:18081/kabusapi"},
         env_file=tmp_path / "missing.env",
     )
-
-    assert result.state == "disconnected"
-    assert "KABU_STATION_API_PASSWORD" in result.message
+    assert result.state == "connected"
+    assert calls[0][0] == ("127.0.0.1", 18081)
