@@ -7,46 +7,58 @@
   <link rel="stylesheet" href="{{ url_for('static', path='/dashboard.css') }}">
 </head>
 <body>
-  <main class="page">
-    <header class="hero">
-      <div>
-        <p class="eyebrow">PROJECT KATANA</p>
-        <h1>Trading Dashboard</h1>
-        <p id="updated-at" class="muted">Loading...</p>
-      </div>
-      <div id="system-status" class="status-card">UNKNOWN</div>
+  <main class="dashboard-page">
+    <header class="panel-heading">
+      <div><p class="eyebrow">PROJECT KATANA</p><h1>Paper Trading Dashboard</h1></div>
+      <span id="system-status" class="status-pill">UNKNOWN</span>
     </header>
+    <p id="updated-at" class="muted">Loading...</p>
 
-    <section class="metrics">
-      <article class="metric"><span>Today's P/L</span><strong id="today-pl">—</strong></article>
-      <article class="metric"><span>Realized P/L</span><strong id="realized-pl">—</strong></article>
-      <article class="metric"><span>Unrealized P/L</span><strong id="unrealized-pl">—</strong></article>
-      <article class="metric"><span>Positions</span><strong id="position-count">—</strong></article>
-      <article class="metric"><span>Signals</span><strong id="signal-count">—</strong></article>
-      <article class="metric"><span>Executions</span><strong id="execution-count">—</strong></article>
+    <section class="panel">
+      <div class="panel-heading"><h2>Today's Performance</h2></div>
+      <div class="morning-summary-grid">
+        <article><span>Today's P/L</span><strong id="today-pl">—</strong></article>
+        <article><span>Realized P/L</span><strong id="realized-pl">—</strong></article>
+        <article><span>Unrealized P/L</span><strong id="unrealized-pl">—</strong></article>
+        <article><span>Positions</span><strong id="position-count">—</strong></article>
+        <article><span>Signals</span><strong id="signal-count">—</strong></article>
+        <article><span>Executions</span><strong id="execution-count">—</strong></article>
+      </div>
     </section>
 
     <section class="panel">
-      <div class="panel-heading">
-        <div><h2>Runtime</h2><span class="muted">Paper trading and service health</span></div>
-        <span id="runtime-state" class="status-pill">UNKNOWN</span>
-      </div>
+      <div class="panel-heading"><div><h2>Runtime</h2><span class="muted">Paper Trading service</span></div><span id="runtime-state" class="status-pill">UNKNOWN</span></div>
       <div class="morning-summary-grid">
-        <article><span>Trading Date</span><strong id="runtime-date">—</strong></article>
+        <article><span>Date</span><strong id="runtime-date">—</strong></article>
         <article><span>PID</span><strong id="runtime-pid">—</strong></article>
         <article><span>Cycles</span><strong id="runtime-cycles">—</strong></article>
         <article><span>Failed</span><strong id="runtime-failed">—</strong></article>
-        <article><span>kabu Station</span><strong id="kabu-state">—</strong></article>
-        <article><span>Service</span><strong id="service-state">—</strong></article>
       </div>
-      <p id="runtime-message" class="muted">Runtime status has not been loaded yet.</p>
+      <p id="runtime-message" class="muted">—</p>
     </section>
 
     <section class="panel">
-      <div class="panel-heading">
-        <div><h2>Watchlist</h2><span class="muted">Today's selected candidates</span></div>
-        <span id="watchlist-state" class="status-pill">UNKNOWN</span>
+      <div class="panel-heading"><div><h2>Service Status</h2><span class="muted">Data completeness and service health</span></div><span id="service-state" class="status-pill">UNKNOWN</span></div>
+      <div class="morning-summary-grid">
+        <article><span>kabu Station</span><strong id="kabu-state">—</strong></article>
+        <article><span>Status age</span><strong id="service-age">—</strong></article>
       </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading"><div><h2>Operational Readiness</h2><span class="muted">Preflight checks</span></div><span id="readiness-state" class="status-pill">UNKNOWN</span></div>
+      <div id="readiness-checks"></div>
+      <p id="readiness-message" class="muted">Operational Readiness has not been loaded yet.</p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading"><div><h2>Today's Paper Trading Schedule</h2><span class="muted">Automatic market-session control</span></div><span id="schedule-state" class="status-pill">UNKNOWN</span></div>
+      <div id="schedule-details" class="morning-summary-grid"></div>
+      <p id="schedule-message" class="muted">Schedule has not been loaded yet.</p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading"><div><h2>Watchlist</h2><span class="muted">Today's selected candidates</span></div><span id="watchlist-state" class="status-pill">UNKNOWN</span></div>
       <div class="morning-summary-grid">
         <article><span>Selected</span><strong id="watchlist-selected">0</strong></article>
         <article><span>Eligible</span><strong id="watchlist-eligible">0</strong></article>
@@ -57,167 +69,24 @@
       <p id="watchlist-message" class="muted">Dynamic Watchlist has not reported yet.</p>
     </section>
 
-    <section class="panel">
-      <div class="panel-heading"><h2>Today's Executions</h2></div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Executed</th><th>Strategy</th><th>Code</th><th>Side</th><th>Qty</th><th>Price</th></tr></thead>
-          <tbody id="recent-trades-body"></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-heading"><h2>Open Positions</h2></div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Code</th><th>Side</th><th>Qty</th><th>Average</th><th>Market</th><th>Unrealized P/L</th></tr></thead>
-          <tbody id="positions-body"></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-heading">
-        <div><h2>End-of-Day Check</h2><span class="muted">Full-Day Validation</span></div>
-        <span id="full-day-state" class="status-pill">UNKNOWN</span>
-      </div>
-      <p id="full-day-message" class="muted">Full-Day Validation has not been loaded yet.</p>
-    </section>
+    <section class="panel"><div class="panel-heading"><h2>Today's Executions</h2></div><div class="table-wrap"><table><thead><tr><th>Executed</th><th>Strategy</th><th>Code</th><th>Side</th><th>Qty</th><th>Price</th></tr></thead><tbody id="recent-trades-body"></tbody></table></div></section>
+    <section class="panel"><div class="panel-heading"><h2>Open Positions</h2></div><div class="table-wrap"><table><thead><tr><th>Code</th><th>Side</th><th>Qty</th><th>Average</th><th>Market</th><th>Unrealized P/L</th></tr></thead><tbody id="positions-body"></tbody></table></div></section>
+    <section class="panel"><div class="panel-heading"><h2>End-of-Day Check</h2><span id="full-day-state" class="status-pill">UNKNOWN</span></div><p id="full-day-message" class="muted">Full-Day Validation has not been loaded yet.</p></section>
   </main>
-
-  <script>
-    const yen = new Intl.NumberFormat("ja-JP", {style:"currency", currency:"JPY", maximumFractionDigits:0});
-    const val = (v, f=String) => v === null || v === undefined ? "—" : f(v);
-
-    function formatJst(v) {
-      if (!v) return "—";
-      const d = new Date(v);
-      if (Number.isNaN(d.getTime())) return String(v);
-      return new Intl.DateTimeFormat("ja-JP", {
-        timeZone:"Asia/Tokyo", year:"numeric", month:"2-digit", day:"2-digit",
-        hour:"2-digit", minute:"2-digit", second:"2-digit"
-      }).format(d);
-    }
-
-    function todayKey() {
-      const p = new Intl.DateTimeFormat("en-CA", {
-        timeZone:"Asia/Tokyo", year:"numeric", month:"2-digit", day:"2-digit"
-      }).formatToParts(new Date());
-      const g = t => p.find(x => x.type === t)?.value ?? "";
-      return `${g("year")}-${g("month")}-${g("day")}`;
-    }
-
-    async function getJson(url) {
-      try {
-        const r = await fetch(url, {cache:"no-store"});
-        return r.ok ? await r.json() : {};
-      } catch (_) {
-        return {};
-      }
-    }
-
-    function status(el, value) {
-      const s = String(value ?? "unknown").toLowerCase();
-      el.textContent = s.replaceAll("_"," ").toUpperCase();
-      el.dataset.status = ["healthy","available","running","ready","pass"].includes(s)
-        ? "healthy" : ["failed","critical","error","fail"].includes(s) ? "failed" : "neutral";
-    }
-
-    function renderWatchlist(p, names) {
-      status(document.getElementById("watchlist-state"), p.schedule_state ?? (p.available ? "available" : "unknown"));
-      document.getElementById("watchlist-selected").textContent = p.selected_count ?? 0;
-      document.getElementById("watchlist-eligible").textContent = p.eligible_count ?? 0;
-      document.getElementById("watchlist-evaluated").textContent = p.evaluated_count ?? 0;
-      document.getElementById("watchlist-applied").textContent = p.applied ? "YES" : "NO";
-      document.getElementById("watchlist-message").textContent = p.message ?? "—";
-      const rows = p.candidates ?? p.selected_candidates ?? [];
-      const c = document.getElementById("watchlist-candidates");
-      if (!rows.length) { c.innerHTML = '<p class="muted">No selected candidates.</p>'; return; }
-      c.innerHTML = `<div class="table-wrap"><table>
-        <thead><tr><th>#</th><th>Code</th><th>Strategy</th><th>Score</th><th>Tier</th></tr></thead>
-        <tbody>${rows.slice(0,10).map((r,i) => {
-          const code = String(r.code ?? "—");
-          const label = names[code] ? `${code} ${names[code]}` : code;
-          const strategy = r.preferred_strategy ?? r.strategy_name ?? r.strategy ?? "—";
-          const score = r.total_score ?? r.score ?? null;
-          return `<tr><td>${i+1}</td><td>${label}</td><td>${strategy}</td><td>${score===null?"—":Number(score).toFixed(1)}</td><td>${r.selection_tier ?? r.tier ?? "—"}</td></tr>`;
-        }).join("")}</tbody></table></div>`;
-    }
-
-    function renderTrades(trades, names) {
-      const body = document.getElementById("recent-trades-body");
-      const rows = (trades ?? []).filter(t => {
-        if (!t.executed_at) return false;
-        const p = new Intl.DateTimeFormat("en-CA", {timeZone:"Asia/Tokyo", year:"numeric", month:"2-digit", day:"2-digit"}).formatToParts(new Date(t.executed_at));
-        const g = k => p.find(x => x.type === k)?.value ?? "";
-        return `${g("year")}-${g("month")}-${g("day")}` === todayKey();
-      });
-      body.innerHTML = rows.length ? rows.slice(0,20).map(t => {
-        const code = String(t.code ?? "—");
-        const label = names[code] ? `${code} ${names[code]}` : code;
-        return `<tr><td>${formatJst(t.executed_at)}</td><td>${t.strategy_name ?? "—"}</td><td>${label}</td><td>${t.side ?? "—"}</td><td>${t.quantity ?? "—"}</td><td>${val(t.execution_price, yen.format)}</td></tr>`;
-      }).join("") : '<tr><td colspan="6" class="muted">No executions today.</td></tr>';
-    }
-
-    function renderPositions(rows, names) {
-      const body = document.getElementById("positions-body");
-      body.innerHTML = rows?.length ? rows.map(p => {
-        const code = String(p.code ?? "—");
-        const label = names[code] ? `${code} ${names[code]}` : code;
-        return `<tr><td>${label}</td><td>${p.side ?? "—"}</td><td>${p.quantity ?? "—"}</td><td>${val(p.average_cost,yen.format)}</td><td>${val(p.market_price,yen.format)}</td><td>${val(p.unrealized_profit_loss,yen.format)}</td></tr>`;
-      }).join("") : '<tr><td colspan="6" class="muted">No open positions.</td></tr>';
-    }
-
-    async function refresh() {
-      const [summary,runtime,watchlist,strategies,service,fullDay,namesPayload] = await Promise.all([
-        getJson("/api/dashboard/summary"),
-        getJson("/api/dashboard/paper-trading-runtime"),
-        getJson("/api/dashboard/dynamic-watchlist"),
-        getJson("/api/dashboard/strategies"),
-        getJson("/api/dashboard/service-status"),
-        getJson("/api/dashboard/full-day-validation"),
-        getJson("/api/dashboard/symbol-names")
-      ]);
-
-      const snapshot = summary.snapshot ?? {};
-      const portfolio = snapshot.portfolio ?? {};
-      const live = snapshot.live_summary ?? {};
-      const health = snapshot.system_health ?? {};
-      const names = namesPayload.symbol_names ?? namesPayload.names ?? namesPayload ?? {};
-      const runtimeToday = runtime.available === true && String(runtime.trading_date ?? "") === todayKey();
-      const todayPl = runtimeToday ? (runtime.realized_profit_loss ?? runtime.session_equity_change ?? runtime.net_profit_loss ?? null) : null;
-
-      document.getElementById("updated-at").textContent = `Updated: ${formatJst(summary.generated_at)}`;
-      document.getElementById("today-pl").textContent = val(todayPl, yen.format);
-      document.getElementById("realized-pl").textContent = val(runtime.realized_profit_loss, yen.format);
-      document.getElementById("unrealized-pl").textContent = val(runtime.unrealized_profit_loss, yen.format);
-      document.getElementById("position-count").textContent = runtime.portfolio_position_count ?? portfolio.position_count ?? 0;
-      document.getElementById("signal-count").textContent = runtime.signal_count ?? live.signal_count ?? 0;
-      document.getElementById("execution-count").textContent = runtime.execution_count ?? live.execution_count ?? 0;
-
-      status(document.getElementById("system-status"), health.status ?? (snapshot.partial ? "partial" : "available"));
-      status(document.getElementById("runtime-state"), runtime.state ?? runtime.status ?? (runtime.available ? "running" : "unknown"));
-      document.getElementById("runtime-date").textContent = runtime.trading_date ?? "—";
-      document.getElementById("runtime-pid").textContent = runtime.pid ?? "—";
-      document.getElementById("runtime-cycles").textContent = runtime.cycle_count ?? runtime.cycles ?? "—";
-      document.getElementById("runtime-failed").textContent = runtime.failed_cycle_count ?? runtime.failed_cycles ?? "—";
-      document.getElementById("runtime-message").textContent = runtime.message ?? "—";
-
-      const kabu = service.kabu_station ?? service.kabu ?? {};
-      document.getElementById("kabu-state").textContent = kabu.readiness ?? kabu.status ?? service.kabu_station_readiness ?? "—";
-      document.getElementById("service-state").textContent = service.state ?? service.status ?? "—";
-
-      renderWatchlist(watchlist, names);
-      renderTrades(strategies.recent_trades ?? [], names);
-      renderPositions(portfolio.positions ?? runtime.positions ?? [], names);
-
-      status(document.getElementById("full-day-state"), fullDay.state ?? "unknown");
-      document.getElementById("full-day-message").textContent = fullDay.message ?? "Full-Day Validation has not been loaded yet.";
-    }
-
-    refresh();
-    window.setInterval(refresh, 30000);
-  </script>
+<script>
+const yen=new Intl.NumberFormat("ja-JP",{style:"currency",currency:"JPY",maximumFractionDigits:0});
+const val=(v,f=String)=>v===null||v===undefined?"—":f(v);
+function formatJst(v){if(!v)return"—";const d=new Date(v);if(Number.isNaN(d.getTime()))return String(v);return new Intl.DateTimeFormat("ja-JP",{timeZone:"Asia/Tokyo",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit"}).format(d);}
+function todayKey(){const p=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Tokyo",year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(new Date());const g=t=>p.find(x=>x.type===t)?.value??"";return `${g("year")}-${g("month")}-${g("day")}`;}
+async function getJson(url){try{const r=await fetch(url,{cache:"no-store"});return r.ok?await r.json():{};}catch(_){return{};}}
+function status(el,value){const s=String(value??"unknown").toLowerCase();el.textContent=s.replaceAll("_"," ").toUpperCase();el.dataset.status=["healthy","available","running","ready","pass","completed"].includes(s)?"healthy":["failed","critical","error","fail","stale"].includes(s)?"failed":"neutral";}
+function renderReadiness(p){status(document.getElementById("readiness-state"),p.overall_state??p.state??p.status??(p.ready_for_paper_trading?"ready":"unknown"));document.getElementById("readiness-message").textContent=p.message??(p.ready_for_paper_trading===true?"Ready for paper trading.":p.ready_for_paper_trading===false?"Not ready for paper trading.":"—");const rows=p.checks??p.items??[];document.getElementById("readiness-checks").innerHTML=rows.length?`<div class="table-wrap"><table><thead><tr><th>Check</th><th>Status</th><th>Message</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${r.label??r.name??r.key??"—"}</td><td>${String(r.level??r.state??r.status??(r.is_ok?"pass":"fail")).toUpperCase()}</td><td>${r.message??"—"}</td></tr>`).join("")}</tbody></table></div>`:'<p class="muted">No readiness checks reported.</p>';}
+function renderSchedule(p){status(document.getElementById("schedule-state"),p.state??p.status??"unknown");document.getElementById("schedule-message").textContent=p.message??"—";const values=[["Business day",p.business_day],["Next action",formatJst(p.next_action_at)],["Process ID",p.process_id??p.pid],["Last exit",p.last_exit_code]];document.getElementById("schedule-details").innerHTML=values.map(([k,v])=>`<article><span>${k}</span><strong>${v===null||v===undefined?"—":v}</strong></article>`).join("");}
+function renderWatchlist(p,names){status(document.getElementById("watchlist-state"),p.schedule_state??(p.available?"available":"unknown"));document.getElementById("watchlist-selected").textContent=p.selected_count??0;document.getElementById("watchlist-eligible").textContent=p.eligible_count??0;document.getElementById("watchlist-evaluated").textContent=p.evaluated_count??0;document.getElementById("watchlist-applied").textContent=p.applied?"YES":"NO";document.getElementById("watchlist-message").textContent=p.message??"—";const rows=p.candidates??p.selected_candidates??[];const c=document.getElementById("watchlist-candidates");c.innerHTML=rows.length?`<div class="table-wrap"><table><thead><tr><th>#</th><th>Code</th><th>Strategy</th><th>Score</th><th>Tier</th></tr></thead><tbody>${rows.slice(0,10).map((r,i)=>{const code=String(r.code??"—");const label=names[code]?`${code} ${names[code]}`:code;return `<tr><td>${i+1}</td><td>${label}</td><td>${r.preferred_strategy??r.strategy_name??r.strategy??"—"}</td><td>${r.total_score===null||r.total_score===undefined?"—":Number(r.total_score).toFixed(1)}</td><td>${r.selection_tier??r.tier??"—"}</td></tr>`;}).join("")}</tbody></table></div>`:'<p class="muted">No selected candidates.</p>';}
+function renderTrades(trades,names){const body=document.getElementById("recent-trades-body");const rows=(trades??[]).filter(t=>{if(!t.executed_at)return false;const p=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Tokyo",year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(new Date(t.executed_at));const g=k=>p.find(x=>x.type===k)?.value??"";return `${g("year")}-${g("month")}-${g("day")}`===todayKey();});body.innerHTML=rows.length?rows.slice(0,20).map(t=>{const code=String(t.code??"—");const label=names[code]?`${code} ${names[code]}`:code;return `<tr><td>${formatJst(t.executed_at)}</td><td>${t.strategy_name??"—"}</td><td>${label}</td><td>${t.side??"—"}</td><td>${t.quantity??"—"}</td><td>${val(t.execution_price,yen.format)}</td></tr>`;}).join(""):'<tr><td colspan="6" class="muted">No executions today.</td></tr>';}
+function renderPositions(rows,names){const body=document.getElementById("positions-body");body.innerHTML=rows?.length?rows.map(p=>{const code=String(p.code??"—");const label=names[code]?`${code} ${names[code]}`:code;return `<tr><td>${label}</td><td>${p.side??"—"}</td><td>${p.quantity??"—"}</td><td>${val(p.average_cost,yen.format)}</td><td>${val(p.market_price,yen.format)}</td><td>${val(p.unrealized_profit_loss,yen.format)}</td></tr>`;}).join(""):'<tr><td colspan="6" class="muted">No open positions.</td></tr>';}
+async function refresh(){const [summary,runtime,watchlist,strategies,service,fullDay,namesPayload,readiness,schedule]=await Promise.all([getJson("/api/dashboard/summary"),getJson("/api/dashboard/paper-trading-runtime"),getJson("/api/dashboard/dynamic-watchlist"),getJson("/api/dashboard/strategies"),getJson("/api/dashboard/service-status"),getJson("/api/dashboard/full-day-validation"),getJson("/api/dashboard/symbol-names"),getJson("/api/dashboard/operational-readiness"),getJson("/api/dashboard/paper-trading-schedule")]);const snapshot=summary.snapshot??{};const portfolio=snapshot.portfolio??{};const live=snapshot.live_summary??{};const health=snapshot.system_health??{};const names=namesPayload.symbol_names??namesPayload.names??namesPayload??{};const runtimeToday=runtime.available===true&&String(runtime.trading_date??"")===todayKey();const todayPl=runtimeToday?(runtime.total_portfolio_profit_loss??runtime.realized_profit_loss??runtime.session_equity_change??runtime.net_profit_loss??null):null;document.getElementById("updated-at").textContent=`Updated: ${formatJst(summary.generated_at)}`;document.getElementById("today-pl").textContent=val(todayPl,yen.format);document.getElementById("realized-pl").textContent=runtimeToday?val(runtime.realized_profit_loss,yen.format):"—";document.getElementById("unrealized-pl").textContent=runtimeToday?val(runtime.unrealized_profit_loss,yen.format):"—";document.getElementById("position-count").textContent=runtimeToday?(runtime.portfolio_position_count??portfolio.position_count??0):(portfolio.position_count??0);document.getElementById("signal-count").textContent=runtimeToday?(runtime.signal_count??live.signal_count??0):(live.signal_count??0);document.getElementById("execution-count").textContent=runtimeToday?(runtime.execution_count??live.execution_count??0):(live.execution_count??0);const closedDay=schedule.business_day===false;const readinessReady=String(readiness.overall_state??readiness.state??readiness.status??"").toLowerCase()==="ready"||readiness.ready_for_paper_trading===true;const healthState=String(health.status??"").toLowerCase();const healthFailed=["critical","failed","error"].includes(healthState);const overallDisplayState=healthFailed?healthState:(readinessReady?(closedDay?"closed_day":"ready"):(health.status??(snapshot.partial?"partial":"available")));status(document.getElementById("system-status"),overallDisplayState);const runtimeDisplayState=runtimeToday?(runtime.state??runtime.status??"running"):(closedDay?"closed_day":"not_reported");status(document.getElementById("runtime-state"),runtimeDisplayState);document.getElementById("runtime-date").textContent=runtimeToday?(runtime.trading_date??"—"):"—";document.getElementById("runtime-pid").textContent=runtimeToday?(runtime.process_id??runtime.pid??"—"):"—";document.getElementById("runtime-cycles").textContent=runtimeToday?(runtime.cycle_count??runtime.cycles??"—"):"—";document.getElementById("runtime-failed").textContent=runtimeToday?(runtime.failed_cycle_count??runtime.failed_cycles??"—"):"—";document.getElementById("runtime-message").textContent=runtimeToday?(runtime.message??"—"):(closedDay?"Tokyo market is closed today.":"No Paper Trading Runtime report for today.");const kabu=service.kabu_station??service.kabu??{};const age=service.status_age_seconds;const serviceState=(age!==null&&age!==undefined&&Number(age)>120)?"stale":(service.state??service.status??"unknown");status(document.getElementById("service-state"),serviceState);document.getElementById("service-age").textContent=age===null||age===undefined?"—":`${Math.round(Number(age))}s`;document.getElementById("kabu-state").textContent=kabu.readiness??kabu.status??service.kabu_station_readiness??"—";renderReadiness(readiness);renderSchedule(schedule);renderWatchlist(watchlist,names);renderTrades(strategies.recent_trades??[],names);renderPositions(portfolio.positions??runtime.positions??[],names);status(document.getElementById("full-day-state"),fullDay.state??"unknown");document.getElementById("full-day-message").textContent=fullDay.message??"Full-Day Validation has not been loaded yet.";}
+refresh();window.setInterval(refresh,30000);
+</script>
 </body>
 </html>

@@ -13,7 +13,7 @@
       <div><p class="eyebrow">PROJECT KATANA</p><h1>Monitor</h1></div>
       <div id="mobile-status" class="status-pill">UNKNOWN</div>
     </header>
-    <p id="mobile-updated-at" class="muted">Loading...</p>
+    <div class="mobile-data-status"><p id="mobile-updated-at" class="muted">Loading...</p><p class="muted">Data completeness and service health</p></div>
 
     <section class="mobile-primary-grid">
       <article class="mobile-primary-card"><span>Today's P/L</span><strong id="mobile-today-pl">—</strong></article>
@@ -34,6 +34,25 @@
           <div><span>Unrealized P/L</span><b id="mobile-unrealized">—</b></div>
         </div>
         <p id="mobile-runtime-message" class="mobile-card-message">—</p>
+      </article>
+    </section>
+
+    <section>
+      <div class="mobile-section-title"><h2>Operational Readiness</h2><span id="mobile-readiness-state" class="status-pill">UNKNOWN</span></div>
+      <div id="mobile-readiness-checks" class="mobile-card-list"></div>
+      <article class="mobile-detail-card"><p id="mobile-readiness-message" class="mobile-card-message">Operational Readiness has not been loaded yet.</p></article>
+    </section>
+
+    <section>
+      <div class="mobile-section-title"><h2>Today's Schedule</h2><span id="mobile-schedule-state" class="status-pill">UNKNOWN</span></div>
+      <article class="mobile-detail-card">
+        <div class="mobile-detail-grid">
+          <div><span>Business day</span><b id="mobile-schedule-business-day">—</b></div>
+          <div><span>Next action</span><b id="mobile-schedule-next-action">—</b></div>
+          <div><span>Process ID</span><b id="mobile-schedule-pid">—</b></div>
+          <div><span>Last exit</span><b id="mobile-schedule-exit">—</b></div>
+        </div>
+        <p id="mobile-schedule-message" class="mobile-card-message">Schedule has not been loaded yet.</p>
       </article>
     </section>
 
@@ -89,13 +108,15 @@
     const empty=text=>`<article class="mobile-empty-card">${text}</article>`;
 
     async function refresh(){
-      const [summary,runtime,watchlist,strategies,fullDay,namesPayload]=await Promise.all([
+      const [summary,runtime,watchlist,strategies,fullDay,namesPayload,readiness,schedule]=await Promise.all([
         getJson("/api/dashboard/summary"),
         getJson("/api/dashboard/paper-trading-runtime"),
         getJson("/api/dashboard/dynamic-watchlist"),
         getJson("/api/dashboard/strategies"),
         getJson("/api/dashboard/full-day-validation"),
-        getJson("/api/dashboard/symbol-names")
+        getJson("/api/dashboard/symbol-names"),
+        getJson("/api/dashboard/operational-readiness"),
+        getJson("/api/dashboard/paper-trading-schedule")
       ]);
 
       const snapshot=summary.snapshot??{};
@@ -111,15 +132,40 @@
       document.getElementById("mobile-positions").textContent=runtime.portfolio_position_count??portfolio.position_count??0;
       document.getElementById("mobile-signals").textContent=runtime.signal_count??live.signal_count??0;
       document.getElementById("mobile-executions").textContent=runtime.execution_count??live.execution_count??0;
-      status(document.getElementById("mobile-status"),health.status??(snapshot.partial?"partial":"available"));
-      status(document.getElementById("mobile-runtime-state"),runtime.state??runtime.status??(runtime.available?"running":"unknown"));
-      document.getElementById("mobile-runtime-date").textContent=runtime.trading_date??"—";
-      document.getElementById("mobile-runtime-pid").textContent=runtime.pid??"—";
-      document.getElementById("mobile-runtime-cycles").textContent=runtime.cycle_count??runtime.cycles??"—";
-      document.getElementById("mobile-runtime-failed").textContent=runtime.failed_cycle_count??runtime.failed_cycles??"—";
-      document.getElementById("mobile-realized").textContent=val(runtime.realized_profit_loss,yen.format);
-      document.getElementById("mobile-unrealized").textContent=val(runtime.unrealized_profit_loss,yen.format);
-      document.getElementById("mobile-runtime-message").textContent=runtime.message??"—";
+      const closedDay=schedule.business_day===false;
+      const readinessReady=String(readiness.overall_state??readiness.state??readiness.status??"").toLowerCase()==="ready"||readiness.ready_for_paper_trading===true;
+      const healthState=String(health.status??"").toLowerCase();
+      const healthFailed=["critical","failed","error"].includes(healthState);
+      const overallDisplayState=healthFailed?healthState:(readinessReady?(closedDay?"closed_day":"ready"):(health.status??(snapshot.partial?"partial":"available")));
+      status(document.getElementById("mobile-status"),overallDisplayState);
+      const runtimeDisplayState=runtimeToday?(runtime.state??runtime.status??"running"):(closedDay?"closed_day":"not_reported");
+      status(document.getElementById("mobile-runtime-state"),runtimeDisplayState);
+      document.getElementById("mobile-runtime-date").textContent=runtimeToday?(runtime.trading_date??"—"):"—";
+      document.getElementById("mobile-runtime-pid").textContent=runtimeToday?(runtime.process_id??runtime.pid??"—"):"—";
+      document.getElementById("mobile-runtime-cycles").textContent=runtimeToday?(runtime.cycle_count??runtime.cycles??"—"):"—";
+      document.getElementById("mobile-runtime-failed").textContent=runtimeToday?(runtime.failed_cycle_count??runtime.failed_cycles??"—"):"—";
+      document.getElementById("mobile-realized").textContent=runtimeToday?val(runtime.realized_profit_loss,yen.format):"—";
+      document.getElementById("mobile-unrealized").textContent=runtimeToday?val(runtime.unrealized_profit_loss,yen.format):"—";
+      document.getElementById("mobile-runtime-message").textContent=runtimeToday?(runtime.message??"—"):(closedDay?"Tokyo market is closed today.":"No Paper Trading Runtime report for today.");
+
+      const dataState=String(summary.data_status??summary.state??"").toLowerCase();
+      if(dataState==="stale"){document.querySelector(".mobile-data-status")?.setAttribute("data-status","stale");}
+
+      status(document.getElementById("mobile-readiness-state"),readiness.overall_state??readiness.state??readiness.status??(readiness.ready_for_paper_trading?"ready":"unknown"));
+      document.getElementById("mobile-readiness-message").textContent=readiness.message??(readiness.ready_for_paper_trading===true?"Ready for paper trading.":readiness.ready_for_paper_trading===false?"Not ready for paper trading.":"—");
+      const readinessRows=readiness.checks??readiness.items??[];
+      document.getElementById("mobile-readiness-checks").innerHTML=readinessRows.length?readinessRows.map(r=>{
+        const level=String(r.level??r.state??r.status??(r.is_ok?"pass":"fail")).toLowerCase();
+        const label=r.label??r.name??r.key??"—";
+        return `<article class="mobile-detail-card"><div class="mobile-card-heading"><strong>${label}</strong><span>${level.toUpperCase()}</span></div><small>${r.message??"—"}</small></article>`;
+      }).join(""):empty("No readiness checks reported.");
+
+      status(document.getElementById("mobile-schedule-state"),schedule.state??schedule.status??"unknown");
+      document.getElementById("mobile-schedule-business-day").textContent=schedule.business_day===null||schedule.business_day===undefined?"—":String(schedule.business_day);
+      document.getElementById("mobile-schedule-next-action").textContent=formatJst(schedule.next_action_at);
+      document.getElementById("mobile-schedule-pid").textContent=schedule.process_id??schedule.pid??"—";
+      document.getElementById("mobile-schedule-exit").textContent=schedule.last_exit_code??"—";
+      document.getElementById("mobile-schedule-message").textContent=schedule.message??"—";
 
       status(document.getElementById("mobile-watchlist-state"),watchlist.schedule_state??(watchlist.available?"available":"unknown"));
       document.getElementById("mobile-watchlist-selected").textContent=watchlist.selected_count??0;
