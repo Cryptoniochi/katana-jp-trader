@@ -97,6 +97,50 @@ def _run_schtasks(
     return completed
 
 
+def _set_unlimited_execution_time(
+    task_name: str,
+) -> None:
+    """長時間常駐Serviceが自動停止されないようにする。"""
+
+    escaped_task_name = task_name.replace("'", "''")
+    script = (
+        "$task = Get-ScheduledTask "
+        f"-TaskName '{escaped_task_name}' "
+        "-ErrorAction Stop; "
+        "$settings = $task.Settings; "
+        "$settings.ExecutionTimeLimit = 'PT0S'; "
+        "Set-ScheduledTask "
+        f"-TaskName '{escaped_task_name}' "
+        "-Settings $settings "
+        "-ErrorAction Stop | Out-Null"
+    )
+    completed = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="mbcs",
+        errors="replace",
+    )
+
+    if completed.returncode != 0:
+        raise KatanaServiceTaskError(
+            "KATANA Service自動起動タスクの実行時間制限を"
+            "解除できませんでした。 "
+            f"returncode={completed.returncode} "
+            f"stderr={completed.stderr.strip()} "
+            f"stdout={completed.stdout.strip()}"
+        )
+
+
 def resolve_task_command(
     *,
     project_directory: Path,
@@ -258,6 +302,7 @@ def install_task(
             "KATANA Service自動起動タスクを登録できませんでした。"
         ),
     )
+    _set_unlimited_execution_time(task_name)
 
     print("KATANA Service auto-start task installed.")
     print(f"Task: {task_name}")

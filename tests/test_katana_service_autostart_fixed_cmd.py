@@ -67,6 +67,13 @@ def test_install_uses_cmd_executable(
         "_run_schtasks",
         fake_run_schtasks,
     )
+    monkeypatch.setattr(
+        module,
+        "_set_unlimited_execution_time",
+        lambda task_name: captured.update(
+            unlimited_task_name=task_name
+        ),
+    )
 
     module.install_task(
         task_name="Project KATANA Service",
@@ -85,3 +92,43 @@ def test_install_uses_cmd_executable(
     )
     assert str(command.resolve()) in task_run
     assert "app.run_katana_service" not in task_run
+    assert captured["unlimited_task_name"] == (
+        "Project KATANA Service"
+    )
+
+
+def test_unlimited_execution_time_uses_pt0s(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    def fake_run(arguments, **kwargs):
+        captured["arguments"] = arguments
+        captured["kwargs"] = kwargs
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        fake_run,
+    )
+
+    module._set_unlimited_execution_time(
+        "Project KATANA Service"
+    )
+
+    arguments = captured["arguments"]
+    script = arguments[
+        arguments.index("-Command") + 1
+    ]
+
+    assert arguments[0] == "powershell.exe"
+    assert "ExecutionTimeLimit = 'PT0S'" in script
+    assert "Project KATANA Service" in script
+    assert captured["kwargs"]["check"] is False
