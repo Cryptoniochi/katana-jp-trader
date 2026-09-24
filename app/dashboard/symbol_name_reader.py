@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -108,7 +109,22 @@ class SymbolNameReader:
             if code not in names
         ]
 
+        changed = False
+        database_names = self._read_database_names(
+            missing
+        )
+        if database_names:
+            names.update(database_names)
+            changed = True
+            missing = [
+                code
+                for code in normalized_codes
+                if code not in names
+            ]
+
         if not missing:
+            if changed:
+                self._write_cache(names)
             return {
                 code: names[code]
                 for code in normalized_codes
@@ -118,13 +134,13 @@ class SymbolNameReader:
         client = self._create_client()
 
         if client is None:
+            if changed:
+                self._write_cache(names)
             return {
                 code: names[code]
                 for code in normalized_codes
                 if code in names
             }
-
-        changed = False
 
         for index, code in enumerate(missing):
             try:
@@ -160,6 +176,57 @@ class SymbolNameReader:
             code: names[code]
             for code in normalized_codes
             if code in names
+        }
+
+    def _read_database_names(
+        self,
+        codes: Iterable[str],
+    ) -> dict[str, str]:
+        """JPX上場銘柄マスターから名称を読み込む。"""
+
+        normalized_codes = tuple(
+            dict.fromkeys(
+                self._normalize_code(code)
+                for code in codes
+                if str(code).strip()
+            )
+        )
+        if not normalized_codes or not self.database_path.exists():
+            return {}
+
+        placeholders = ",".join(
+            "?" for _ in normalized_codes
+        )
+        try:
+            with sqlite3.connect(self.database_path) as connection:
+                table = connection.execute(
+                    """
+                    SELECT 1
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                      AND name = 'listed_symbols'
+                    """
+                ).fetchone()
+                if table is None:
+                    return {}
+
+                rows = connection.execute(
+                    f"""
+                    SELECT code, name
+                    FROM listed_symbols
+                    WHERE is_active = 1
+                      AND code IN ({placeholders})
+                    """,
+                    normalized_codes,
+                ).fetchall()
+        except sqlite3.Error:
+            return {}
+
+        return {
+            str(code).strip(): str(name).strip()
+            for code, name in rows
+            if str(code).strip()
+            and str(name).strip()
         }
 
     def _create_client(self) -> KabuStationClient | None:

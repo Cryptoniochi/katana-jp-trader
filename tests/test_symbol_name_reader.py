@@ -1,5 +1,6 @@
 """kabuステーション銘柄名Cacheのテスト。"""
 
+import sqlite3
 from pathlib import Path
 
 from app.dashboard.symbol_name_reader import SymbolNameReader
@@ -61,6 +62,51 @@ def test_reader_uses_cache_without_api_call(
         "7203": "トヨタ自動車"
     }
     assert client.requested == []
+
+
+def test_reader_uses_listed_symbol_database_before_api(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "data" / "katana.db"
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE listed_symbols (
+                code TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                is_active INTEGER NOT NULL
+            )
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO listed_symbols (code, name, is_active)
+            VALUES (?, ?, ?)
+            """,
+            (
+                ("7203", "トヨタ自動車", 1),
+                ("8306", "三菱ＵＦＪフィナンシャル・グループ", 1),
+            ),
+        )
+
+    client = FakeClient()
+    reader = SymbolNameReader(
+        database,
+        cache_path=tmp_path / "symbol_names.json",
+        client=client,
+        request_interval_seconds=0,
+    )
+
+    assert reader.resolve(["7203", "8306"]) == {
+        "7203": "トヨタ自動車",
+        "8306": "三菱ＵＦＪフィナンシャル・グループ",
+    }
+    assert client.requested == []
+    assert reader.read_all() == {
+        "7203": "トヨタ自動車",
+        "8306": "三菱ＵＦＪフィナンシャル・グループ",
+    }
 
 
 class PartiallyFailingClient(FakeClient):
