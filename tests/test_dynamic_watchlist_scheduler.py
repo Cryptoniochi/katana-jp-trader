@@ -21,9 +21,9 @@ def build_scheduler(
     command_runner,
     now: datetime,
 ) -> DynamicWatchlistScheduler:
-    candidate_universe = tmp_path / "candidates.txt"
-    candidate_universe.write_text(
-        "\n".join(str(1000 + index) for index in range(5)) + "\n",
+    candidate_path = tmp_path / "universe_candidates.txt"
+    candidate_path.write_text(
+        "7203\n6758\n9984\n8306\n9432\n",
         encoding="utf-8",
     )
     return DynamicWatchlistScheduler(
@@ -34,14 +34,13 @@ def build_scheduler(
         status_path=tmp_path / "schedule.json",
         latest_report_path=tmp_path / "reports" / "latest.json",
         marker_directory=tmp_path / "markers",
-        candidate_universe_path=candidate_universe,
+        candidate_universe_path=candidate_path,
         settings=DynamicWatchlistScheduleSettings(
             minimum_symbols=5
         ),
         calendar=TokyoMarketCalendar.with_custom_holidays([]),
         now_provider=lambda: now,
         command_runner=command_runner,
-        symbol_name_resolver=SimpleNamespace(resolve=lambda _codes: {}),
     )
 
 
@@ -138,3 +137,120 @@ def test_failed_update_does_not_create_marker(
         / "markers"
         / "2026-08-03.applied.json"
     ).exists()
+
+
+def test_cold_start_retains_existing_valid_watchlist(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "katana.db"
+    import sqlite3
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE market_bars (
+                code TEXT NOT NULL,
+                traded_at TEXT NOT NULL,
+                interval_minutes INTEGER NOT NULL,
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume INTEGER NOT NULL,
+                data_source TEXT NOT NULL
+            )
+            """
+        )
+
+    scheduler = build_scheduler(
+        tmp_path,
+        command_runner=lambda *_args, **_kwargs: (
+            SimpleNamespace(returncode=1)
+        ),
+        now=datetime(
+            2026, 8, 3, 0, 0,
+            tzinfo=timezone.utc,
+        ),
+    )
+    scheduler.watchlist_path.write_text(
+        "7203\n6758\n9984\n8306\n9432\n",
+        encoding="utf-8",
+    )
+
+    status = scheduler.run_once()
+
+    assert status.state is DynamicWatchlistScheduleState.COMPLETED
+    assert status.selected_count == 5
+    assert status.applied is True
+    assert status.last_exit_code == 0
+    payload = json.loads(
+        scheduler.latest_report_path.read_text(encoding="utf-8")
+    )
+    assert payload["cold_start_fallback"] is True
+    assert [item["code"] for item in payload["selected"]] == [
+        "7203",
+        "6758",
+        "9984",
+        "8306",
+        "9432",
+    ]
+    marker = json.loads(
+        (
+            tmp_path / "markers" / "2026-08-03.applied.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert marker["mature_history_count"] == 0
+
+
+def test_cold_start_does_not_hide_failure_when_history_is_mature(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "katana.db"
+    import sqlite3
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE market_bars (
+                code TEXT NOT NULL,
+                traded_at TEXT NOT NULL,
+                interval_minutes INTEGER NOT NULL,
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume INTEGER NOT NULL,
+                data_source TEXT NOT NULL
+            )
+            """
+        )
+        for code in ("7203", "6758", "9984", "8306", "9432"):
+            for day in ("01", "02", "03"):
+                connection.execute(
+                    """
+                    INSERT INTO market_bars VALUES (
+                        ?, ?, 1440, 100, 110, 90, 105, 10000, 'test'
+                    )
+                    """,
+                    (code, f"2026-08-{day}T00:00:00+00:00"),
+                )
+
+    scheduler = build_scheduler(
+        tmp_path,
+        command_runner=lambda *_args, **_kwargs: (
+            SimpleNamespace(returncode=1)
+        ),
+        now=datetime(
+            2026, 8, 3, 0, 0,
+            tzinfo=timezone.utc,
+        ),
+    )
+    scheduler.watchlist_path.write_text(
+        "7203\n6758\n9984\n8306\n9432\n",
+        encoding="utf-8",
+    )
+
+    status = scheduler.run_once()
+
+    assert status.state is DynamicWatchlistScheduleState.FAILED
+    assert not scheduler.latest_report_path.exists()

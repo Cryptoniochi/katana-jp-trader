@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -279,6 +281,16 @@ class DynamicWatchlistScheduler:
             or selected_count
             < self.settings.minimum_symbols
         ):
+            fallback = self._apply_cold_start_fallback(
+                now=now,
+                target_date=target_date,
+                marker_path=marker_path,
+                primary_candidate_count=candidate_count,
+                dynamic_exit_code=int(completed.returncode),
+            )
+            if fallback is not None:
+                return fallback
+
             self._retry_after_monotonic = (
                 self.monotonic_provider()
                 + self.settings.retry_interval_seconds
@@ -398,6 +410,176 @@ class DynamicWatchlistScheduler:
             if applied is not None
             else None,
         )
+
+    def _apply_cold_start_fallback(
+        self,
+        *,
+        now: datetime,
+        target_date,
+        marker_path: Path,
+        primary_candidate_count: int,
+        dynamic_exit_code: int,
+    ) -> DynamicWatchlistScheduleStatus | None:
+        """日足未成熟時だけ既存Watchlistを初期運用へ引き継ぐ。"""
+
+        codes = self._read_valid_watchlist_codes()
+        if not (
+            self.settings.minimum_symbols
+            <= len(codes)
+            <= self.settings.maximum_symbols
+        ):
+            return None
+
+        mature_count = self._mature_history_code_count(codes)
+        if (
+            mature_count is None
+            or mature_count >= self.settings.minimum_symbols
+        ):
+            return None
+
+        message = (
+            "Dynamic Watchlist cold-start fallback retained the "
+            "existing validated watchlist because daily history "
+            "is still maturing. "
+            f"selected_count={len(codes)} "
+            f"mature_history_count={mature_count}"
+        )
+        payload = {
+            "generated_at": now.isoformat(),
+            "target_date": target_date.isoformat(),
+            "run_date": target_date.isoformat(),
+            "market_data_date": None,
+            "market_data_age_days": None,
+            "source_bar_count": 0,
+            "latest_market_bar_count": 0,
+            "evaluated_count": 0,
+            "eligible_count": len(codes),
+            "applied": True,
+            "watchlist_path": str(self.watchlist_path),
+            "backup_path": None,
+            "message": message,
+            "cold_start_fallback": True,
+            "dynamic_exit_code": dynamic_exit_code,
+            "settings": {
+                "capital_limit": self.settings.capital_limit,
+                "purchase_budget": self.settings.purchase_budget,
+                "minimum_symbols": self.settings.minimum_symbols,
+                "maximum_symbols": self.settings.maximum_symbols,
+            },
+            "selected": [
+                {
+                    "rank": rank,
+                    "code": code,
+                    "rating_tier": "BOOTSTRAP",
+                    "selection_tier": "cold_start",
+                    "preferred_strategy": "orb",
+                    "total_score": 0.0,
+                    "latest_price": 0.0,
+                    "purchase_amount": 0.0,
+                }
+                for rank, code in enumerate(codes, start=1)
+            ],
+        }
+        self._write_json_atomic(self.latest_report_path, payload)
+        self._write_json_atomic(
+            marker_path,
+            {
+                "target_date": target_date.isoformat(),
+                "completed_at": now.isoformat(),
+                "primary_candidate_count": primary_candidate_count,
+                "selected_count": len(codes),
+                "applied": True,
+                "cold_start_fallback": True,
+                "mature_history_count": mature_count,
+                "dynamic_exit_code": dynamic_exit_code,
+                "symbol_names_refreshed": False,
+            },
+        )
+        self.last_exit_code = 0
+        return self._publish(
+            now=now,
+            state=DynamicWatchlistScheduleState.COMPLETED,
+            business_day=True,
+            next_action_at=None,
+            selected_count=len(codes),
+            applied=True,
+            message=message,
+        )
+
+    def _read_valid_watchlist_codes(self) -> tuple[str, ...]:
+        if not self.watchlist_path.exists():
+            return ()
+        try:
+            lines = self.watchlist_path.read_text(
+                encoding="utf-8-sig"
+            ).splitlines()
+        except (OSError, UnicodeError):
+            return ()
+
+        return tuple(
+            dict.fromkeys(
+                code
+                for raw in lines
+                if (
+                    code := raw.strip().upper()
+                )
+                and re.fullmatch(r"[0-9A-Z]{4,5}", code)
+            )
+        )
+
+    def _mature_history_code_count(
+        self,
+        codes: tuple[str, ...],
+    ) -> int | None:
+        if not self.database_path.exists() or not codes:
+            return None
+
+        placeholders = ",".join("?" for _ in codes)
+        try:
+            with sqlite3.connect(self.database_path) as connection:
+                table = connection.execute(
+                    """
+                    SELECT 1
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                      AND name = 'market_bars'
+                    """
+                ).fetchone()
+                if table is None:
+                    return None
+                rows = connection.execute(
+                    f"""
+                    SELECT code, COUNT(DISTINCT SUBSTR(traded_at, 1, 10))
+                    FROM market_bars
+                    WHERE code IN ({placeholders})
+                      AND close > 0
+                      AND volume >= 0
+                    GROUP BY code
+                    """,
+                    codes,
+                ).fetchall()
+        except sqlite3.Error:
+            return None
+
+        return sum(
+            1
+            for _code, history_days in rows
+            if int(history_days)
+            >= 3
+        )
+
+    @staticmethod
+    def _write_json_atomic(
+        path: Path,
+        payload: dict[str, object],
+    ) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
 
     def _refresh_symbol_names_once(
         self,
