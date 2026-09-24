@@ -5,7 +5,10 @@ risk-control, operations, monitoring, and multi-strategy development
 platform.
 
 > **Current status:** Sprint122 / Version 1.0 RC+ full-market universe,
-> reconciled reporting, and history-maturity-aware Dynamic Watchlist.
+> reconciled reporting, history-maturity-aware Dynamic Watchlist, and
+> verified cold-start recovery. The 2026-09-24 recovery baseline is
+> committed through `bc18e0e`; the repository-wide suite passes with
+> 2,465 tests and two dependency deprecation warnings.
 > The production paper-trading runtime uses the kabuステーションAPI for
 > realtime market data. J-Quants is no longer required by the active
 > runtime. Live brokerage execution is not implemented.
@@ -22,7 +25,7 @@ platform.
 -   Intraday-to-daily bar aggregation
 -   Tokyo-market calendar and market-session gating
 -   High Breakout daily-candidate screening and persistence
--   Full-market universe management for 3,706 active domestic common
+-   Full-market universe management for 3,700 active domestic common
     stocks (current imported master)
 -   Universe primary screening from approximately 4,000 symbols to a
     maximum of 300 candidates
@@ -33,7 +36,7 @@ platform.
 ### Full-market universe and Dynamic Watchlist
 
 ``` text
-3,706 active domestic common stocks (current master)
+3,700 active domestic common stocks (2026-09-24 imported master)
     |
     v
 Universe Primary Screening
@@ -98,6 +101,14 @@ This allows promising full-market symbols to enter ranking before a
 complete 20-business-day history has accumulated, while applying a
 confidence penalty until their history matures.
 
+On a repaired or newly initialized PC, daily history may not yet be
+deep enough for normal ranking. When fewer than five current watchlist
+symbols have at least three daily bars, the scheduler uses a guarded
+cold-start fallback: it retains the existing validated watchlist and
+records a completed state instead of blocking Paper Trading. Normal
+selection resumes automatically after history matures; genuine failures
+are not hidden once the minimum history threshold is reached.
+
 ### Paper trading and risk
 
 -   Recoverable Paper Broker
@@ -111,10 +122,12 @@ confidence penalty until their history matures.
 -   Production Readiness check
 -   Autonomous Operation Validator
 -   Scheduler Guard before Paper Trading startup
+-   Cold-start recovery without disabling the Scheduler Guard
 
 ### Autonomous operation
 
 Project KATANA runs as a resident Windows task through KATANA Service.
+The task has no execution time limit (`ExecutionTimeLimit=PT0S`).
 
 ``` text
 Windows logon
@@ -196,6 +209,8 @@ continues using only technical scores.
 -   Daily Report panel
 -   Dynamic Watchlist ranking, Tier, preferred strategy, and 100-share
     amount
+-   Security code and company name display using the local JPX
+    `listed_symbols` master, with the kabuステーションAPI as fallback
 -   Strategy and symbol ranking
 -   Error and recovery counts
 
@@ -206,7 +221,7 @@ Desktop on KATANA PC:
 http://127.0.0.1:8000/
 
 Mobile through Tailscale:
-http://100.64.14.23:8000/mobile
+http://100.124.165.26:8000/mobile
 ```
 
 The Dashboard is exposed through the private Tailscale network, not
@@ -221,6 +236,7 @@ KATANA Service
 Service component topology
 Paper Trading Scheduler
 Daily Report Scheduler
+Dynamic Watchlist
 Watchlist
 Database
 Production Readiness
@@ -315,7 +331,7 @@ reports/daily/notifications/YYYY-MM-DD.sent.json
         resident-operation hardening
 -   Sprint119E:
     -   JPX listed-symbol master import
-    -   3,706 active domestic common stocks loaded into `listed_symbols`
+    -   3,700 active domestic common stocks loaded into `listed_symbols`
     -   Full-market Universe Bootstrap using kabuステーション Board data
     -   Alphanumeric security-code support
     -   Batch registration split/retry and terminal-skip handling
@@ -332,6 +348,16 @@ reports/daily/notifications/YYYY-MM-DD.sent.json
     -   10--19 day histories treated as `developing`
     -   History maturity multiplier added to total-score ranking
     -   Focused regression suite: 20 passed
+-   2026-09-24 recovery hardening:
+    -   Added `openpyxl` as an explicit runtime dependency for JPX
+        `.xlsx` import
+    -   Rebuilt the JPX master with 3,700 listed symbols
+    -   Added guarded Dynamic Watchlist cold-start fallback
+    -   Added database-first security-name resolution on the Dashboard
+    -   Removed the Windows task execution time limit
+    -   Verified desktop/mobile closed-day handling and operational
+        readiness
+    -   Repository-wide regression suite: 2,465 passed, 2 warnings
 
 Recent focused test results:
 
@@ -345,6 +371,7 @@ Sprint109-2: 10 passed
 Sprint110-3: 7 passed
 Sprint120 Daily Report reconciliation: 11 passed
 Sprint122 history-maturity regression: 20 passed
+2026-09-24 repository-wide regression: 2465 passed, 2 warnings
 ```
 
 Focused suites may overlap and must not be added together as a unique
@@ -357,6 +384,7 @@ repository-wide test total.
 -   Python 3.14
 -   FastAPI and Uvicorn
 -   SQLite
+-   openpyxl 3.1+
 -   pytest
 -   kabuステーションAPI
 -   Discord Webhooks
@@ -463,7 +491,7 @@ Get-Content reports\service\daily_report_schedule.json
 
 ``` powershell
 netstat -ano | findstr :8000
-Invoke-RestMethod http://100.64.14.23:8000/api/dashboard/morning-preflight
+Invoke-RestMethod http://100.124.165.26:8000/api/dashboard/morning-preflight
 ```
 
 ### Manual Paper Trading
@@ -477,11 +505,10 @@ python -m app.run_paper_trading `
 
 ### Full-market universe
 
-Import the listed-symbol master:
+Download and import the latest JPX listed-symbol master:
 
 ``` powershell
-python -m app.run_listed_symbol_import `
-  data\listed_symbols.csv
+python -m app.run_jpx_listed_symbol_import
 ```
 
 Import daily bars:
@@ -567,11 +594,16 @@ Never commit `.env` or any real secret.
 
 ``` powershell
 git status
-git add .
+python -m pytest -q
+git diff --check
+git add <verified-files>
 git diff --cached --name-only
-git commit -m "Sprint 122: add history-maturity-aware dynamic watchlist"
+git commit -m "Describe the verified change"
 git push origin main
 ```
+
+Avoid `git add .` so that local databases, reports, generated metadata,
+and extracted ZIP instructions are not staged accidentally.
 
 Before committing, verify that `.gitignore` covers:
 
@@ -594,9 +626,10 @@ Sprint ZIP archives.
 
 ## Current next steps
 
-1.  Commit and push the verified Sprint122 baseline.
-2.  Keep the resident Universe Daily Scheduler collecting full-market
+1.  Keep the resident Universe Daily Scheduler collecting full-market
     daily bars.
+2.  Keep the KATANA PC awake and kabuステーション running while the
+    initial full-market history is being collected.
 3.  Monitor history coverage as newly added symbols mature toward 10 and
     20 business days.
 4.  Re-run Dynamic Watchlist diagnostics and verify that stronger
