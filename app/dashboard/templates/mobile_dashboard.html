@@ -197,7 +197,8 @@
       const wr=watchlist.candidates??watchlist.selected_candidates??[];
       document.getElementById("mobile-watchlist-candidates").innerHTML=wr.length?wr.slice(0,8).map((r,i)=>{
         const code=String(r.code??"—");
-        const label=names[code]?`${code} ${names[code]}`:code;
+        const name=r.name??names[code]??"";
+        const label=name?`${code} ${name}`:code;
         const strategy=r.preferred_strategy??r.strategy_name??r.strategy??"—";
         const score=r.total_score??r.score??null;
         return `<article class="mobile-detail-card"><div class="mobile-card-heading"><strong>#${i+1} ${label}</strong><span>${score===null?"—":Number(score).toFixed(1)}</span></div><small>${strategy}</small></article>`;
@@ -212,7 +213,8 @@
 
       document.getElementById("mobile-trades").innerHTML=trades.length?trades.slice(0,10).map(t=>{
         const code=String(t.code??"—");
-        const label=names[code]?`${code} ${names[code]}`:code;
+        const name=t.name??names[code]??"";
+        const label=name?`${code} ${name}`:code;
         return `<article class="mobile-detail-card"><div class="mobile-card-heading"><strong>${label}</strong><span>${t.side??"—"}</span></div><div class="mobile-trade-row"><span>${t.strategy_name??"—"}</span><span>${t.quantity??"—"} shares</span><span>${val(t.execution_price,yen.format)}</span></div><small>${formatJst(t.executed_at)}</small></article>`;
       }).join(""):empty("No executions today.");
 

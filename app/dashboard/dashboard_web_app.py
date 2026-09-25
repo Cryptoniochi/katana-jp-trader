@@ -137,6 +137,38 @@ def create_dashboard_app(
         result["symbol_breakdown"] = rows
         return result
 
+    def enrich_symbol_rows(
+        payload: dict[str, object],
+        *keys: str,
+    ) -> dict[str, object]:
+        """指定された銘柄行へ名称を直接付与する。"""
+
+        result = dict(payload)
+        rows_by_key = {
+            key: [dict(row) for row in payload.get(key, [])]
+            for key in keys
+        }
+        codes = tuple(
+            str(row.get("code") or row.get("key") or "")
+            for rows in rows_by_key.values()
+            for row in rows
+        )
+        names: dict[str, str] = {}
+        if symbol_name_reader is not None and codes:
+            names = symbol_name_reader.read_all()
+            names.update(symbol_name_reader.resolve(
+                code for code in codes if code
+            ))
+
+        for key, rows in rows_by_key.items():
+            for row in rows:
+                code = str(
+                    row.get("code") or row.get("key") or ""
+                )
+                row["name"] = names.get(code)
+            result[key] = rows
+        return result
+
     @app.get(
         "/",
         response_class=HTMLResponse,
@@ -295,7 +327,11 @@ def create_dashboard_app(
                 "candidates": [],
             }
 
-        return dynamic_watchlist_reader.read()
+        return enrich_symbol_rows(
+            dynamic_watchlist_reader.read(),
+            "candidates",
+            "selected_candidates",
+        )
 
 
     @app.get("/api/dashboard/universe-history")
@@ -540,6 +576,10 @@ def create_dashboard_app(
                 "recent_completed_trades": [],
             }
 
-        return strategy_service.create_payload().to_dict()
+        return enrich_symbol_rows(
+            strategy_service.create_payload().to_dict(),
+            "recent_trades",
+            "recent_completed_trades",
+        )
 
     return app
