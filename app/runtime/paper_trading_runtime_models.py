@@ -69,6 +69,10 @@ class PaperTradingDailySummary:
     initial_equity: float | None
     final_equity: float | None
     external_execution_count: int = 0
+    authoritative_signal_count: int | None = None
+    authoritative_execution_count: int | None = None
+    authoritative_net_profit_loss: float | None = None
+    completed_trade_count: int | None = None
     error_message: str | None = None
 
     def __post_init__(self) -> None:
@@ -129,6 +133,16 @@ class PaperTradingDailySummary:
                 "外部約定数は0以上である必要があります。"
             )
 
+        for name, value in {
+            "正本シグナル数": self.authoritative_signal_count,
+            "正本約定数": self.authoritative_execution_count,
+            "完結取引数": self.completed_trade_count,
+        }.items():
+            if value is not None and value < 0:
+                raise ValueError(
+                    f"{name}は0以上である必要があります。"
+                )
+
         object.__setattr__(
             self,
             "error_message",
@@ -163,6 +177,9 @@ class PaperTradingDailySummary:
     def signal_count(self) -> int:
         """シグナル数合計を返す。"""
 
+        if self.authoritative_signal_count is not None:
+            return self.authoritative_signal_count
+
         return sum(
             record.cycle_result.signal_count
             for record in self.records
@@ -171,6 +188,9 @@ class PaperTradingDailySummary:
     @property
     def execution_count(self) -> int:
         """約定数合計を返す。"""
+
+        if self.authoritative_execution_count is not None:
+            return self.authoritative_execution_count
 
         return (
             sum(
@@ -212,6 +232,9 @@ class PaperTradingDailySummary:
     def net_profit_loss(self) -> float | None:
         """初期純資産から最終純資産までの増減額を返す。"""
 
+        if self.authoritative_net_profit_loss is not None:
+            return self.authoritative_net_profit_loss
+
         if (
             self.initial_equity is None
             or self.final_equity is None
@@ -225,6 +248,16 @@ class PaperTradingDailySummary:
     @property
     def return_rate(self) -> float | None:
         """日次リターン率を返す。"""
+
+        if (
+            self.authoritative_net_profit_loss is not None
+            and self.initial_equity not in {None, 0}
+        ):
+            assert self.initial_equity is not None
+            return (
+                self.authoritative_net_profit_loss
+                / self.initial_equity
+            )
 
         if (
             self.initial_equity is None

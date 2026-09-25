@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,7 +338,11 @@ class WatchlistExecutionIntegrityService:
         for raw in self.watchlist_path.read_text(
             encoding="utf-8"
         ).splitlines():
-            code = self._normalize_code(raw)
+            text = raw.strip()
+            if not text or text.startswith("#"):
+                continue
+            text = text.split("#", 1)[0].strip()
+            code = self._normalize_code(text)
             if code and code not in codes:
                 codes.append(code)
         return tuple(codes)

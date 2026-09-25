@@ -9,7 +9,6 @@ from app.runtime.watchlist_execution_integrity_service import (
     WatchlistExecutionIntegrityService,
 )
 
-
 DAY = date(2026, 8, 12)
 
 
@@ -141,7 +140,12 @@ def test_integrity_passes_for_matching_pipeline(
     _write_explainability(explainability)
     _write_trace(trace)
     watchlist.write_text(
-        "8306\n6758\n9432\n",
+        (
+            "# one symbol per line\n"
+            "8306\n"
+            "6758  # Sony Group\n"
+            "9432\n"
+        ),
         encoding="utf-8",
     )
 

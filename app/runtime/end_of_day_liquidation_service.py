@@ -91,16 +91,28 @@ class EndOfDayLiquidationService:
     def close_all_positions(self) -> EndOfDayLiquidationResult:
         """現在の全ポジションを成行EXITで決済する。"""
 
-        positions = tuple(self.broker.list_positions())
         execution_records: list[object] = []
         generated_at = self._current_time()
+        requested_count = 0
+        attempt = 0
 
-        for position in positions:
+        while True:
+            positions = tuple(self.broker.list_positions())
+            if not positions:
+                break
+            if attempt >= 10_000:
+                raise RuntimeError(
+                    "市場終了時の決済が上限回数を超えました。"
+                )
+
+            position = positions[0]
+            attempt += 1
             signal = TradeSignal(
                 signal_id=(
                     "end-of-day-"
                     f"{generated_at.date().isoformat()}-"
-                    f"{position.code}-{position.side.value}"
+                    f"{position.code}-{position.side.value}-"
+                    f"{attempt}"
                 ),
                 code=position.code,
                 strategy_name="end-of-day-liquidation",
@@ -126,39 +138,51 @@ class EndOfDayLiquidationService:
                     )
                 )
 
-            executed = self.execution_service.execute_next()
+            requested_count += 1
+            target_order_id = self._order_id(queued)
+            target_executed = False
 
-            if executed is None:
-                raise RuntimeError(
-                    "市場終了時の決済注文が執行されませんでした。 "
-                    f"code={position.code}"
-                )
+            while not target_executed:
+                executed = self.execution_service.execute_next()
 
-            if bool(getattr(executed, "is_failed", False)):
-                raise RuntimeError(
-                    getattr(executed, "message", None)
-                    or (
-                        "市場終了時の決済注文に失敗しました。 "
+                if executed is None:
+                    raise RuntimeError(
+                        "市場終了時の決済注文が執行されませんでした。 "
                         f"code={position.code}"
                     )
+
+                if bool(getattr(executed, "is_failed", False)):
+                    raise RuntimeError(
+                        getattr(executed, "message", None)
+                        or (
+                            "市場終了時の決済注文に失敗しました。 "
+                            f"code={position.code}"
+                        )
+                    )
+
+                execution_record = getattr(
+                    executed,
+                    "execution_record",
+                    None,
                 )
 
-            execution_record = getattr(
-                executed,
-                "execution_record",
-                None,
-            )
+                if execution_record is not None:
+                    self.portfolio_update_service.apply_execution(
+                        execution_record
+                    )
+                    execution_records.append(execution_record)
 
-            if execution_record is None:
-                raise RuntimeError(
-                    "市場終了時の決済約定が保存されませんでした。 "
-                    f"code={position.code}"
+                executed_order_id = self._order_id(executed)
+                target_executed = (
+                    target_order_id is None
+                    or executed_order_id == target_order_id
                 )
 
-            self.portfolio_update_service.apply_execution(
-                execution_record
-            )
-            execution_records.append(execution_record)
+                if target_executed and execution_record is None:
+                    raise RuntimeError(
+                        "市場終了時の決済約定が保存されませんでした。 "
+                        f"code={position.code}"
+                    )
 
         remaining = tuple(self.broker.list_positions())
 
@@ -174,11 +198,23 @@ class EndOfDayLiquidationService:
             )
 
         return EndOfDayLiquidationResult(
-            requested_count=len(positions),
+            requested_count=requested_count,
             executed_count=len(execution_records),
             remaining_position_count=0,
             execution_records=tuple(execution_records),
         )
+
+    @staticmethod
+    def _order_id(value: object) -> str | None:
+        direct = getattr(value, "order_id", None)
+        if direct:
+            return str(direct)
+        for attribute in ("order_record", "queued_order"):
+            nested = getattr(value, attribute, None)
+            nested_id = getattr(nested, "order_id", None)
+            if nested_id:
+                return str(nested_id)
+        return None
 
     def _current_time(self) -> datetime:
         value = self.now_provider()

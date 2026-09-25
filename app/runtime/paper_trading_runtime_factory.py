@@ -72,6 +72,7 @@ class PaperTradingRuntimeFactory:
         runtime = PaperTradingRuntime(
             cycle_runner=cycle_runner,
             portfolio_reader=portfolio_reader,
+            database_path=resolved_database_path,
             now_provider=now_provider,
         )
 

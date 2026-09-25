@@ -29,6 +29,7 @@ def paper_trading_daily_summary_to_dict(
         ),
         "signal_count": summary.signal_count,
         "execution_count": summary.execution_count,
+        "completed_trade_count": summary.completed_trade_count,
         "initial_equity": summary.initial_equity,
         "final_equity": summary.final_equity,
         "net_profit_loss": summary.net_profit_loss,

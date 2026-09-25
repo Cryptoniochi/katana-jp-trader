@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.runtime.daily_report_models import (
     DailyReportBreakdownRow,
@@ -276,7 +277,12 @@ class SQLiteDailyTradeRepository:
             if remaining_exit != 0:
                 continue
 
-            if executed_at.date() != report_date:
+            if (
+                executed_at.astimezone(
+                    ZoneInfo("Asia/Tokyo")
+                ).date()
+                != report_date
+            ):
                 continue
 
             for (

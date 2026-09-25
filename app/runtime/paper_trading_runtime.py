@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from collections.abc import Callable
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Protocol
+from zoneinfo import ZoneInfo
 
 from app.risk.risk_engine import RiskEngineResult
 from app.risk.risk_engine_runner import RiskEngineRunner
+from app.runtime.daily_report_service import SQLiteDailyTradeRepository
 from app.runtime.paper_trading_runtime_models import (
     PaperTradingCycleRecord,
     PaperTradingDailySummary,
@@ -24,10 +28,26 @@ from app.runtime.runtime_heartbeat_service import (
 )
 from app.trading.portfolio_models import PortfolioSnapshot
 
-
 DEFAULT_RUNTIME_STATUS_PATH = Path(
     "reports/service/paper_trading_runtime_status.json"
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _AuthoritativeDayMetrics:
+    signal_count: int
+    execution_count: int
+    completed_trade_count: int
+    realized_profit_loss: float
+    ledger_positions: tuple[tuple[str, int], ...]
+
+    @property
+    def ledger_position_count(self) -> int:
+        return sum(quantity != 0 for _, quantity in self.ledger_positions)
+
+    @property
+    def ledger_balanced(self) -> bool:
+        return self.ledger_position_count == 0
 
 
 class PaperTradingCycleRunner(Protocol):
@@ -59,6 +79,7 @@ class PaperTradingRuntime:
         risk_runner: RiskEngineRunner | None = None,
         heartbeat_service: RuntimeHeartbeatService | None = None,
         status_path: Path | None = DEFAULT_RUNTIME_STATUS_PATH,
+        database_path: Path | None = None,
         process_id_provider: Callable[[], int] = os.getpid,
         now_provider: Callable[[], datetime] | None = None,
     ) -> None:
@@ -73,6 +94,9 @@ class PaperTradingRuntime:
             if status_path is None
             else Path(status_path)
         )
+        self.database_path = (
+            None if database_path is None else Path(database_path)
+        )
         self.process_id_provider = process_id_provider
         self.last_status_publish_error: str | None = None
         self.now_provider = (
@@ -86,6 +110,7 @@ class PaperTradingRuntime:
         self._initial_equity: float | None = None
         self._initial_unrealized_profit_loss: float | None = None
         self._external_execution_count = 0
+        self._authoritative_day_metrics: _AuthoritativeDayMetrics | None = None
         self._status: PaperTradingRuntimeStatus | None = None
 
     @property
@@ -143,6 +168,7 @@ class PaperTradingRuntime:
             initial_snapshot.total_unrealized_profit_loss
         )
         self._external_execution_count = 0
+        self._authoritative_day_metrics = None
         self._status = PaperTradingRuntimeStatus.RUNNING
         self._record_heartbeat(
             event="started",
@@ -306,8 +332,37 @@ class PaperTradingRuntime:
                 "Paper Trading Runtimeが開始されていません。"
             )
 
+        trading_date = self._started_at.astimezone(
+            ZoneInfo("Asia/Tokyo")
+        ).date()
+        self._authoritative_day_metrics = (
+            self._load_authoritative_day_metrics(trading_date)
+        )
+        derived_signal_count = sum(
+            record.cycle_result.signal_count
+            for record in self._records
+        )
+        derived_execution_count = (
+            sum(
+                record.cycle_result.execution_count
+                for record in self._records
+            )
+            + self._external_execution_count
+        )
+        if (
+            self._authoritative_day_metrics is not None
+            and self._authoritative_day_metrics.signal_count == 0
+            and self._authoritative_day_metrics.execution_count == 0
+            and (derived_signal_count > 0 or derived_execution_count > 0)
+        ):
+            # Test doubles and legacy callers may supply a database without
+            # persisting the cycle. Do not replace genuine runtime activity
+            # with an empty ledger in that compatibility case.
+            self._authoritative_day_metrics = None
+        metrics = self._authoritative_day_metrics
+
         summary = PaperTradingDailySummary(
-            trading_date=self._started_at.date(),
+            trading_date=trading_date,
             started_at=self._started_at,
             completed_at=completed_at,
             status=status,
@@ -316,6 +371,18 @@ class PaperTradingRuntime:
             final_equity=final_snapshot.broker_equity,
             external_execution_count=(
                 self._external_execution_count
+            ),
+            authoritative_signal_count=(
+                None if metrics is None else metrics.signal_count
+            ),
+            authoritative_execution_count=(
+                None if metrics is None else metrics.execution_count
+            ),
+            authoritative_net_profit_loss=(
+                None if metrics is None else metrics.realized_profit_loss
+            ),
+            completed_trade_count=(
+                None if metrics is None else metrics.completed_trade_count
             ),
             error_message=error_message,
         )
@@ -404,6 +471,10 @@ class PaperTradingRuntime:
             cycle_execution_count
             + self._external_execution_count
         )
+        metrics = self._authoritative_day_metrics
+        if metrics is not None:
+            signal_count = metrics.signal_count
+            execution_count = metrics.execution_count
         current_equity = (
             portfolio_snapshot.broker_equity
         )
@@ -441,11 +512,20 @@ class PaperTradingRuntime:
             >= 0.01
             for position in portfolio_snapshot.positions
         )
-        realized_profit_loss = (
-            position_realized_profit_loss
-            if use_position_realized
-            else reconciled_realized_profit_loss
-        )
+        if metrics is not None:
+            realized_profit_loss = metrics.realized_profit_loss
+            realized_profit_loss_source = "execution_ledger_fifo"
+        else:
+            realized_profit_loss = (
+                position_realized_profit_loss
+                if use_position_realized
+                else reconciled_realized_profit_loss
+            )
+            realized_profit_loss_source = (
+                "portfolio_positions"
+                if use_position_realized
+                else "equity_reconciliation"
+            )
         total_portfolio_profit_loss = (
             None
             if realized_profit_loss is None
@@ -475,7 +555,9 @@ class PaperTradingRuntime:
             "trading_date": (
                 None
                 if self._started_at is None
-                else self._started_at.date().isoformat()
+                else self._started_at.astimezone(
+                    ZoneInfo("Asia/Tokyo")
+                ).date().isoformat()
             ),
             "state": (
                 "not_started"
@@ -510,13 +592,30 @@ class PaperTradingRuntime:
             ),
             "initial_equity": self._initial_equity,
             "current_equity": current_equity,
-            "net_profit_loss": session_equity_change,
+            "net_profit_loss": (
+                realized_profit_loss
+                if metrics is not None
+                else session_equity_change
+            ),
             "session_equity_change": session_equity_change,
             "realized_profit_loss": realized_profit_loss,
-            "realized_profit_loss_source": (
-                "portfolio_positions"
-                if use_position_realized
-                else "equity_reconciliation"
+            "realized_profit_loss_source": realized_profit_loss_source,
+            "completed_trade_count": (
+                None if metrics is None else metrics.completed_trade_count
+            ),
+            "execution_ledger_balanced": (
+                None if metrics is None else metrics.ledger_balanced
+            ),
+            "execution_ledger_position_count": (
+                None if metrics is None else metrics.ledger_position_count
+            ),
+            "execution_ledger_positions": (
+                []
+                if metrics is None
+                else [
+                    {"code": code, "quantity": quantity}
+                    for code, quantity in metrics.ledger_positions
+                ]
             ),
             "initial_unrealized_profit_loss": (
                 initial_unrealized_profit_loss
@@ -570,6 +669,117 @@ class PaperTradingRuntime:
             self.last_status_publish_error = (
                 f"{type(error).__name__}: {error}"
             )
+
+    def _load_authoritative_day_metrics(
+        self,
+        trading_date: date,
+    ) -> _AuthoritativeDayMetrics | None:
+        """約定台帳から日次件数・FIFO損益・残高を読み取る。"""
+
+        if self.database_path is None or not self.database_path.exists():
+            return None
+
+        try:
+            closed_trades = SQLiteDailyTradeRepository(
+                self.database_path
+            ).list_closed_trades(trading_date)
+            with sqlite3.connect(
+                self.database_path,
+                timeout=5.0,
+            ) as connection:
+                connection.row_factory = sqlite3.Row
+                signal_count = self._count_rows_for_date(
+                    connection,
+                    table_name="trade_signals",
+                    timestamp_column="generated_at",
+                    trading_date=trading_date,
+                )
+                execution_count = self._count_rows_for_date(
+                    connection,
+                    table_name="trade_executions",
+                    timestamp_column="executed_at",
+                    trading_date=trading_date,
+                )
+                ledger_positions = self._load_ledger_positions(
+                    connection,
+                    trading_date=trading_date,
+                )
+        except (OSError, sqlite3.Error, RuntimeError, ValueError):
+            return None
+
+        return _AuthoritativeDayMetrics(
+            signal_count=signal_count,
+            execution_count=execution_count,
+            completed_trade_count=len(closed_trades),
+            realized_profit_loss=sum(
+                trade.realized_profit_loss for trade in closed_trades
+            ),
+            ledger_positions=ledger_positions,
+        )
+
+    @staticmethod
+    def _count_rows_for_date(
+        connection: sqlite3.Connection,
+        *,
+        table_name: str,
+        timestamp_column: str,
+        trading_date: date,
+    ) -> int:
+        rows = connection.execute(
+            f"SELECT {timestamp_column} FROM {table_name}"
+        ).fetchall()
+        tokyo = ZoneInfo("Asia/Tokyo")
+        return sum(
+            PaperTradingRuntime._parse_timestamp(row[0])
+            .astimezone(tokyo)
+            .date()
+            == trading_date
+            for row in rows
+        )
+
+    @staticmethod
+    def _load_ledger_positions(
+        connection: sqlite3.Connection,
+        *,
+        trading_date: date,
+    ) -> tuple[tuple[str, int], ...]:
+        rows = connection.execute(
+            """
+            SELECT code, side, quantity, executed_at
+            FROM trade_executions
+            ORDER BY executed_at ASC, id ASC
+            """
+        ).fetchall()
+        tokyo = ZoneInfo("Asia/Tokyo")
+        positions: dict[str, int] = {}
+        for row in rows:
+            executed_at = PaperTradingRuntime._parse_timestamp(
+                row["executed_at"]
+            )
+            if executed_at.astimezone(tokyo).date() > trading_date:
+                continue
+            code = str(row["code"]).strip()
+            quantity = int(row["quantity"])
+            side = str(row["side"]).strip().lower()
+            positions[code] = positions.get(code, 0) + (
+                quantity if side == "buy" else -quantity
+            )
+        return tuple(
+            sorted(
+                (code, quantity)
+                for code, quantity in positions.items()
+                if quantity != 0
+            )
+        )
+
+    @staticmethod
+    def _parse_timestamp(value: object) -> datetime:
+        parsed = datetime.fromisoformat(
+            str(value).strip().replace("Z", "+00:00")
+        )
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
 
     @staticmethod
     def _position_unrealized_profit_loss(

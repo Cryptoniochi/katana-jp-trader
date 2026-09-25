@@ -211,13 +211,26 @@ class FullDayValidationService:
                 runtime.get("portfolio_position_count")
             ),
         )
+        ledger_balanced = runtime.get(
+            "execution_ledger_balanced"
+        )
+        ledger_position_count = self._integer(
+            runtime.get("execution_ledger_position_count")
+        )
+        end_of_day_positions_ok = (
+            runtime_positions == 0
+            and ledger_balanced is not False
+            and ledger_position_count == 0
+        )
         checks.append(
             FullDayValidationCheck(
                 key="end_of_day_positions",
                 label="End-of-day positions",
-                passed=runtime_positions == 0,
+                passed=end_of_day_positions_ok,
                 message=(
-                    f"remaining_position_count={runtime_positions}"
+                    f"runtime_position_count={runtime_positions}, "
+                    f"ledger_position_count={ledger_position_count}, "
+                    f"ledger_balanced={ledger_balanced}"
                 ),
             )
         )
@@ -436,9 +449,19 @@ class FullDayValidationService:
         trade_count = self._integer(
             report_summary.get("trade_count")
         )
+        runtime_completed_trade_count = runtime.get(
+            "completed_trade_count"
+        )
         completed_trade_count_ok = (
-            trade_count == 0
-            or runtime_execution_count >= trade_count
+            (
+                self._integer(runtime_completed_trade_count)
+                == trade_count
+            )
+            if runtime_completed_trade_count is not None
+            else (
+                trade_count == 0
+                or runtime_execution_count >= trade_count
+            )
         )
         checks.append(
             FullDayValidationCheck(
@@ -446,8 +469,9 @@ class FullDayValidationService:
                 label="Completed-trade plausibility",
                 passed=completed_trade_count_ok,
                 message=(
-                    f"completed_trades={trade_count}, "
-                    f"executions={runtime_execution_count}"
+                    f"daily_report={trade_count}, "
+                    "execution_ledger="
+                    f"{runtime_completed_trade_count}"
                 ),
             )
         )
@@ -562,6 +586,10 @@ class FullDayValidationService:
             "external_execution_count",
             "open_position_count",
             "portfolio_position_count",
+            "completed_trade_count",
+            "execution_ledger_balanced",
+            "execution_ledger_position_count",
+            "execution_ledger_positions",
             "realized_profit_loss",
             "session_equity_change",
             "pnl_reconciliation_difference",

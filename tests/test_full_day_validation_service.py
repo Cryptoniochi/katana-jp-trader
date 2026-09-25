@@ -12,7 +12,6 @@ from app.runtime.full_day_validation_service import (
     FullDayValidationService,
 )
 
-
 DAY = date(2026, 8, 12)
 NOW = datetime(
     2026,
@@ -88,6 +87,10 @@ def _service(
             "external_execution_count": 2,
             "open_position_count": 0,
             "portfolio_position_count": 0,
+            "completed_trade_count": 2,
+            "execution_ledger_balanced": True,
+            "execution_ledger_position_count": 0,
+            "execution_ledger_positions": [],
             "realized_profit_loss": 5000.0,
             "session_equity_change": 5000.0,
             "pnl_reconciliation_difference": 0.0,
@@ -188,6 +191,32 @@ def test_full_day_validation_fails_open_positions(
     assert "end_of_day_positions" in failed
 
 
+def test_full_day_validation_fails_unbalanced_execution_ledger(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    payload = json.loads(
+        service.runtime_status_path.read_text(
+            encoding="utf-8"
+        )
+    )
+    payload["execution_ledger_balanced"] = False
+    payload["execution_ledger_position_count"] = 1
+    payload["execution_ledger_positions"] = [
+        {"code": "7203", "quantity": 100}
+    ]
+    _write(service.runtime_status_path, payload)
+
+    result = service.validate(trading_date=DAY)
+
+    assert result.passed is False
+    assert any(
+        check.key == "end_of_day_positions"
+        and not check.passed
+        for check in result.checks
+    )
+
+
 def test_full_day_validation_fails_integrity_mismatch(
     tmp_path: Path,
 ) -> None:
@@ -264,6 +293,7 @@ def test_empty_no_trade_day_can_validate(
     )
     runtime["signal_count"] = 0
     runtime["execution_count"] = 0
+    runtime["completed_trade_count"] = 0
     runtime["realized_profit_loss"] = 0.0
     runtime["session_equity_change"] = 0.0
     _write(
