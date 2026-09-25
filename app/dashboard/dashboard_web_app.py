@@ -110,6 +110,33 @@ def create_dashboard_app(
         name="static",
     )
 
+    def enrich_daily_report_symbols(
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        """日次レポートの銘柄別成績へ銘柄名を付与する。"""
+
+        result = dict(payload)
+        raw_rows = payload.get("symbol_breakdown", [])
+        rows = [dict(row) for row in raw_rows]
+        if symbol_name_reader is None or not rows:
+            result["symbol_breakdown"] = rows
+            return result
+
+        codes = tuple(
+            str(row.get("key") or row.get("code") or "")
+            for row in rows
+        )
+        names = symbol_name_reader.read_all()
+        names.update(symbol_name_reader.resolve(
+            code for code in codes if code
+        ))
+        for row, code in zip(rows, codes, strict=True):
+            row["code"] = code
+            row["name"] = names.get(code)
+
+        result["symbol_breakdown"] = rows
+        return result
+
     @app.get(
         "/",
         response_class=HTMLResponse,
@@ -396,7 +423,9 @@ def create_dashboard_app(
             }
 
         if report_date is None:
-            return daily_report_reader.read_latest()
+            return enrich_daily_report_symbols(
+                daily_report_reader.read_latest()
+            )
 
         try:
             parsed_date = date.fromisoformat(
@@ -410,8 +439,10 @@ def create_dashboard_app(
                 ),
             )
 
-        return daily_report_reader.read_for_date(
-            parsed_date
+        return enrich_daily_report_symbols(
+            daily_report_reader.read_for_date(
+                parsed_date
+            )
         )
 
     @app.get("/api/dashboard/paper-trading-schedule")

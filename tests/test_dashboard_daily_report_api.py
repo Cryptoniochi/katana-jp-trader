@@ -44,7 +44,14 @@ class FakeDailyReportReader:
                 "net_profit_loss": 1200.0,
             },
             "strategy_breakdown": [],
-            "symbol_breakdown": [],
+            "symbol_breakdown": [
+                {
+                    "key": "7203",
+                    "label": "7203",
+                    "trade_count": 1,
+                    "net_profit_loss": 1200.0,
+                }
+            ],
             "error_count": 0,
             "recovery_count": 1,
             "notes": [],
@@ -113,3 +120,34 @@ def test_daily_report_api_rejects_invalid_date() -> None:
     )
 
     assert response.status_code == 422
+
+
+def test_daily_report_api_enriches_symbol_names() -> None:
+    class FakeSymbolNameReader:
+        def read_all(self):
+            return {}
+
+        def resolve(self, codes):
+            assert tuple(codes) == ("7203",)
+            return {"7203": "トヨタ自動車"}
+
+    app = create_dashboard_app(
+        service=FakeDashboardService(),
+        daily_report_reader=FakeDailyReportReader(),
+        symbol_name_reader=FakeSymbolNameReader(),
+    )
+
+    response = TestClient(app).get(
+        "/api/dashboard/daily-report"
+        "?report_date=2026-08-01"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["symbol_breakdown"][0] == {
+        "key": "7203",
+        "label": "7203",
+        "code": "7203",
+        "name": "トヨタ自動車",
+        "trade_count": 1,
+        "net_profit_loss": 1200.0,
+    }

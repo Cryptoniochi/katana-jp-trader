@@ -25,6 +25,11 @@
     </section>
 
     <section>
+      <div class="mobile-section-title"><h2>Today's Trade Results</h2></div>
+      <div id="mobile-daily-symbol-results" class="mobile-card-list"></div>
+    </section>
+
+    <section>
       <div class="mobile-section-title"><h2>Runtime</h2><span id="mobile-runtime-state" class="status-pill">UNKNOWN</span></div>
       <article class="mobile-detail-card">
         <div class="mobile-detail-grid">
@@ -139,6 +144,15 @@
       document.getElementById("mobile-executions").textContent=runtime.execution_count??live.execution_count??0;
       document.getElementById("mobile-win-loss").textContent=dailyReportToday?`${dailySummary.win_count??0}勝 ${dailySummary.loss_count??0}敗` : "—";
       document.getElementById("mobile-win-rate").textContent=dailyReportToday&&dailySummary.win_rate!==null&&dailySummary.win_rate!==undefined?`${(Number(dailySummary.win_rate)*100).toFixed(1)}%` : "—";
+      const symbolResults=dailyReportToday?(dailyReport.symbol_breakdown??[]):[];
+      document.getElementById("mobile-daily-symbol-results").innerHTML=symbolResults.length?symbolResults.map(row=>{
+        const code=String(row.code??row.key??"—");
+        const name=row.name??names[code]??"";
+        const label=name?`${code} ${name}`:code;
+        const pnl=Number(row.net_profit_loss??0);
+        const outcome=pnl>0?"WIN":pnl<0?"LOSS":"FLAT";
+        return `<article class="mobile-detail-card"><div class="mobile-card-heading"><strong>${label}</strong><span>${outcome}</span></div><div class="mobile-trade-row"><span>${row.trade_count??0} trade</span><span>${val(pnl,yen.format)}</span></div></article>`;
+      }).join(""):empty("No completed trades today.");
       const closedDay=schedule.business_day===false;
       const readinessReady=String(readiness.overall_state??readiness.state??readiness.status??"").toLowerCase()==="ready"||readiness.ready_for_paper_trading===true;
       const healthState=String(health.status??"").toLowerCase();
