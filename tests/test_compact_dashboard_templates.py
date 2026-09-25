@@ -30,6 +30,9 @@ def test_desktop_compact_dashboard_keeps_daily_operational_core() -> None:
     assert "/api/dashboard/strategies" in content
     assert "/api/dashboard/full-day-validation" in content
     assert "/api/dashboard/symbol-names" in content
+    assert "/api/dashboard/daily-report" in content
+    assert 'id="win-count"' in content
+    assert 'id="loss-count"' in content
 
 
 def test_mobile_compact_dashboard_keeps_daily_operational_core() -> None:
@@ -49,6 +52,8 @@ def test_mobile_compact_dashboard_keeps_daily_operational_core() -> None:
     assert "/api/dashboard/strategies" in content
     assert "/api/dashboard/full-day-validation" in content
     assert "/api/dashboard/symbol-names" in content
+    assert "/api/dashboard/daily-report" in content
+    assert 'id="mobile-win-loss"' in content
 
 
 def test_compact_dashboard_hides_legacy_verbose_panels() -> None:

@@ -23,6 +23,10 @@
         <article><span>Positions</span><strong id="position-count">—</strong></article>
         <article><span>Signals</span><strong id="signal-count">—</strong></article>
         <article><span>Executions</span><strong id="execution-count">—</strong></article>
+        <article><span>Trades</span><strong id="trade-count">—</strong></article>
+        <article><span>Wins</span><strong id="win-count">—</strong></article>
+        <article><span>Losses</span><strong id="loss-count">—</strong></article>
+        <article><span>Win Rate</span><strong id="win-rate">—</strong></article>
       </div>
     </section>
 
@@ -86,7 +90,26 @@ function renderWatchlist(p,names){status(document.getElementById("watchlist-stat
 function renderTrades(trades,names){const body=document.getElementById("recent-trades-body");const rows=(trades??[]).filter(t=>{if(!t.executed_at)return false;const p=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Tokyo",year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(new Date(t.executed_at));const g=k=>p.find(x=>x.type===k)?.value??"";return `${g("year")}-${g("month")}-${g("day")}`===todayKey();});body.innerHTML=rows.length?rows.slice(0,20).map(t=>{const code=String(t.code??"—");const label=names[code]?`${code} ${names[code]}`:code;return `<tr><td>${formatJst(t.executed_at)}</td><td>${t.strategy_name??"—"}</td><td>${label}</td><td>${t.side??"—"}</td><td>${t.quantity??"—"}</td><td>${val(t.execution_price,yen.format)}</td></tr>`;}).join(""):'<tr><td colspan="6" class="muted">No executions today.</td></tr>';}
 function renderPositions(rows,names){const body=document.getElementById("positions-body");body.innerHTML=rows?.length?rows.map(p=>{const code=String(p.code??"—");const label=names[code]?`${code} ${names[code]}`:code;return `<tr><td>${label}</td><td>${p.side??"—"}</td><td>${p.quantity??"—"}</td><td>${val(p.average_cost,yen.format)}</td><td>${val(p.market_price,yen.format)}</td><td>${val(p.unrealized_profit_loss,yen.format)}</td></tr>`;}).join(""):'<tr><td colspan="6" class="muted">No open positions.</td></tr>';}
 async function refresh(){const [summary,runtime,watchlist,strategies,service,fullDay,namesPayload,readiness,schedule]=await Promise.all([getJson("/api/dashboard/summary"),getJson("/api/dashboard/paper-trading-runtime"),getJson("/api/dashboard/dynamic-watchlist"),getJson("/api/dashboard/strategies"),getJson("/api/dashboard/service-status"),getJson("/api/dashboard/full-day-validation"),getJson("/api/dashboard/symbol-names"),getJson("/api/dashboard/operational-readiness"),getJson("/api/dashboard/paper-trading-schedule")]);const snapshot=summary.snapshot??{};const portfolio=snapshot.portfolio??{};const live=snapshot.live_summary??{};const health=snapshot.system_health??{};const names=namesPayload.symbol_names??namesPayload.names??namesPayload??{};const runtimeToday=runtime.available===true&&String(runtime.trading_date??"")===todayKey();const todayPl=runtimeToday?(runtime.total_portfolio_profit_loss??runtime.realized_profit_loss??runtime.session_equity_change??runtime.net_profit_loss??null):null;document.getElementById("updated-at").textContent=`Updated: ${formatJst(summary.generated_at)}`;document.getElementById("today-pl").textContent=val(todayPl,yen.format);document.getElementById("realized-pl").textContent=runtimeToday?val(runtime.realized_profit_loss,yen.format):"—";document.getElementById("unrealized-pl").textContent=runtimeToday?val(runtime.unrealized_profit_loss,yen.format):"—";document.getElementById("position-count").textContent=runtimeToday?(runtime.portfolio_position_count??portfolio.position_count??0):(portfolio.position_count??0);document.getElementById("signal-count").textContent=runtimeToday?(runtime.signal_count??live.signal_count??0):(live.signal_count??0);document.getElementById("execution-count").textContent=runtimeToday?(runtime.execution_count??live.execution_count??0):(live.execution_count??0);const closedDay=schedule.business_day===false;const readinessReady=String(readiness.overall_state??readiness.state??readiness.status??"").toLowerCase()==="ready"||readiness.ready_for_paper_trading===true;const healthState=String(health.status??"").toLowerCase();const healthFailed=["critical","failed","error"].includes(healthState);const overallDisplayState=healthFailed?healthState:(readinessReady?(closedDay?"closed_day":"ready"):(health.status??(snapshot.partial?"partial":"available")));status(document.getElementById("system-status"),overallDisplayState);const runtimeDisplayState=runtimeToday?(runtime.state??runtime.status??"running"):(closedDay?"closed_day":"not_reported");status(document.getElementById("runtime-state"),runtimeDisplayState);document.getElementById("runtime-date").textContent=runtimeToday?(runtime.trading_date??"—"):"—";document.getElementById("runtime-pid").textContent=runtimeToday?(runtime.process_id??runtime.pid??"—"):"—";document.getElementById("runtime-cycles").textContent=runtimeToday?(runtime.cycle_count??runtime.cycles??"—"):"—";document.getElementById("runtime-failed").textContent=runtimeToday?(runtime.failed_cycle_count??runtime.failed_cycles??"—"):"—";document.getElementById("runtime-message").textContent=runtimeToday?(runtime.message??"—"):(closedDay?"Tokyo market is closed today.":"No Paper Trading Runtime report for today.");const kabu=service.kabu_station??service.kabu??{};const age=service.status_age_seconds;const serviceState=(age!==null&&age!==undefined&&Number(age)>120)?"stale":(service.state??service.status??"unknown");status(document.getElementById("service-state"),serviceState);document.getElementById("service-age").textContent=age===null||age===undefined?"—":`${Math.round(Number(age))}s`;document.getElementById("kabu-state").textContent=kabu.readiness??kabu.status??service.kabu_station_readiness??"—";renderReadiness(readiness);renderSchedule(schedule);renderWatchlist(watchlist,names);renderTrades(strategies.recent_trades??[],names);renderPositions(portfolio.positions??runtime.positions??[],names);status(document.getElementById("full-day-state"),fullDay.state??"unknown");document.getElementById("full-day-message").textContent=fullDay.message??"Full-Day Validation has not been loaded yet.";}
-refresh();window.setInterval(refresh,30000);
+async function refreshWithDailyReport(){
+  await refresh();
+  const report=await getJson(`/api/dashboard/daily-report?report_date=${todayKey()}`);
+  const reportToday=report.available===true&&String(report.report_date??"")===todayKey();
+  const summary=report.summary??{};
+  if(reportToday){
+    document.getElementById("today-pl").textContent=val(summary.net_profit_loss,yen.format);
+    document.getElementById("realized-pl").textContent=val(summary.net_profit_loss,yen.format);
+    document.getElementById("trade-count").textContent=summary.trade_count??0;
+    document.getElementById("win-count").textContent=summary.win_count??0;
+    document.getElementById("loss-count").textContent=summary.loss_count??0;
+    document.getElementById("win-rate").textContent=summary.win_rate===null||summary.win_rate===undefined?"—":`${(Number(summary.win_rate)*100).toFixed(1)}%`;
+  }else{
+    document.getElementById("trade-count").textContent="—";
+    document.getElementById("win-count").textContent="—";
+    document.getElementById("loss-count").textContent="—";
+    document.getElementById("win-rate").textContent="—";
+  }
+}
+refreshWithDailyReport();window.setInterval(refreshWithDailyReport,30000);
 </script>
 </body>
 </html>

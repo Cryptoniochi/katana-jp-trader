@@ -196,7 +196,11 @@ def create_dashboard_app(
             watchlist = dynamic_watchlist_reader.read()
             codes.extend(
                 str(candidate.get("code") or "")
-                for candidate in watchlist.get("candidates", [])
+                for key in (
+                    "candidates",
+                    "selected_candidates",
+                )
+                for candidate in watchlist.get(key, [])
             )
 
         if watchlist_execution_integrity_reader is not None:
@@ -217,11 +221,19 @@ def create_dashboard_app(
                 for trade in strategies.get(key, [])
             )
 
-        names = symbol_name_reader.resolve(
+        if daily_report_reader is not None:
+            daily_report = daily_report_reader.read_latest()
+            codes.extend(
+                str(row.get("key") or row.get("code") or "")
+                for row in daily_report.get("symbol_breakdown", [])
+            )
+
+        names = symbol_name_reader.read_all()
+        names.update(symbol_name_reader.resolve(
             code
             for code in codes
             if code
-        )
+        ))
         return {
             "count": len(names),
             "names": names,

@@ -20,6 +20,8 @@
       <article class="mobile-primary-card"><span>Positions</span><strong id="mobile-positions">—</strong></article>
       <article class="mobile-primary-card"><span>Signals</span><strong id="mobile-signals">—</strong></article>
       <article class="mobile-primary-card"><span>Executions</span><strong id="mobile-executions">—</strong></article>
+      <article class="mobile-primary-card"><span>Wins / Losses</span><strong id="mobile-win-loss">—</strong></article>
+      <article class="mobile-primary-card"><span>Win Rate</span><strong id="mobile-win-rate">—</strong></article>
     </section>
 
     <section>
@@ -108,7 +110,7 @@
     const empty=text=>`<article class="mobile-empty-card">${text}</article>`;
 
     async function refresh(){
-      const [summary,runtime,watchlist,strategies,fullDay,namesPayload,readiness,schedule]=await Promise.all([
+      const [summary,runtime,watchlist,strategies,fullDay,namesPayload,readiness,schedule,dailyReport]=await Promise.all([
         getJson("/api/dashboard/summary"),
         getJson("/api/dashboard/paper-trading-runtime"),
         getJson("/api/dashboard/dynamic-watchlist"),
@@ -116,7 +118,8 @@
         getJson("/api/dashboard/full-day-validation"),
         getJson("/api/dashboard/symbol-names"),
         getJson("/api/dashboard/operational-readiness"),
-        getJson("/api/dashboard/paper-trading-schedule")
+        getJson("/api/dashboard/paper-trading-schedule"),
+        getJson(`/api/dashboard/daily-report?report_date=${todayKey()}`)
       ]);
 
       const snapshot=summary.snapshot??{};
@@ -125,13 +128,17 @@
       const health=snapshot.system_health??{};
       const names=namesPayload.symbol_names??namesPayload.names??namesPayload??{};
       const runtimeToday=runtime.available===true&&String(runtime.trading_date??"")===todayKey();
-      const todayPl=runtimeToday?(runtime.realized_profit_loss??runtime.session_equity_change??runtime.net_profit_loss??null):null;
+      const dailyReportToday=dailyReport.available===true&&String(dailyReport.report_date??"")===todayKey();
+      const dailySummary=dailyReport.summary??{};
+      const todayPl=dailyReportToday?(dailySummary.net_profit_loss??null):(runtimeToday?(runtime.realized_profit_loss??runtime.net_profit_loss??runtime.session_equity_change??null):null);
 
       document.getElementById("mobile-updated-at").textContent=`Updated: ${formatJst(summary.generated_at)}`;
       document.getElementById("mobile-today-pl").textContent=val(todayPl,yen.format);
       document.getElementById("mobile-positions").textContent=runtime.portfolio_position_count??portfolio.position_count??0;
       document.getElementById("mobile-signals").textContent=runtime.signal_count??live.signal_count??0;
       document.getElementById("mobile-executions").textContent=runtime.execution_count??live.execution_count??0;
+      document.getElementById("mobile-win-loss").textContent=dailyReportToday?`${dailySummary.win_count??0}勝 ${dailySummary.loss_count??0}敗` : "—";
+      document.getElementById("mobile-win-rate").textContent=dailyReportToday&&dailySummary.win_rate!==null&&dailySummary.win_rate!==undefined?`${(Number(dailySummary.win_rate)*100).toFixed(1)}%` : "—";
       const closedDay=schedule.business_day===false;
       const readinessReady=String(readiness.overall_state??readiness.state??readiness.status??"").toLowerCase()==="ready"||readiness.ready_for_paper_trading===true;
       const healthState=String(health.status??"").toLowerCase();
@@ -144,7 +151,7 @@
       document.getElementById("mobile-runtime-pid").textContent=runtimeToday?(runtime.process_id??runtime.pid??"—"):"—";
       document.getElementById("mobile-runtime-cycles").textContent=runtimeToday?(runtime.cycle_count??runtime.cycles??"—"):"—";
       document.getElementById("mobile-runtime-failed").textContent=runtimeToday?(runtime.failed_cycle_count??runtime.failed_cycles??"—"):"—";
-      document.getElementById("mobile-realized").textContent=runtimeToday?val(runtime.realized_profit_loss,yen.format):"—";
+      document.getElementById("mobile-realized").textContent=dailyReportToday?val(dailySummary.net_profit_loss,yen.format):(runtimeToday?val(runtime.realized_profit_loss,yen.format):"—");
       document.getElementById("mobile-unrealized").textContent=runtimeToday?val(runtime.unrealized_profit_loss,yen.format):"—";
       document.getElementById("mobile-runtime-message").textContent=runtimeToday?(runtime.message??"—"):(closedDay?"Tokyo market is closed today.":"No Paper Trading Runtime report for today.");
 
