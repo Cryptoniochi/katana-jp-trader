@@ -743,11 +743,27 @@ class PaperTradingRuntime:
         *,
         trading_date: date,
     ) -> tuple[tuple[str, int], ...]:
-        rows = connection.execute(
+        applied_join = ""
+        table_exists = connection.execute(
             """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name = 'position_applied_executions'
+            """
+        ).fetchone()
+        if table_exists is not None:
+            applied_join = """
+            JOIN position_applied_executions AS p
+              ON p.execution_id = e.execution_id
+            """
+
+        rows = connection.execute(
+            f"""
             SELECT code, side, quantity, executed_at
-            FROM trade_executions
-            ORDER BY executed_at ASC, id ASC
+            FROM trade_executions AS e
+            {applied_join}
+            ORDER BY e.executed_at ASC, e.id ASC
             """
         ).fetchall()
         tokyo = ZoneInfo("Asia/Tokyo")

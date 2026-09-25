@@ -144,8 +144,20 @@ class SQLiteDailyTradeRepository:
     ) -> tuple[DailyTradeRecord, ...]:
         """全約定をコード単位FIFOで照合し、対象日の決済取引を返す。"""
 
-        rows = connection.execute(
+        applied_join = ""
+        if cls._table_exists(
+            connection,
+            "position_applied_executions",
+        ):
+            # Portfolioへ反映されなかった約定は資金・ポジションを
+            # 動かしていないため、確定損益の正本には含めない。
+            applied_join = """
+            JOIN position_applied_executions AS p
+              ON p.execution_id = e.execution_id
             """
+
+        rows = connection.execute(
+            f"""
             SELECT
                 e.id,
                 e.execution_id,
@@ -159,6 +171,7 @@ class SQLiteDailyTradeRepository:
                 s.strategy_name,
                 s.action
             FROM trade_executions AS e
+            {applied_join}
             JOIN trade_signals AS s
               ON s.signal_id = e.signal_id
             ORDER BY e.executed_at ASC, e.id ASC

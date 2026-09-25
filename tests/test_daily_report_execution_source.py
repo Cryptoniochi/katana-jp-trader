@@ -173,6 +173,74 @@ def test_execution_fifo_is_used_when_trade_journal_is_empty(
     assert report.summary.win_rate == 0.0
 
 
+def test_unapplied_executions_are_excluded_from_realized_pnl(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "katana.db"
+    _create_execution_schema(database)
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE position_applied_executions (
+                execution_id TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )
+            """
+        )
+        _signal(connection, "buy-1", "orb", "buy")
+        _signal(connection, "exit-ghost", "orb", "exit")
+        _signal(connection, "exit-applied", "eod", "exit")
+        _execution(
+            connection,
+            execution_id="buy-execution",
+            signal_id="buy-1",
+            code="6981",
+            side="buy",
+            quantity=100,
+            price=8095.0,
+            executed_at="2026-08-07T00:30:00+00:00",
+        )
+        _execution(
+            connection,
+            execution_id="ghost-exit",
+            signal_id="exit-ghost",
+            code="6981",
+            side="sell",
+            quantity=100,
+            price=8075.0,
+            executed_at="2026-08-07T02:10:00+00:00",
+        )
+        _execution(
+            connection,
+            execution_id="applied-exit",
+            signal_id="exit-applied",
+            code="6981",
+            side="sell",
+            quantity=100,
+            price=8039.0,
+            executed_at="2026-08-07T06:30:00+00:00",
+        )
+        connection.executemany(
+            """
+            INSERT INTO position_applied_executions (
+                execution_id,
+                applied_at
+            ) VALUES (?, ?)
+            """,
+            (
+                ("buy-execution", "2026-08-07T00:30:00+00:00"),
+                ("applied-exit", "2026-08-07T06:30:00+00:00"),
+            ),
+        )
+
+    records = SQLiteDailyTradeRepository(
+        database
+    ).list_closed_trades(REPORT_DATE)
+
+    assert len(records) == 1
+    assert records[0].realized_profit_loss == -5600.0
+
 def test_execution_source_wins_over_stale_trade_journal(
     tmp_path: Path,
 ) -> None:
