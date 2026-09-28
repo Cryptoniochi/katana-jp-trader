@@ -34,6 +34,9 @@ class QueueExecutionDelegate(Protocol):
     ) -> BacktestQueueExecutionBatchResult:
         """FIFO順でキュー注文を執行する。"""
 
+    def discard_all(self) -> int:
+        """Broker未送信のキュー注文をすべて破棄する。"""
+
 
 class RiskAwareQueueExecutionDecision(StrEnum):
     """リスク判定を含む注文キュー執行判断。"""
@@ -220,6 +223,9 @@ class RiskAwareQueueExecutionService:
         self._validate_risk_state(risk_result)
 
         if risk_result.is_blocked:
+            discarded_count = (
+                self.execution_service.discard_all()
+            )
             result = RiskAwareQueueExecutionResult(
                 decision=(
                     RiskAwareQueueExecutionDecision.BLOCKED
@@ -227,7 +233,8 @@ class RiskAwareQueueExecutionService:
                 execution_result=None,
                 message=(
                     "Risk Engineが新規エントリーを停止しているため、"
-                    "注文をBrokerへ送信しませんでした。"
+                    "注文をBrokerへ送信せずキューから破棄しました。 "
+                    f"discarded_count={discarded_count}"
                 ),
             )
             self._last_result = result

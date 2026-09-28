@@ -271,6 +271,13 @@ class BacktestQueueExecutionService:
                 message=str(error),
             )
 
+    def discard_all(self) -> int:
+        """Brokerへ未送信のキュー注文をすべて破棄する。"""
+
+        discarded_count = self.order_queue.count
+        self.order_queue.clear()
+        return discarded_count
+
     def execute_all(
         self,
         *,

@@ -14,6 +14,7 @@ from app.risk.paper_trading_pretrade_risk import (
 class FakeExecutionService:
     def __init__(self) -> None:
         self.call_count = 0
+        self.discard_count = 0
 
     def execute_all(
         self,
@@ -23,6 +24,10 @@ class FakeExecutionService:
     ):
         self.call_count += 1
         return BacktestQueueExecutionBatchResult(items=())
+
+    def discard_all(self):
+        self.discard_count += 1
+        return 1
 
 
 def decision(*, allowed: bool) -> PaperTradingRiskDecision:
@@ -57,6 +62,7 @@ def test_blocked_risk_never_calls_execution_service() -> None:
 
     assert result.was_blocked
     assert delegate.call_count == 0
+    assert delegate.discard_count == 1
     assert service.blocked_count == 1
 
 
@@ -72,4 +78,5 @@ def test_allowed_risk_calls_execution_service_once() -> None:
 
     assert result.was_executed
     assert delegate.call_count == 1
+    assert delegate.discard_count == 0
     assert service.execution_count == 1

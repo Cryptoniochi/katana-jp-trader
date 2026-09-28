@@ -36,6 +36,8 @@ class FakeExecutionService:
             else BacktestQueueExecutionBatchResult(items=())
         )
         self.calls: list[dict[str, object]] = []
+        self.discard_calls = 0
+        self.pending_count = 1
 
     def execute_all(
         self,
@@ -50,6 +52,12 @@ class FakeExecutionService:
             }
         )
         return self.result
+
+    def discard_all(self) -> int:
+        self.discard_calls += 1
+        discarded_count = self.pending_count
+        self.pending_count = 0
+        return discarded_count
 
 
 def allowed_risk() -> FakeRiskResult:
@@ -119,8 +127,10 @@ def test_does_not_execute_delegate_when_risk_blocks() -> None:
     assert result.processed_count == 0
     assert result.saved_execution_count == 0
     assert result.message is not None
-    assert "Brokerへ送信しませんでした" in result.message
+    assert "キューから破棄しました" in result.message
     assert delegate.calls == []
+    assert delegate.discard_calls == 1
+    assert delegate.pending_count == 0
 
 
 def test_tracks_execution_and_blocked_counts() -> None:

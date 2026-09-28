@@ -190,11 +190,13 @@ class FakeRiskAwareExecutionService:
         self,
         *,
         risk_result,
+        limit: int | None = None,
         continue_on_error: bool,
     ) -> RiskAwareQueueExecutionResult:
         self.calls.append(
             {
                 "risk_result": risk_result,
+                "limit": limit,
                 "continue_on_error": continue_on_error,
             }
         )
@@ -332,6 +334,7 @@ def test_service_uses_risk_gate_when_configured() -> None:
     assert execution.call_count == 0
     assert len(gate.calls) == 1
     assert gate.calls[0]["risk_result"] is risk_result
+    assert gate.calls[0]["limit"] == 1
     assert result.risk_evaluated_count == 1
     assert result.risk_blocked_count == 0
     assert not result.was_risk_blocked

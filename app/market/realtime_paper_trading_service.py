@@ -638,6 +638,7 @@ class RealtimePaperTradingService:
         gated_result = (
             self.risk_aware_execution_service.execute_all(
                 risk_result=risk_result,
+                limit=1,
                 continue_on_error=continue_on_error,
             )
         )

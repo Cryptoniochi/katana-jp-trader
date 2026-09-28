@@ -106,3 +106,20 @@ def test_exit_is_allowed_after_daily_loss() -> None:
 
     assert result.allows_new_entries
     assert result.reason == "exit_order_allowed"
+
+
+def test_notifies_observer_with_evaluated_signal() -> None:
+    observed = []
+    expected_signal = signal()
+    provider = PaperTradingPreTradeRiskProvider(
+        broker=FakeBroker(),
+        limits=PaperTradingRiskLimits(),
+        on_decision=lambda item, decision: observed.append(
+            (item, decision)
+        ),
+    )
+    provider.prepare(expected_signal, 2500.0)
+
+    result = provider()
+
+    assert observed == [(expected_signal, result)]

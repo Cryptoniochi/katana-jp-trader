@@ -162,6 +162,7 @@ class PaperTradingPreTradeRiskProvider:
         # EXITは損失上限到達後も許可し、保有解消を妨げない。
         if signal.action is SignalAction.EXIT:
             return self._record(
+                signal=signal,
                 allowed=True,
                 reason="exit_order_allowed",
                 daily_profit_loss=daily_profit_loss,
@@ -200,6 +201,7 @@ class PaperTradingPreTradeRiskProvider:
 
         if blocked_reason is not None:
             return self._record(
+                signal=signal,
                 allowed=False,
                 reason=blocked_reason,
                 daily_profit_loss=daily_profit_loss,
@@ -211,6 +213,7 @@ class PaperTradingPreTradeRiskProvider:
 
         self._daily_entry_count += 1
         return self._record(
+            signal=signal,
             allowed=True,
             reason="entry_allowed",
             daily_profit_loss=daily_profit_loss,
@@ -223,6 +226,7 @@ class PaperTradingPreTradeRiskProvider:
     def _record(
         self,
         *,
+        signal: TradeSignal,
         allowed: bool,
         reason: str,
         daily_profit_loss: float,
