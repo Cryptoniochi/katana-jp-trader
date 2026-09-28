@@ -43,6 +43,7 @@ class RecordingExecutionService:
 
     def __init__(self) -> None:
         self.call_count = 0
+        self.discard_count = 0
 
     def execute_all(
         self,
@@ -52,6 +53,12 @@ class RecordingExecutionService:
     ) -> BacktestQueueExecutionBatchResult:
         self.call_count += 1
         return BacktestQueueExecutionBatchResult(items=())
+
+    def discard_all(self) -> int:
+        """Risk拒否時のキュー破棄を記録する。"""
+
+        self.discard_count += 1
+        return 1
 
 
 def make_signal(
