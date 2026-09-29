@@ -166,7 +166,7 @@
       document.getElementById("mobile-runtime-cycles").textContent=runtimeToday?(runtime.cycle_count??runtime.cycles??"—"):"—";
       document.getElementById("mobile-runtime-failed").textContent=runtimeToday?(runtime.failed_cycle_count??runtime.failed_cycles??"—"):"—";
       document.getElementById("mobile-realized").textContent=dailyReportToday?val(dailySummary.net_profit_loss,yen.format):(runtimeToday?val(runtime.realized_profit_loss,yen.format):"—");
-      document.getElementById("mobile-unrealized").textContent=runtimeToday?val(runtime.unrealized_profit_loss,yen.format):"—";
+      document.getElementById("mobile-unrealized").textContent=runtimeToday?val(portfolio.total_unrealized_profit_loss??runtime.unrealized_profit_loss,yen.format):"—";
       document.getElementById("mobile-runtime-message").textContent=runtimeToday?(runtime.message??"—"):(closedDay?"Tokyo market is closed today.":"No Paper Trading Runtime report for today.");
 
       const dataState=String(summary.data_status??summary.state??"").toLowerCase();
@@ -221,7 +221,7 @@
       const positions=portfolio.positions??runtime.positions??[];
       document.getElementById("mobile-position-list").innerHTML=positions.length?positions.map(p=>{
         const code=String(p.code??"—");
-        const label=names[code]?`${code} ${names[code]}`:code;
+        const name=p.name??names[code]??"";const label=name?`${code} ${name}`:code;
         return `<article class="mobile-detail-card"><div class="mobile-card-heading"><strong>${label}</strong><span>${p.side??"—"}</span></div><div class="mobile-detail-grid"><div><span>Qty</span><b>${p.quantity??"—"}</b></div><div><span>Market</span><b>${val(p.market_price,yen.format)}</b></div><div><span>Average</span><b>${val(p.average_cost,yen.format)}</b></div><div><span>Unrealized</span><b>${val(p.unrealized_profit_loss,yen.format)}</b></div></div></article>`;
       }).join(""):empty("No open positions.");
 

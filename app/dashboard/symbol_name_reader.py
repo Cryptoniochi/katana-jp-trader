@@ -328,15 +328,32 @@ class SymbolNameReader:
 
     @staticmethod
     def _normalize_code(code: object) -> str:
-        normalized = str(code).strip()
+        """JPXの数字・英字入り証券コードを正規化する。"""
 
-        if (
-            not normalized.isdigit()
-            or len(normalized) not in {4, 5}
+        normalized = str(code).strip().upper()
+        allowed_characters = (
+            "0123456789ACDFGHJKLMNPRSTUWXY"
+        )
+
+        is_legacy_numeric = (
+            normalized.isdigit()
+            and len(normalized) in {4, 5}
+        )
+        is_jpx_alphanumeric = (
+            len(normalized) == 4
+            and normalized[0].isdigit()
+            and normalized[2].isdigit()
+            and normalized[1] in allowed_characters
+            and normalized[3] in allowed_characters
+        )
+
+        if not (
+            is_legacy_numeric
+            or is_jpx_alphanumeric
         ):
             raise ValueError(
-                "銘柄コードは4桁または5桁の数字で"
-                "指定してください。 "
+                "銘柄コードはJPXの4文字コード、"
+                "または従来の5桁数字で指定してください。 "
                 f"value={normalized}"
             )
 
