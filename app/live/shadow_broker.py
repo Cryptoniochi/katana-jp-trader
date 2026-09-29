@@ -8,6 +8,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path
 from threading import RLock
 
@@ -31,6 +32,41 @@ class ShadowLedgerError(RuntimeError):
 
 class ShadowOrderConflictError(RuntimeError):
     """同じ注文IDに異なる注文内容が指定された。"""
+
+
+class ShadowOrderRecordDecision(StrEnum):
+    """Shadow注文計画を記録した結果。"""
+
+    RECORDED = "recorded"
+    EXISTING = "existing"
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowOrderRecordResult:
+    """Shadow注文計画の記録結果。"""
+
+    decision: ShadowOrderRecordDecision
+    order: TradeOrder
+    idempotency_key: str
+    snapshot: BrokerOrderSnapshot
+
+    @property
+    def was_recorded(self) -> bool:
+        """新しい注文計画を記録したか返す。"""
+
+        return (
+            self.decision
+            is ShadowOrderRecordDecision.RECORDED
+        )
+
+    @property
+    def was_existing(self) -> bool:
+        """既存の注文計画を再利用したか返す。"""
+
+        return (
+            self.decision
+            is ShadowOrderRecordDecision.EXISTING
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +168,14 @@ class ShadowBroker:
     ) -> BrokerOrderSnapshot:
         """注文計画を保存するが外部へ送信しない。"""
 
+        return self.record_order(order).snapshot
+
+    def record_order(
+        self,
+        order: TradeOrder,
+    ) -> ShadowOrderRecordResult:
+        """注文計画を保存し、記録・既存の判断も返す。"""
+
         with self._lock:
             idempotency_key = self._idempotency_key(order)
             existing_id = self._client_order_ids.get(
@@ -147,7 +191,16 @@ class ShadowBroker:
                         "指定されました。"
                     )
 
-                return self._snapshot(existing)
+                return ShadowOrderRecordResult(
+                    decision=(
+                        ShadowOrderRecordDecision.EXISTING
+                    ),
+                    order=existing.order,
+                    idempotency_key=(
+                        existing.idempotency_key
+                    ),
+                    snapshot=self._snapshot(existing),
+                )
 
             current_time = self._current_time()
             broker_order_id = (
@@ -171,7 +224,25 @@ class ShadowBroker:
             self._client_order_ids[
                 order.order_id
             ] = broker_order_id
-            return self._snapshot(state)
+            return ShadowOrderRecordResult(
+                decision=(
+                    ShadowOrderRecordDecision.RECORDED
+                ),
+                order=state.order,
+                idempotency_key=state.idempotency_key,
+                snapshot=self._snapshot(state),
+            )
+
+    def get_planned_order(
+        self,
+        broker_order_id: str,
+    ) -> TradeOrder:
+        """Shadow台帳に保存した元注文を返す。"""
+
+        with self._lock:
+            return self._require_order(
+                broker_order_id
+            ).order
 
     def cancel_order(
         self,
@@ -508,4 +579,3 @@ class ShadowBroker:
             return None
 
         return float(value)
-

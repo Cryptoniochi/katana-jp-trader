@@ -8,6 +8,7 @@ from app.live.shadow_broker import (
     ShadowBroker,
     ShadowBrokerSettings,
     ShadowOrderConflictError,
+    ShadowOrderRecordDecision,
 )
 from app.trading.broker_adapter import BrokerAdapter
 from app.trading.order_models import (
@@ -83,6 +84,29 @@ def test_submit_records_without_fill_or_position(
     assert broker.list_positions() == []
     assert account.cash_balance == 1_000_000.0
     assert account.buying_power == 1_000_000.0
+
+
+def test_record_order_reports_new_and_existing_plan(
+    tmp_path,
+) -> None:
+    broker = create_broker(tmp_path)
+    order = create_order()
+
+    first = broker.record_order(order)
+    second = broker.record_order(order)
+
+    assert (
+        first.decision
+        is ShadowOrderRecordDecision.RECORDED
+    )
+    assert (
+        second.decision
+        is ShadowOrderRecordDecision.EXISTING
+    )
+    assert first.idempotency_key == second.idempotency_key
+    assert broker.get_planned_order(
+        first.snapshot.broker_order_id
+    ) == order
 
 
 def test_submit_is_idempotent_in_same_process(
