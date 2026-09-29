@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -121,6 +122,66 @@ def test_readiness_report_is_ready(
         report.items
     )
     assert FakeCompositionFactory.call_count == 1
+
+    item_map = {
+        item.name: item
+        for item in report.items
+    }
+    assert item_map["Shadow Replication"].is_ok
+    assert "既定値OFF" in (
+        item_map["Shadow Replication"].message
+    )
+
+
+def test_enabled_shadow_replication_is_ready(
+    tmp_path: Path,
+) -> None:
+    settings = replace(
+        create_settings(tmp_path),
+        shadow_replication_enabled=True,
+        shadow_ledger_path=(tmp_path / "shadow.jsonl"),
+        shadow_reconciliation_report_path=(
+            tmp_path / "reconciliation.json"
+        ),
+    )
+
+    report = ProductionReadinessChecker(
+        composition_factory=FakeCompositionFactory,
+        python_version_provider=lambda: (3, 14, 0),
+    ).check(settings=settings)
+
+    item_map = {
+        item.name: item
+        for item in report.items
+    }
+    assert item_map["Shadow Replication"].is_ok
+    assert "有効化できます" in (
+        item_map["Shadow Replication"].message
+    )
+
+
+def test_shadow_paths_must_be_distinct(
+    tmp_path: Path,
+) -> None:
+    same_path = tmp_path / "shadow.json"
+    settings = replace(
+        create_settings(tmp_path),
+        shadow_replication_enabled=True,
+        shadow_ledger_path=same_path,
+        shadow_reconciliation_report_path=same_path,
+    )
+
+    report = ProductionReadinessChecker(
+        composition_factory=FakeCompositionFactory,
+        python_version_provider=lambda: (3, 14, 0),
+    ).check(settings=settings)
+
+    item_map = {
+        item.name: item
+        for item in report.items
+    }
+    assert item_map["Shadow Replication"].is_failed
+    assert report.is_ready is False
 
 
 def test_old_python_is_not_ready(

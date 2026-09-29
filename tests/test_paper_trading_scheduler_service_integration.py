@@ -46,3 +46,16 @@ def test_scheduler_command_can_stay_safe_disabled() -> None:
     )
 
     assert "--enable" not in command
+    assert "--enable-shadow-replication" not in command
+
+
+def test_scheduler_command_can_enable_shadow_replication() -> None:
+    command = build_scheduled_paper_trading_command(
+        database_path=Path("data/katana.db"),
+        watchlist_path=Path("watchlist.txt"),
+        strategies=("orb",),
+        enabled=True,
+        shadow_replication_enabled=True,
+    )
+
+    assert "--enable-shadow-replication" in command

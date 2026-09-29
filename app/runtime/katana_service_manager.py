@@ -722,6 +722,7 @@ def build_paper_trading_command(
     database_path: Path,
     watchlist_path: Path,
     strategies: Sequence[str],
+    shadow_replication_enabled: bool = False,
 ) -> tuple[str, ...]:
     """kabuステーション利用のPaper Trading起動コマンドを作る。"""
 
@@ -745,6 +746,9 @@ def build_paper_trading_command(
             ]
         )
 
+    if shadow_replication_enabled:
+        command.append("--enable-shadow-replication")
+
     return tuple(command)
 
 
@@ -755,6 +759,7 @@ def build_scheduled_paper_trading_command(
     watchlist_path: Path,
     strategies: Sequence[str],
     enabled: bool,
+    shadow_replication_enabled: bool = False,
 ) -> tuple[str, ...]:
     """営業日Paper Tradingスケジューラの起動コマンドを作る。"""
 
@@ -785,6 +790,9 @@ def build_scheduled_paper_trading_command(
                 strategy,
             ]
         )
+
+    if shadow_replication_enabled:
+        command.append("--enable-shadow-replication")
 
     return tuple(command)
 

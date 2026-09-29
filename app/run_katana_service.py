@@ -138,6 +138,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--enable-shadow-replication",
+        action="store_true",
+        help=(
+            "Paper注文を外部送信なしのShadow台帳へ"
+            "複製します。既定値は無効です。"
+        ),
+    )
+    parser.add_argument(
         "--enable-paper-trading",
         action="store_true",
         help=(
@@ -439,6 +447,9 @@ def run(
                 enabled=(
                     parsed.enable_paper_trading_schedule
                 ),
+                shadow_replication_enabled=(
+                    parsed.enable_shadow_replication
+                ),
             ),
             enabled=True,
             restart_on_failure=True,
@@ -453,6 +464,9 @@ def run(
                 database_path=parsed.database_path,
                 watchlist_path=parsed.watchlist_path,
                 strategies=strategies,
+                shadow_replication_enabled=(
+                    parsed.enable_shadow_replication
+                ),
             ),
             enabled=parsed.enable_paper_trading,
             restart_on_failure=False,

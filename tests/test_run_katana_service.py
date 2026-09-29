@@ -13,6 +13,7 @@ def test_paper_trading_is_opt_in() -> None:
     )
 
     assert not arguments.enable_paper_trading
+    assert not arguments.enable_shadow_replication
     assert arguments.database_path == Path(
         "data/katana.db"
     )
@@ -37,3 +38,11 @@ def test_parser_accepts_kabu_station_strategies() -> None:
         "orb",
         "high-breakout",
     ]
+
+
+def test_parser_explicitly_enables_shadow_replication() -> None:
+    arguments = build_argument_parser().parse_args(
+        ["--enable-shadow-replication"]
+    )
+
+    assert arguments.enable_shadow_replication

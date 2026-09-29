@@ -220,6 +220,10 @@ class ProductionReadinessChecker:
         )
         items.append(runtime_settings_item)
 
+        items.append(
+            self._check_shadow_replication(settings)
+        )
+
         if self.notification_channel_provider is not None:
             items.append(
                 self._check_notification_channels()
@@ -373,6 +377,67 @@ class ProductionReadinessChecker:
                 "cycle_interval_seconds="
                 f"{settings.cycle_interval_seconds} "
                 f"maximum_cycles={settings.maximum_cycles}"
+            ),
+        )
+
+    @staticmethod
+    def _check_shadow_replication(
+        settings: PaperTradingProductionSettings,
+    ) -> ProductionReadinessItem:
+        """Shadow複製の有効状態と保存先を診断する。"""
+
+        if not settings.shadow_replication_enabled:
+            return ProductionReadinessChecker._ok(
+                "Shadow Replication",
+                "Shadow複製は安全な既定値OFFです。",
+            )
+
+        ledger_path = Path(settings.shadow_ledger_path)
+        report_path = Path(
+            settings.shadow_reconciliation_report_path
+        )
+
+        if ledger_path == report_path:
+            return ProductionReadinessChecker._failed(
+                "Shadow Replication",
+                "Shadow台帳と照合レポートは別パスが必要です。",
+            )
+
+        for label, path in (
+            ("Shadow台帳", ledger_path),
+            ("Shadow照合レポート", report_path),
+        ):
+            try:
+                path.parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+            except OSError as error:
+                return ProductionReadinessChecker._failed(
+                    "Shadow Replication",
+                    (
+                        f"{label}の保存先を準備できません。 "
+                        f"path={path.parent} "
+                        "error="
+                        f"{ProductionReadinessChecker._error_message(error)}"
+                    ),
+                )
+
+            if path.exists() and not path.is_file():
+                return ProductionReadinessChecker._failed(
+                    "Shadow Replication",
+                    (
+                        f"{label}のパスがファイルではありません。 "
+                        f"path={path}"
+                    ),
+                )
+
+        return ProductionReadinessChecker._ok(
+            "Shadow Replication",
+            (
+                "Shadow複製を有効化できます。 "
+                f"ledger={ledger_path} "
+                f"report={report_path}"
             ),
         )
 

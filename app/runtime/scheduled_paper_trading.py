@@ -350,6 +350,7 @@ class ScheduledPaperTradingController:
                 sys.executable,
                 "-m",
                 "app.run_paper_trading",
+                *self.paper_arguments,
                 "--check",
             ],
             check=False,
