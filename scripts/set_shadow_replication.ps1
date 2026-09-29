@@ -30,8 +30,8 @@ if (
     $time -lt $protectedEnd
 ) {
     throw (
-        "Paper Trading保護時間中は設定を変更できません。 " +
-        "15:40以降に再実行してください。 now=$now"
+        "Configuration changes are blocked during Paper Trading hours. " +
+        "Run this script again after 15:40. now=$now"
     )
 }
 
