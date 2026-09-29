@@ -23,6 +23,9 @@ from app.dynamic_watchlist.strategy_routing_models import (
     SymbolStrategyRoute,
 )
 from app.market.models import StockPrice
+from app.live.paper_shadow_replication import (
+    PaperShadowReplicationBatchResult,
+)
 from app.market.realtime_paper_trading_service import (
     RealtimePaperTradingService,
     RealtimePaperTradingStatus,
@@ -249,6 +252,7 @@ def create_service(
     *,
     risk_aware_execution_service=None,
     risk_result_provider=None,
+    shadow_replication_service=None,
 ):
     """テスト対象と各Fakeを作成する。"""
 
@@ -271,6 +275,9 @@ def create_service(
             risk_aware_execution_service
         ),
         risk_result_provider=risk_result_provider,
+        shadow_replication_service=(
+            shadow_replication_service
+        ),
     )
 
     return (
@@ -281,6 +288,24 @@ def create_service(
         prices,
         clocks,
     )
+
+
+class FakeShadowReplicationService:
+    """常駐経路から受け取ったPaperバッチを記録する。"""
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    def replicate(
+        self,
+        execution_result,
+        *,
+        continue_on_error: bool,
+    ) -> PaperShadowReplicationBatchResult:
+        self.calls.append(
+            (execution_result, continue_on_error)
+        )
+        return PaperShadowReplicationBatchResult(items=())
 
 
 def test_service_runs_signal_to_order_pipeline() -> None:
@@ -305,6 +330,30 @@ def test_service_runs_signal_to_order_pipeline() -> None:
     assert len(updated_prices) == 5
     assert len(clocks) == 5
     assert result.risk_evaluated_count == 0
+
+
+def test_service_connects_optional_shadow_replication() -> None:
+    """明示接続時だけPaper執行結果をShadowへ渡す。"""
+
+    shadow = FakeShadowReplicationService()
+    (
+        service,
+        _queue,
+        _execution,
+        _portfolio,
+        _prices,
+        _clocks,
+    ) = create_service(
+        shadow_replication_service=shadow
+    )
+
+    result = service.process(bars())
+
+    assert result.is_completed
+    assert len(shadow.calls) == 1
+    assert shadow.calls[0][1] is True
+    assert len(result.shadow_replication_results) == 1
+    assert result.shadow_replication_issue_count == 0
 
 
 def test_service_uses_risk_gate_when_configured() -> None:

@@ -356,6 +356,35 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--enable-shadow-replication",
+        action="store_true",
+        help=(
+            "Risk Gate通過後のPaper注文を外部送信せず"
+            "Shadow台帳へ複製します。既定値は無効です。"
+        ),
+    )
+    parser.add_argument(
+        "--shadow-ledger-path",
+        type=Path,
+        default=None,
+        help=(
+            "Shadow注文台帳のパス。未指定時は環境変数"
+            "KATANA_SHADOW_LEDGER_PATHまたは"
+            "reports/live/shadow_orders.jsonlです。"
+        ),
+    )
+    parser.add_argument(
+        "--shadow-reconciliation-report-path",
+        type=Path,
+        default=None,
+        help=(
+            "Shadow日次照合レポートのパス。未指定時は"
+            "環境変数KATANA_SHADOW_RECONCILIATION_REPORT_PATH"
+            "またはreports/live/shadow_reconciliation.jsonです。"
+        ),
+    )
+
+    parser.add_argument(
         "--fail-fast",
         action="store_true",
         help=(
@@ -531,6 +560,27 @@ def create_production_settings(
         environment_name="KATANA_SLIPPAGE_RATE",
     )
 
+    shadow_ledger_path = _resolve_path(
+        argument_value=arguments.shadow_ledger_path,
+        environment_value=resolved_environ.get(
+            "KATANA_SHADOW_LEDGER_PATH"
+        ),
+        default_value=Path(
+            "reports/live/shadow_orders.jsonl"
+        ),
+    )
+    shadow_reconciliation_report_path = _resolve_path(
+        argument_value=(
+            arguments.shadow_reconciliation_report_path
+        ),
+        environment_value=resolved_environ.get(
+            "KATANA_SHADOW_RECONCILIATION_REPORT_PATH"
+        ),
+        default_value=Path(
+            "reports/live/shadow_reconciliation.json"
+        ),
+    )
+
     kabu_station_api_password = (
         resolved_environ.get(
             "KABU_STATION_API_PASSWORD"
@@ -612,6 +662,13 @@ def create_production_settings(
         ),
         commission_per_order=commission_per_order,
         slippage_rate=slippage_rate,
+        shadow_replication_enabled=(
+            arguments.enable_shadow_replication
+        ),
+        shadow_ledger_path=shadow_ledger_path,
+        shadow_reconciliation_report_path=(
+            shadow_reconciliation_report_path
+        ),
         continue_on_cycle_error=(
             not arguments.fail_fast
         ),

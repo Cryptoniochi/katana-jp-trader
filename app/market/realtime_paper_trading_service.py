@@ -21,6 +21,10 @@ from app.backtest.queue_execution_service import (
     BacktestQueueExecutionService,
 )
 from app.market.models import StockPrice
+from app.live.paper_shadow_replication import (
+    PaperShadowReplicationBatchResult,
+    PaperShadowReplicationService,
+)
 from app.dynamic_watchlist.strategy_routing_models import (
     SymbolStrategyRoute,
 )
@@ -101,6 +105,10 @@ class RealtimePaperTradingResult:
     portfolio_result: BacktestPortfolioBatchUpdateResult | None
     risk_execution_results: tuple[
         RiskAwareQueueExecutionResult,
+        ...,
+    ] = ()
+    shadow_replication_results: tuple[
+        PaperShadowReplicationBatchResult,
         ...,
     ] = ()
     error_message: str | None = None
@@ -194,6 +202,26 @@ class RealtimePaperTradingResult:
         return self.risk_blocked_count > 0
 
     @property
+    def shadow_replication_count(self) -> int:
+        """Shadowへ正常複製された注文数を返す。"""
+
+        return sum(
+            result.replicated_count
+            for result in self.shadow_replication_results
+        )
+
+    @property
+    def shadow_replication_issue_count(self) -> int:
+        """Shadow複製またはレポートの問題数を返す。"""
+
+        return sum(
+            result.failed_count
+            + result.mismatch_count
+            + int(result.report_error is not None)
+            for result in self.shadow_replication_results
+        )
+
+    @property
     def is_completed(self) -> bool:
         """正常完了したか返す。"""
 
@@ -229,6 +257,9 @@ class RealtimePaperTradingService:
         ) = None,
         require_risk_gate: bool = False,
         trace_recorder: PaperTradingTraceRecorder | None = None,
+        shadow_replication_service: (
+            PaperShadowReplicationService | None
+        ) = None,
     ) -> None:
         """Paper Tradingパイプラインの依存関係を設定する。"""
 
@@ -282,6 +313,9 @@ class RealtimePaperTradingService:
         self.risk_context_updater = risk_context_updater
         self.require_risk_gate = require_risk_gate
         self.trace_recorder = trace_recorder
+        self.shadow_replication_service = (
+            shadow_replication_service
+        )
         self._diagnostic_process_call_count = 0
         self._diagnostic_input_bar_count = 0
         self._diagnostic_signal_engine_call_count = 0
@@ -372,6 +406,9 @@ class RealtimePaperTradingService:
             ] = []
             risk_execution_results: list[
                 RiskAwareQueueExecutionResult
+            ] = []
+            shadow_replication_results: list[
+                PaperShadowReplicationBatchResult
             ] = []
             portfolio_items = []
 
@@ -478,6 +515,14 @@ class RealtimePaperTradingService:
                         for item in execution_result.items
                     )
 
+                    if self.shadow_replication_service is not None:
+                        shadow_replication_results.append(
+                            self.shadow_replication_service.replicate(
+                                execution_result,
+                                continue_on_error=True,
+                            )
+                        )
+
                     if (
                         execution_result.failed_count > 0
                         and not continue_on_error
@@ -540,6 +585,9 @@ class RealtimePaperTradingService:
                 risk_execution_results=tuple(
                     risk_execution_results
                 ),
+                shadow_replication_results=tuple(
+                    shadow_replication_results
+                ),
                 error_message=None,
             )
 
@@ -556,6 +604,7 @@ class RealtimePaperTradingService:
                 execution_result=None,
                 portfolio_result=None,
                 risk_execution_results=(),
+                shadow_replication_results=(),
                 error_message=str(error),
             )
 

@@ -26,6 +26,16 @@ class ShadowOrderRecorder(Protocol):
         """注文計画を記録する。"""
 
 
+class ShadowReplicationReporter(Protocol):
+    """Shadow複製バッチを運用レポートへ保存する処理。"""
+
+    def record(
+        self,
+        result: PaperShadowReplicationBatchResult,
+    ) -> object:
+        """複製結果を保存する。"""
+
+
 class PaperShadowReplicationDecision(StrEnum):
     """Paper注文1件のShadow複製結果。"""
 
@@ -119,6 +129,7 @@ class PaperShadowReplicationBatchResult:
     """1回のPaper注文バッチに対するShadow複製結果。"""
 
     items: tuple[PaperShadowReplicationItemResult, ...]
+    report_error: str | None = None
 
     @property
     def input_count(self) -> int:
@@ -187,6 +198,7 @@ class PaperShadowReplicationBatchResult:
         return (
             self.failed_count == 0
             and self.mismatch_count == 0
+            and self.report_error is None
         )
 
 
@@ -197,8 +209,10 @@ class PaperShadowReplicationService:
         self,
         *,
         shadow_recorder: ShadowOrderRecorder,
+        reporter: ShadowReplicationReporter | None = None,
     ) -> None:
         self.shadow_recorder = shadow_recorder
+        self.reporter = reporter
 
     def replicate(
         self,
@@ -216,9 +230,27 @@ class PaperShadowReplicationService:
             for item in execution_result.items
         )
 
-        return PaperShadowReplicationBatchResult(
+        result = PaperShadowReplicationBatchResult(
             items=items
         )
+
+        if self.reporter is None:
+            return result
+
+        try:
+            self.reporter.record(result)
+            return result
+        except Exception as error:
+            if not continue_on_error:
+                raise
+
+            return PaperShadowReplicationBatchResult(
+                items=items,
+                report_error=(
+                    str(error).strip()
+                    or type(error).__name__
+                ),
+            )
 
     def _replicate_item(
         self,

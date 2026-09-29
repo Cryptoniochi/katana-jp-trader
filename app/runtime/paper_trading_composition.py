@@ -44,6 +44,16 @@ from app.database import initialize_database
 from app.live.live_orchestrator import (
     LiveTradingOrchestrator,
 )
+from app.live.paper_shadow_replication import (
+    PaperShadowReplicationService,
+)
+from app.live.shadow_broker import (
+    ShadowBroker,
+    ShadowBrokerSettings,
+)
+from app.live.shadow_reconciliation_report import (
+    ShadowReconciliationReportWriter,
+)
 from app.market.kabu_station_client import (
     KabuStationClient,
     KabuStationClientSettings,
@@ -196,6 +206,13 @@ class PaperTradingProductionSettings:
     )
     watchlist_execution_integrity_report_path: Path = Path(
         "reports/service/watchlist_execution_integrity.json"
+    )
+    shadow_replication_enabled: bool = False
+    shadow_ledger_path: Path = Path(
+        "reports/live/shadow_orders.jsonl"
+    )
+    shadow_reconciliation_report_path: Path = Path(
+        "reports/live/shadow_reconciliation.json"
     )
 
     def __post_init__(self) -> None:
@@ -430,6 +447,23 @@ class PaperTradingProductionSettings:
                 / normalized_watchlist_execution_integrity_report_path
             )
 
+        normalized_shadow_ledger_path = Path(
+            self.shadow_ledger_path
+        )
+        if not normalized_shadow_ledger_path.is_absolute():
+            normalized_shadow_ledger_path = (
+                ROOT_DIR / normalized_shadow_ledger_path
+            )
+
+        normalized_shadow_reconciliation_report_path = Path(
+            self.shadow_reconciliation_report_path
+        )
+        if not normalized_shadow_reconciliation_report_path.is_absolute():
+            normalized_shadow_reconciliation_report_path = (
+                ROOT_DIR
+                / normalized_shadow_reconciliation_report_path
+            )
+
         object.__setattr__(
             self,
             "database_path",
@@ -484,6 +518,16 @@ class PaperTradingProductionSettings:
             self,
             "watchlist_execution_integrity_report_path",
             normalized_watchlist_execution_integrity_report_path.resolve(),
+        )
+        object.__setattr__(
+            self,
+            "shadow_ledger_path",
+            normalized_shadow_ledger_path.resolve(),
+        )
+        object.__setattr__(
+            self,
+            "shadow_reconciliation_report_path",
+            normalized_shadow_reconciliation_report_path.resolve(),
         )
 
 
@@ -1016,6 +1060,48 @@ class PaperTradingComposition:
             symbol_strategy_router=symbol_strategy_router,
         )
 
+        shadow_replication_service = None
+
+        if settings.shadow_replication_enabled:
+            shadow_reporter = None
+            try:
+                shadow_reporter = (
+                    ShadowReconciliationReportWriter(
+                        report_path=(
+                            settings
+                            .shadow_reconciliation_report_path
+                        ),
+                        now_provider=resolved_now_provider,
+                    )
+                )
+                shadow_reporter.initialize()
+                shadow_replication_service = (
+                    PaperShadowReplicationService(
+                        shadow_recorder=ShadowBroker(
+                            settings=ShadowBrokerSettings(
+                                ledger_path=(
+                                    settings.shadow_ledger_path
+                                ),
+                                initial_cash=(
+                                    settings.initial_cash
+                                ),
+                            ),
+                            now_provider=resolved_now_provider,
+                        ),
+                        reporter=shadow_reporter,
+                    )
+                )
+            except Exception as error:
+                # Shadow環境の障害でPaper運転を停止しない。
+                shadow_replication_service = None
+                if shadow_reporter is not None:
+                    try:
+                        shadow_reporter.record_initialization_error(
+                            error
+                        )
+                    except Exception:
+                        pass
+
         realtime_paper_trading_service = (
             RealtimePaperTradingService(
                 signal_engine=signal_engine,
@@ -1034,6 +1120,9 @@ class PaperTradingComposition:
                 risk_context_updater=risk_provider.prepare,
                 require_risk_gate=True,
                 trace_recorder=trace_recorder,
+                shadow_replication_service=(
+                    shadow_replication_service
+                ),
             )
         )
         live_orchestrator = LiveTradingOrchestrator(

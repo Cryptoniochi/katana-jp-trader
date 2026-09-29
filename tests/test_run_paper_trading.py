@@ -277,6 +277,57 @@ def test_settings_loads_codes_from_watchlist(
     )
 
 
+def test_shadow_replication_is_disabled_by_default(
+    tmp_path: Path,
+) -> None:
+    """Shadow常駐接続は明示指定なしでは無効にする。"""
+
+    watchlist_path = create_watchlist(tmp_path)
+    arguments = build_argument_parser().parse_args(
+        ["--watchlist", str(watchlist_path)]
+    )
+
+    settings = create_production_settings(
+        arguments,
+        environ={"KABU_STATION_API_PASSWORD": "secret"},
+    )
+
+    assert settings.shadow_replication_enabled is False
+
+
+def test_parser_explicitly_enables_shadow_replication(
+    tmp_path: Path,
+) -> None:
+    """CLIフラグと保存先をShadow設定へ反映する。"""
+
+    watchlist_path = create_watchlist(tmp_path)
+    ledger_path = tmp_path / "shadow.jsonl"
+    report_path = tmp_path / "reconciliation.json"
+    arguments = build_argument_parser().parse_args(
+        [
+            "--watchlist",
+            str(watchlist_path),
+            "--enable-shadow-replication",
+            "--shadow-ledger-path",
+            str(ledger_path),
+            "--shadow-reconciliation-report-path",
+            str(report_path),
+        ]
+    )
+
+    settings = create_production_settings(
+        arguments,
+        environ={"KABU_STATION_API_PASSWORD": "secret"},
+    )
+
+    assert settings.shadow_replication_enabled is True
+    assert settings.shadow_ledger_path == ledger_path.resolve()
+    assert (
+        settings.shadow_reconciliation_report_path
+        == report_path.resolve()
+    )
+
+
 def test_direct_codes_override_watchlist(
     tmp_path: Path,
 ) -> None:
