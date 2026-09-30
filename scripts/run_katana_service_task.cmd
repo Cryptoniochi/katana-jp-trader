@@ -28,6 +28,7 @@ echo Project KATANA Service task started at %DATE% %TIME%>> "logs\service\katana
   --enable-morning-preflight-schedule ^
   --enable-daily-report-schedule ^
   --enable-paper-trading-schedule ^
+  --enable-shadow-replication ^
   --tailscale-wait-attempts 60 ^
   --tailscale-wait-seconds 5 ^
   >> "logs\service\katana_service.log" 2>&1
