@@ -168,6 +168,62 @@ def test_integrity_passes_for_matching_pipeline(
     assert result.orphan_execution_codes == ()
 
 
+def test_zero_saved_broker_event_is_not_an_execution(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "katana.db"
+    watchlist = tmp_path / "watchlist.txt"
+    explainability = tmp_path / "latest.json"
+    trace = tmp_path / "trace.jsonl"
+
+    _create_database(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM trade_executions")
+        connection.commit()
+    _write_explainability(explainability)
+    watchlist.write_text(
+        "8306\n6758\n9432\n",
+        encoding="utf-8",
+    )
+    events = [
+        {
+            "occurred_at": "2026-08-12T00:00:01+00:00",
+            "event_type": "runtime_started",
+            "code": None,
+            "payload": {
+                "codes": ["8306", "6758", "9432"]
+            },
+        },
+        {
+            "occurred_at": "2026-08-12T01:00:00+00:00",
+            "event_type": "signal_generated",
+            "code": "6758",
+            "payload": {},
+        },
+        {
+            "occurred_at": "2026-08-12T01:00:01+00:00",
+            "event_type": "broker_executed",
+            "code": "6758",
+            "payload": {"saved_execution_count": 0},
+        },
+    ]
+    trace.write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n",
+        encoding="utf-8",
+    )
+
+    result = WatchlistExecutionIntegrityService(
+        database_path=database,
+        watchlist_path=watchlist,
+        explainability_path=explainability,
+        trace_path=trace,
+    ).audit(trading_date=DAY)
+
+    assert result.signal_count == 1
+    assert result.execution_count == 0
+    assert result.integrity_ok is True
+
+
 def test_integrity_fails_when_selected_code_not_loaded(
     tmp_path: Path,
 ) -> None:

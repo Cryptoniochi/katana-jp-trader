@@ -444,13 +444,24 @@ class WatchlistExecutionIntegrityService:
             ):
                 signals[code] = signals.get(code, 0) + 1
 
-            if (
-                event_type in {
-                    "broker_executed",
-                    "execution_saved",
-                }
-                and code
-            ):
+            if event_type == "broker_executed" and code:
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    payload = {}
+                raw_saved_count = payload.get(
+                    "saved_execution_count"
+                )
+                try:
+                    saved_count = int(raw_saved_count)
+                except (TypeError, ValueError):
+                    # Phase導入前のTraceは件数を持たないため1件扱い。
+                    saved_count = 1
+                executions[code] = (
+                    executions.get(code, 0)
+                    + max(0, saved_count)
+                )
+
+            if event_type == "execution_saved" and code:
                 executions[code] = (
                     executions.get(code, 0) + 1
                 )
