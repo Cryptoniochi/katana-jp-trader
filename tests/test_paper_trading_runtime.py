@@ -138,6 +138,7 @@ def create_runtime(
             )
         ),
         risk_runner=risk_runner,
+        status_path=None,
         now_provider=lambda: NOW,
     )
 
@@ -406,6 +407,19 @@ def test_runtime_status_separates_realized_and_unrealized_pnl(
     )
 
     assert payload["portfolio_position_count"] == 1
+    assert payload["positions"] == [
+        {
+            "code": "7203",
+            "side": "long",
+            "quantity": 100,
+            "average_cost": 1000.0,
+            "market_price": 1010.0,
+            "realized_profit_loss": 500.0,
+            "acquisition_value": 100000.0,
+            "market_value": 101000.0,
+            "unrealized_profit_loss": 1000.0,
+        }
+    ]
     assert payload["realized_profit_loss"] == 500.0
     assert payload["unrealized_profit_loss"] == 1000.0
     assert payload["total_portfolio_profit_loss"] == 1500.0

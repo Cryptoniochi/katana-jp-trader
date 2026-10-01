@@ -392,6 +392,11 @@ class DynamicWatchlistService:
         exclusion_reasons: list[str] = []
         selection_tier = "strict"
 
+        if not self._is_paper_trading_compatible_symbol_code(code):
+            exclusion_reasons.append(
+                "unsupported_paper_trading_symbol_code"
+            )
+
         age_days = (today - latest.trading_date).days
 
         strict_history = (
@@ -933,7 +938,9 @@ class DynamicWatchlistService:
             or len(codes) > self.settings.maximum_symbols
             or len(codes) != len(set(codes))
             or any(
-                not self._is_valid_symbol_code(code)
+                not self._is_paper_trading_compatible_symbol_code(
+                    code
+                )
                 for code in codes
             )
         ):
@@ -960,6 +967,17 @@ class DynamicWatchlistService:
             )
             is not None
         )
+
+    @staticmethod
+    def _is_paper_trading_compatible_symbol_code(
+        code: str,
+    ) -> bool:
+        """現行Paper Tradingが受理できる数字コードか確認する。"""
+
+        normalized = str(code).strip()
+        return normalized.isascii() and normalized.isdigit() and len(
+            normalized
+        ) in {4, 5}
 
     def _write_reports(
         self,

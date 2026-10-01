@@ -141,6 +141,7 @@ def create_bundle(
                 1_005_000.0,
             )
         ),
+        status_path=None,
         now_provider=lambda: NOW,
     )
 

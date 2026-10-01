@@ -255,6 +255,50 @@ def test_integrity_fails_when_selected_code_not_loaded(
     )
 
 
+def test_integrity_scopes_selection_to_runtime_supported_codes(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "katana.db"
+    watchlist = tmp_path / "watchlist.txt"
+    explainability = tmp_path / "latest.json"
+    trace = tmp_path / "trace.jsonl"
+
+    _create_database(database)
+    _write_explainability(explainability)
+    payload = json.loads(
+        explainability.read_text(encoding="utf-8")
+    )
+    payload["candidates"].extend(
+        (
+            {"code": "268A", "selected": True},
+            {"code": "593A", "selected": True},
+        )
+    )
+    explainability.write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+    _write_trace(trace)
+    watchlist.write_text(
+        "8306\n6758\n9432\n",
+        encoding="utf-8",
+    )
+
+    result = WatchlistExecutionIntegrityService(
+        database_path=database,
+        watchlist_path=watchlist,
+        explainability_path=explainability,
+        trace_path=trace,
+    ).audit(trading_date=DAY)
+
+    assert result.integrity_ok is True
+    assert result.selected_codes == (
+        "8306",
+        "6758",
+        "9432",
+    )
+
+
 def test_latest_runtime_session_replaces_stale_monitored_codes(
     tmp_path: Path,
 ) -> None:

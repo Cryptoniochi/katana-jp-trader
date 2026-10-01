@@ -71,6 +71,7 @@ class PaperTradingRuntimeStatusReader:
             "execution_count": 0,
             "open_position_count": 0,
             "portfolio_position_count": 0,
+            "positions": [],
             "initial_equity": None,
             "current_equity": None,
             "net_profit_loss": None,

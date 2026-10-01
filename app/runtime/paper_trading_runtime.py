@@ -590,6 +590,34 @@ class PaperTradingRuntime:
             "portfolio_position_count": len(
                 portfolio_snapshot.positions
             ),
+            "positions": [
+                {
+                    "code": position.code,
+                    "side": str(
+                        getattr(
+                            position.side,
+                            "value",
+                            position.side,
+                        )
+                    ),
+                    "quantity": position.quantity,
+                    "average_cost": position.average_cost,
+                    "market_price": position.market_price,
+                    "realized_profit_loss": (
+                        position.realized_profit_loss
+                    ),
+                    "acquisition_value": (
+                        position.acquisition_value
+                    ),
+                    "market_value": position.market_value,
+                    "unrealized_profit_loss": (
+                        self._position_unrealized_profit_loss(
+                            position
+                        )
+                    ),
+                }
+                for position in portfolio_snapshot.positions
+            ],
             "initial_equity": self._initial_equity,
             "current_equity": current_equity,
             "net_profit_loss": (

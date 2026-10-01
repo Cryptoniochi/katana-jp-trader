@@ -324,7 +324,11 @@ class WatchlistExecutionIntegrityService:
             code = self._normalize_code(
                 item.get("code")
             )
-            if code and code not in codes:
+            if (
+                code
+                and self._is_runtime_supported_code(code)
+                and code not in codes
+            ):
                 codes.append(code)
         return tuple(codes)
 
@@ -603,6 +607,16 @@ class WatchlistExecutionIntegrityService:
         if not text:
             return None
         return text
+
+    @staticmethod
+    def _is_runtime_supported_code(
+        code: str,
+    ) -> bool:
+        text = str(code).strip()
+        return text.isascii() and text.isdigit() and len(text) in {
+            4,
+            5,
+        }
 
     @staticmethod
     def _parse_datetime(

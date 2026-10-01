@@ -15,6 +15,7 @@ from app.runtime.paper_trading_persistence_service import (
     PaperTradingPersistenceService,
 )
 from app.runtime.paper_trading_runtime import (
+    DEFAULT_RUNTIME_STATUS_PATH,
     PaperTradingRuntime,
 )
 from app.runtime.paper_trading_runtime_persistence import (
@@ -61,6 +62,7 @@ class PaperTradingRuntimeFactory:
         database_path: Path,
         cycle_runner: PaperTradingRuntimeCycleRunner,
         portfolio_reader: PaperTradingRuntimePortfolioReader,
+        status_path: Path | None = DEFAULT_RUNTIME_STATUS_PATH,
         now_provider: Callable[[], datetime] | None = None,
     ) -> PaperTradingRuntimeBundle:
         """??Component??Runtime????????????"""
@@ -73,6 +75,7 @@ class PaperTradingRuntimeFactory:
             cycle_runner=cycle_runner,
             portfolio_reader=portfolio_reader,
             database_path=resolved_database_path,
+            status_path=status_path,
             now_provider=now_provider,
         )
 
