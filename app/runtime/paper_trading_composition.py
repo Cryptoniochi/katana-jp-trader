@@ -1016,16 +1016,6 @@ class PaperTradingComposition:
             )
         )
 
-        end_of_day_liquidator = (
-            EndOfDayLiquidationService(
-                broker=paper_broker,
-                order_queue_service=order_queue_service,
-                execution_service=queue_execution_service,
-                portfolio_update_service=portfolio_update_service,
-                now_provider=resolved_now_provider,
-            )
-        )
-
         strategy_routing_snapshot = None
         symbol_strategy_router = None
         strategy_routing_repository = None
@@ -1116,6 +1106,19 @@ class PaperTradingComposition:
                         )
                     except Exception:
                         pass
+
+        end_of_day_liquidator = (
+            EndOfDayLiquidationService(
+                broker=paper_broker,
+                order_queue_service=order_queue_service,
+                execution_service=queue_execution_service,
+                portfolio_update_service=portfolio_update_service,
+                shadow_replication_service=(
+                    shadow_replication_service
+                ),
+                now_provider=resolved_now_provider,
+            )
+        )
 
         realtime_paper_trading_service = (
             RealtimePaperTradingService(

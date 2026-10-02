@@ -187,3 +187,60 @@ def test_close_all_positions_tracks_its_order_and_refreshes_positions() -> None:
         "7203",
         "8306",
     ]
+
+
+def test_close_all_positions_replicates_each_execution_to_shadow() -> None:
+    broker = FakeBroker()
+    queue = FakeQueue()
+    portfolio = FakePortfolioUpdate()
+
+    class ShadowReplication:
+        def __init__(self) -> None:
+            self.items = []
+
+        def replicate(self, execution_result, *, continue_on_error):
+            assert continue_on_error is True
+            self.items.extend(execution_result.items)
+            return SimpleNamespace(
+                replicated_count=len(execution_result.items),
+                failed_count=0,
+                mismatch_count=0,
+                report_error=None,
+            )
+
+    shadow = ShadowReplication()
+    result = EndOfDayLiquidationService(
+        broker=broker,
+        order_queue_service=queue,
+        execution_service=FakeExecution(broker),
+        portfolio_update_service=portfolio,
+        shadow_replication_service=shadow,
+        now_provider=lambda: NOW,
+    ).close_all_positions()
+
+    assert len(shadow.items) == 2
+    assert result.shadow_replication_count == 2
+    assert result.shadow_replication_issue_count == 0
+
+
+def test_shadow_failure_does_not_stop_forced_liquidation() -> None:
+    broker = FakeBroker()
+
+    class FailingShadowReplication:
+        def replicate(self, execution_result, *, continue_on_error):
+            del execution_result, continue_on_error
+            raise OSError("shadow unavailable")
+
+    result = EndOfDayLiquidationService(
+        broker=broker,
+        order_queue_service=FakeQueue(),
+        execution_service=FakeExecution(broker),
+        portfolio_update_service=FakePortfolioUpdate(),
+        shadow_replication_service=FailingShadowReplication(),
+        now_provider=lambda: NOW,
+    ).close_all_positions()
+
+    assert result.completed is True
+    assert result.executed_count == 2
+    assert result.shadow_replication_count == 0
+    assert result.shadow_replication_issue_count == 2

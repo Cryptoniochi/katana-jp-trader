@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 
+from app.backtest.queue_execution_service import (
+    BacktestQueueExecutionBatchResult,
+)
 from app.trading.broker_adapter import BrokerPosition
 from app.trading.order_models import OrderType
 from app.trading.signal_models import SignalAction, TradeSignal
@@ -50,6 +53,18 @@ class EndOfDayPortfolioUpdateService(Protocol):
         """1件の約定をPortfolioへ反映する。"""
 
 
+class EndOfDayShadowReplicationService(Protocol):
+    """強制決済注文をShadow台帳へ複製する処理。"""
+
+    def replicate(
+        self,
+        execution_result: BacktestQueueExecutionBatchResult,
+        *,
+        continue_on_error: bool,
+    ):
+        """Paper約定結果をShadowへ記録する。"""
+
+
 @dataclass(frozen=True, slots=True)
 class EndOfDayLiquidationResult:
     """市場終了時の全決済結果。"""
@@ -58,6 +73,8 @@ class EndOfDayLiquidationResult:
     executed_count: int
     remaining_position_count: int
     execution_records: tuple[object, ...]
+    shadow_replication_count: int = 0
+    shadow_replication_issue_count: int = 0
 
     @property
     def completed(self) -> bool:
@@ -76,12 +93,16 @@ class EndOfDayLiquidationService:
         order_queue_service: EndOfDayOrderQueueService,
         execution_service: EndOfDayExecutionService,
         portfolio_update_service: EndOfDayPortfolioUpdateService,
+        shadow_replication_service: (
+            EndOfDayShadowReplicationService | None
+        ) = None,
         now_provider=None,
     ) -> None:
         self.broker = broker
         self.order_queue_service = order_queue_service
         self.execution_service = execution_service
         self.portfolio_update_service = portfolio_update_service
+        self.shadow_replication_service = shadow_replication_service
         self.now_provider = (
             now_provider
             if now_provider is not None
@@ -95,6 +116,8 @@ class EndOfDayLiquidationService:
         generated_at = self._current_time()
         requested_count = 0
         attempt = 0
+        shadow_replication_count = 0
+        shadow_replication_issue_count = 0
 
         while True:
             positions = tuple(self.broker.list_positions())
@@ -172,6 +195,52 @@ class EndOfDayLiquidationService:
                     )
                     execution_records.append(execution_record)
 
+                if self.shadow_replication_service is not None:
+                    try:
+                        shadow_result = (
+                            self.shadow_replication_service.replicate(
+                                BacktestQueueExecutionBatchResult(
+                                    items=(executed,)
+                                ),
+                                continue_on_error=True,
+                            )
+                        )
+                        shadow_replication_count += int(
+                            getattr(
+                                shadow_result,
+                                "replicated_count",
+                                0,
+                            )
+                            or 0
+                        )
+                        shadow_replication_issue_count += int(
+                            getattr(
+                                shadow_result,
+                                "failed_count",
+                                0,
+                            )
+                            or 0
+                        )
+                        shadow_replication_issue_count += int(
+                            getattr(
+                                shadow_result,
+                                "mismatch_count",
+                                0,
+                            )
+                            or 0
+                        )
+                        shadow_replication_issue_count += int(
+                            getattr(
+                                shadow_result,
+                                "report_error",
+                                None,
+                            )
+                            is not None
+                        )
+                    except Exception:
+                        # Shadow障害でPaper強制決済を停止しない。
+                        shadow_replication_issue_count += 1
+
                 executed_order_id = self._order_id(executed)
                 target_executed = (
                     target_order_id is None
@@ -202,6 +271,10 @@ class EndOfDayLiquidationService:
             executed_count=len(execution_records),
             remaining_position_count=0,
             execution_records=tuple(execution_records),
+            shadow_replication_count=shadow_replication_count,
+            shadow_replication_issue_count=(
+                shadow_replication_issue_count
+            ),
         )
 
     @staticmethod
