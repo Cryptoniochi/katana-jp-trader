@@ -76,6 +76,13 @@ class LivePaperTradingService(Protocol):
         """新規足をPaper Tradingへ流す。"""
 
 
+class CycleProtectionService(Protocol):
+    """各Trading Cycleで保護処理を行う契約。"""
+
+    def process_pending(self):
+        """未処理の保護イベントを処理する。"""
+
+
 NowProvider = Callable[[], datetime]
 Sleeper = Callable[[float], None]
 StopPredicate = Callable[[], bool]
@@ -89,6 +96,7 @@ class LiveTradingOrchestrator:
         *,
         market_monitor: LiveMarketMonitor,
         paper_trading_service: LivePaperTradingService,
+        cycle_protection_service: CycleProtectionService | None = None,
         now_provider: NowProvider | None = None,
         sleeper: Sleeper = sleep,
         stop_requested: StopPredicate | None = None,
@@ -97,6 +105,7 @@ class LiveTradingOrchestrator:
 
         self.market_monitor = market_monitor
         self.paper_trading_service = paper_trading_service
+        self.cycle_protection_service = cycle_protection_service
         self.now_provider = (
             now_provider
             if now_provider is not None
@@ -263,6 +272,9 @@ class LiveTradingOrchestrator:
             )
             self._record_market_result(market_result)
             paper_result = None
+
+            if self.cycle_protection_service is not None:
+                self.cycle_protection_service.process_pending()
 
             if (
                 market_result.decision

@@ -608,6 +608,105 @@ class RealtimePaperTradingService:
                 error_message=str(error),
             )
 
+    def execute_external_signal(
+        self,
+        signal: TradeSignal,
+        *,
+        current_price: float,
+        order_type: OrderType = OrderType.MARKET,
+        equity_curve_limit: int = 10_000,
+        continue_on_error: bool = False,
+    ) -> bool:
+        """保護機構などのSignalを既存Paper経路で1件執行する。"""
+
+        if current_price <= 0:
+            raise ValueError("現在価格は0より大きい必要があります。")
+        if equity_curve_limit <= 0:
+            raise ValueError("取得件数は0より大きい必要があります。")
+
+        try:
+            if self.clock_updater is not None:
+                self.clock_updater(signal.generated_at)
+            self.market_price_updater(signal.code, current_price)
+
+            if self.trace_recorder is not None:
+                route_decision, route = self._resolve_trace_route(
+                    signal.code
+                )
+                self.trace_recorder.strategy_route_resolved(
+                    signal,
+                    decision=route_decision,
+                    route=route,
+                )
+                self.trace_recorder.signal_generated(
+                    signal,
+                    current_price,
+                )
+
+            if self.require_risk_gate:
+                if self.risk_context_updater is None:
+                    raise RuntimeError("Risk Gate Contextが未接続です。")
+                self.risk_context_updater(signal, current_price)
+
+            queue_result = self.order_queue_service.enqueue_signal(
+                signal,
+                order_type=order_type,
+                continue_on_error=continue_on_error,
+            )
+            self._diagnostic_queue_count += int(
+                queue_result.was_enqueued
+            )
+            if self.trace_recorder is not None:
+                self.trace_recorder.queue_enqueued(
+                    signal,
+                    was_enqueued=queue_result.was_enqueued,
+                )
+            if queue_result.is_failed or not queue_result.was_enqueued:
+                return False
+
+            risk_results: list[RiskAwareQueueExecutionResult] = []
+            execution_result = self._execute_queued_orders(
+                signal=signal,
+                continue_on_error=continue_on_error,
+                risk_execution_results=risk_results,
+            )
+            records = tuple(
+                item.execution_record
+                for item in execution_result.items
+                if (
+                    item.execution_record is not None
+                    and item.execution_record.signal_id
+                    == signal.signal_id
+                )
+            )
+            self._diagnostic_execution_count += len(records)
+
+            if self.shadow_replication_service is not None:
+                self.shadow_replication_service.replicate(
+                    execution_result,
+                    continue_on_error=True,
+                )
+
+            if not records:
+                return False
+
+            portfolio_result = (
+                self.portfolio_update_service.apply_executions(
+                    records,
+                    equity_curve_limit=equity_curve_limit,
+                )
+            )
+            self._diagnostic_portfolio_update_count += (
+                portfolio_result.applied_count
+            )
+            return portfolio_result.applied_count > 0
+
+        except Exception:
+            self._diagnostic_failed_process_count += 1
+            if not continue_on_error:
+                raise
+            return False
+
 
     def _resolve_trace_route(
         self,

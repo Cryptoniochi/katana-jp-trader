@@ -31,6 +31,9 @@ class RegisteredRealtimeStrategy(Protocol):
     def reset(self) -> None:
         """内部状態を初期化する。"""
 
+    def mark_position_closed(self) -> None:
+        """外部保護EXIT後の保有状態を同期する。"""
+
     def diagnostic_snapshot(
         self,
     ) -> OrbSignalDiagnosticSnapshot:
@@ -264,6 +267,12 @@ class CompositeRealtimeStrategy:
 
         self._conflict_counts.clear()
         self._evaluation_count = 0
+
+    def mark_position_closed(self) -> None:
+        """全戦略へ外部保護EXITを反映する。"""
+
+        for strategy in self._strategies:
+            strategy.mark_position_closed()
 
     def diagnostic_snapshot(
         self,

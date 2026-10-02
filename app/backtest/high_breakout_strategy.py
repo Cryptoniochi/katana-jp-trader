@@ -263,6 +263,15 @@ class HighBreakoutStrategy:
         self._counts.clear()
         self._evaluations = 0
 
+    def mark_position_closed(self) -> None:
+        """外部保護EXIT後の状態を当日再エントリーなしで閉じる。"""
+
+        if self._state is None:
+            return
+        self._state.position_open = False
+        self._state.entry_price = None
+        self._state.highest_price = None
+
     def diagnostic_snapshot(self) -> OrbSignalDiagnosticSnapshot:
         return OrbSignalDiagnosticSnapshot(
             evaluation_count=self._evaluations,

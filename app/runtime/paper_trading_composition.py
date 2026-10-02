@@ -40,6 +40,11 @@ from app.risk.paper_trading_pretrade_risk import (
 from app.risk.paper_trading_trace import (
     PaperTradingTraceRecorder,
 )
+from app.risk.tick_protective_stop import (
+    LatestMarketTickBuffer,
+    TickProtectiveStopService,
+    TickProtectiveStopSettings,
+)
 from app.database import initialize_database
 from app.live.live_orchestrator import (
     LiveTradingOrchestrator,
@@ -196,6 +201,8 @@ class PaperTradingProductionSettings:
     minimum_cash_balance: float = 500_000.0
     max_daily_loss: float = 50_000.0
     max_daily_entries: int = 5
+    tick_protective_stop_enabled: bool = True
+    tick_protective_stop_loss_rate: float = 0.01
     risk_trace_enabled: bool = True
     risk_trace_path: Path = Path(
         "logs/risk/paper_trading_trace.jsonl"
@@ -291,6 +298,12 @@ class PaperTradingProductionSettings:
         if self.initial_cash < 0:
             raise ValueError(
                 "初期資金は0以上である必要があります。"
+            )
+
+        if not 0 < self.tick_protective_stop_loss_rate < 1:
+            raise ValueError(
+                "ティック保護ストップ率は0より大きく"
+                "1未満で指定してください。"
             )
 
         if self.cycle_interval_seconds < 0:
@@ -774,10 +787,12 @@ class PaperTradingComposition:
                 **kwargs,
             )
 
+        latest_tick_buffer = LatestMarketTickBuffer()
         kabu_station_service = KabuStationRealtimeService(
             provider=kabu_provider,
             websocket_client_factory=websocket_factory,
             on_completed_bar=completed_bar_provider.accept,
+            on_tick=latest_tick_buffer.accept,
             interval_minutes=5,
         )
         provide_five_minute_bars = completed_bar_provider
@@ -1125,11 +1140,28 @@ class PaperTradingComposition:
                 ),
             )
         )
+        tick_protective_stop_service = None
+        if settings.tick_protective_stop_enabled:
+            tick_protective_stop_service = TickProtectiveStopService(
+                tick_buffer=latest_tick_buffer,
+                broker=paper_broker,
+                signal_executor=realtime_paper_trading_service,
+                market_price_updater=update_market_price,
+                position_closed_notifier=(
+                    signal_engine.mark_position_closed
+                ),
+                settings=TickProtectiveStopSettings(
+                    stop_loss_rate=(
+                        settings.tick_protective_stop_loss_rate
+                    )
+                ),
+            )
         live_orchestrator = LiveTradingOrchestrator(
             market_monitor=market_monitor,
             paper_trading_service=(
                 realtime_paper_trading_service
             ),
+            cycle_protection_service=tick_protective_stop_service,
             now_provider=resolved_now_provider,
         )
 

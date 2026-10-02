@@ -61,6 +61,9 @@ class RealtimeStrategy(Protocol):
     def reset(self) -> None:
         """内部状態を初期化する。"""
 
+    def mark_position_closed(self) -> None:
+        """外部保護EXIT後の保有状態を同期する。"""
+
     def diagnostic_snapshot(
         self,
     ) -> OrbSignalDiagnosticSnapshot:
@@ -302,6 +305,18 @@ class RealtimeSignalEngine:
         self._bars_by_code.pop(normalized_code, None)
         self._last_processed_at.pop(normalized_code, None)
         self._route_decisions.pop(normalized_code, None)
+
+    def mark_position_closed(self, code: str) -> bool:
+        """外部EXIT後も当日再エントリーさせず状態だけ閉じる。"""
+
+        strategy = self._strategies.get(self._normalize_code(code))
+        if strategy is None:
+            return False
+        marker = getattr(strategy, "mark_position_closed", None)
+        if marker is None:
+            return False
+        marker()
+        return True
 
     def diagnostic_snapshot(
         self,

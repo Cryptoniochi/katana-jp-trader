@@ -230,6 +230,14 @@ class OrbSignalStrategy:
         self._diagnostic_counts.clear()
         self._diagnostic_evaluation_count = 0
 
+    def mark_position_closed(self) -> None:
+        """外部保護EXIT後の状態を当日再エントリーなしで閉じる。"""
+
+        if self._state is None:
+            return
+        self._state.position_open = False
+        self._state.entry_price = None
+
     def diagnostic_snapshot(self) -> OrbSignalDiagnosticSnapshot:
         """現在までのORB診断集計を返す。"""
 
