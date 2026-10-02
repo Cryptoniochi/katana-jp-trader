@@ -161,7 +161,7 @@ class PaperTradingProductionSettings:
     max_position_value: float = 1_000_000.0
     max_total_exposure: float = 5_000_000.0
     minimum_cash_balance: float = 500_000.0
-    max_daily_loss: float = 100_000.0
+    max_daily_loss: float = 50_000.0
     max_daily_entries: int = 5
     risk_trace_enabled: bool = True
     risk_trace_path: Path = Path(

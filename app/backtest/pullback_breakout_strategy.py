@@ -63,7 +63,7 @@ class PullbackBreakoutSettings:
     force_exit_time: time = time(15, 20)
     stop_loss_rate: float | None = 0.01
     take_profit_rate: float | None = 0.02
-    trailing_stop_rate: float | None = 0.012
+    trailing_stop_rate: float | None = 0.01
 
     def __post_init__(self) -> None:
         if self.quantity <= 0:

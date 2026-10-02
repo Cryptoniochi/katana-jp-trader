@@ -178,6 +178,43 @@ def test_orb_prioritizes_stop_loss_when_both_hit() -> None:
     )
 
 
+def test_orb_default_settings_cut_loss_at_one_percent() -> None:
+    """本番既定値でもORBポジションを無制限に保持しない。"""
+
+    _strategy, result = run_strategy(
+        (
+            bar(9, 0, high_price=1000.0),
+            bar(9, 5, high_price=1000.0),
+            bar(9, 10, high_price=1000.0),
+            bar(9, 15, high_price=1000.0),
+            bar(
+                9,
+                20,
+                high_price=1010.0,
+                low_price=1000.0,
+                close_price=1005.0,
+            ),
+            bar(
+                9,
+                25,
+                high_price=1005.0,
+                low_price=994.0,
+                close_price=995.0,
+            ),
+        )
+    )
+
+    assert result.signal_count == 2
+    exit_signal = result.signals[1]
+    assert exit_signal.action is SignalAction.EXIT
+    assert exit_signal.metadata["exit_reason"] == (
+        OrbExitReason.STOP_LOSS.value
+    )
+    assert exit_signal.signal_price == pytest.approx(
+        1005.0 * 0.99
+    )
+
+
 def test_orb_emits_take_profit_exit() -> None:
     """利確価格到達でEXITを生成する。"""
 

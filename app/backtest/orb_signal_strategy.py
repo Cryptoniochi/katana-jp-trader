@@ -60,8 +60,11 @@ class OrbSignalStrategySettings:
     quantity: int = 100
     opening_range_end: time = time(9, 15)
     force_exit_time: time = time(15, 30)
-    stop_loss_rate: float | None = None
-    take_profit_rate: float | None = None
+    # Production-safe defaults.  A missing stop previously allowed an ORB
+    # position to remain open until the end-of-day liquidation even after a
+    # large adverse move.
+    stop_loss_rate: float | None = 0.01
+    take_profit_rate: float | None = 0.02
     min_opening_range_volume: float | None = None
     min_breakout_volume: float | None = None
     breakout_volume_ratio: float | None = None

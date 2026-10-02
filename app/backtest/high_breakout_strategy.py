@@ -39,9 +39,9 @@ class HighBreakoutStrategySettings:
     entry_start_time: time = time(9, 30)
     entry_end_time: time = time(14, 30)
     force_exit_time: time = time(15, 20)
-    stop_loss_rate: float | None = 0.012
-    take_profit_rate: float | None = 0.025
-    trailing_stop_rate: float | None = 0.015
+    stop_loss_rate: float | None = 0.01
+    take_profit_rate: float | None = 0.02
+    trailing_stop_rate: float | None = 0.01
 
     def __post_init__(self) -> None:
         if self.quantity <= 0:

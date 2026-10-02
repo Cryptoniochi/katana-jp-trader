@@ -301,7 +301,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "日次損失上限。未指定時は環境変数"
-            "KATANA_MAX_DAILY_LOSSまたは既定値100000です。"
+            "KATANA_MAX_DAILY_LOSSまたは既定値50000です。"
         ),
     )
     parser.add_argument(
@@ -624,7 +624,7 @@ def create_production_settings(
     max_daily_loss = _resolve_float_setting(
         arguments.max_daily_loss,
         resolved_environ.get("KATANA_MAX_DAILY_LOSS"),
-        100_000.0,
+        50_000.0,
         "日次損失上限",
     )
     max_daily_entries = _resolve_int_setting(
