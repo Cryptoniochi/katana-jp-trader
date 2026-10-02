@@ -17,6 +17,7 @@ from app.market.kabu_station_models import (
 
 
 JsonObject = dict[str, Any]
+JsonValue = JsonObject | list[JsonObject]
 Transport = Callable[
     [str, str, dict[str, str], bytes | None, float],
     tuple[int, bytes],
@@ -209,6 +210,58 @@ class KabuStationClient:
 
         return None
 
+    def cash_wallet(self) -> JsonObject:
+        """現物取引余力を読取専用で取得する。"""
+
+        self._ensure_token()
+        return self._request("GET", "/wallet/cash", payload=None)
+
+    def margin_wallet(self) -> JsonObject:
+        """信用取引余力を読取専用で取得する。"""
+
+        self._ensure_token()
+        return self._request("GET", "/wallet/margin", payload=None)
+
+    def orders(self, *, product: int = 0) -> tuple[JsonObject, ...]:
+        """注文約定一覧を読取専用で取得する。"""
+
+        if product not in {0, 1, 2, 3, 4}:
+            raise ValueError("商品区分は0から4で指定してください。")
+        self._ensure_token()
+        value = self._request_value(
+            "GET",
+            f"/orders?product={product}",
+            payload=None,
+        )
+        if not isinstance(value, list):
+            raise KabuStationResponseError(
+                "注文一覧応答はJSON Arrayである必要があります。"
+            )
+        return tuple(value)
+
+    def positions(
+        self,
+        *,
+        product: int = 0,
+        addinfo: bool = True,
+    ) -> tuple[JsonObject, ...]:
+        """残高一覧を読取専用で取得する。"""
+
+        if product not in {0, 1, 2, 3, 4}:
+            raise ValueError("商品区分は0から4で指定してください。")
+        flag = "true" if addinfo else "false"
+        self._ensure_token()
+        value = self._request_value(
+            "GET",
+            f"/positions?product={product}&addinfo={flag}",
+            payload=None,
+        )
+        if not isinstance(value, list):
+            raise KabuStationResponseError(
+                "残高一覧応答はJSON Arrayである必要があります。"
+            )
+        return tuple(value)
+
     def _ensure_token(self) -> str:
         """トークン未取得の場合は自動取得する。"""
 
@@ -276,11 +329,87 @@ class KabuStationClient:
                 f"url={url} error={error}"
             ) from error
 
-        response = _decode_json(response_body)
+        response = self._validate_response(
+            status,
+            response_body,
+        )
+
+        if not isinstance(response, dict):
+            raise KabuStationResponseError(
+                "kabuステーションAPI応答は"
+                "JSON Objectである必要があります。"
+            )
+
+        return response
+
+    def _request_value(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: JsonObject | None,
+        authenticated: bool = True,
+        timeout_seconds: float | None = None,
+    ) -> JsonValue:
+        """ObjectまたはArrayのJSON APIを呼び出す。"""
+
+        resolved_timeout_seconds = (
+            self.settings.timeout_seconds
+            if timeout_seconds is None
+            else float(timeout_seconds)
+        )
+        if resolved_timeout_seconds <= 0:
+            raise ValueError(
+                "要求タイムアウト秒数は0より大きい必要があります。"
+            )
+
+        headers = {"Content-Type": "application/json"}
+        if authenticated:
+            token = self._token
+            if token is None:
+                raise RuntimeError(
+                    "認証済み要求にはトークンが必要です。"
+                )
+            headers["X-API-KEY"] = token
+
+        body = (
+            None
+            if payload is None
+            else json.dumps(payload).encode("utf-8")
+        )
+        url = f"{self.settings.base_url}{path}"
+        try:
+            status, response_body = self.transport(
+                method,
+                url,
+                headers,
+                body,
+                resolved_timeout_seconds,
+            )
+        except KabuStationConnectionError:
+            raise
+        except Exception as error:
+            raise KabuStationConnectionError(
+                "kabuステーションAPIへの接続に"
+                "失敗しました。 "
+                f"url={url} error={error}"
+            ) from error
+
+        return self._validate_response(status, response_body)
+
+    @staticmethod
+    def _validate_response(
+        status: int,
+        response_body: bytes,
+    ) -> JsonValue:
+        response = _decode_json_value(response_body)
 
         if not 200 <= status < 300:
-            code = response.get("Code")
-            message = response.get("Message")
+            error_payload = (
+                response if isinstance(response, dict) else {}
+            )
+            code = error_payload.get("Code")
+            message = error_payload.get("Message")
             raise KabuStationResponseError(
                 "kabuステーションAPIがエラーを"
                 "返しました。 "
@@ -297,13 +426,7 @@ def _decode_json(body: bytes) -> JsonObject:
     if not body:
         return {}
 
-    try:
-        value = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise KabuStationResponseError(
-            "kabuステーションAPI応答をJSONとして"
-            "解釈できません。"
-        ) from error
+    value = _decode_json_value(body)
 
     if not isinstance(value, dict):
         raise KabuStationResponseError(
@@ -312,6 +435,31 @@ def _decode_json(body: bytes) -> JsonObject:
         )
 
     return value
+
+
+def _decode_json_value(body: bytes) -> JsonValue:
+    """ObjectまたはObject配列のJSON Bodyを解釈する。"""
+
+    if not body:
+        return {}
+    try:
+        value = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise KabuStationResponseError(
+            "kabuステーションAPI応答をJSONとして"
+            "解釈できません。"
+        ) from error
+
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list) and all(
+        isinstance(item, dict) for item in value
+    ):
+        return value
+    raise KabuStationResponseError(
+        "kabuステーションAPI応答はJSON Objectまたは"
+        "Object配列である必要があります。"
+    )
 
 
 def _urllib_transport(
