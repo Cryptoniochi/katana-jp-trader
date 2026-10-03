@@ -99,6 +99,54 @@ class LockedLiveRuntimeIntegration:
             else lambda: datetime.now(timezone.utc)
         )
 
+    @classmethod
+    def disabled_attachment(
+        cls,
+        *,
+        database_path: Path,
+        now_provider: NowProvider | None = None,
+    ) -> "LockedLiveRuntimeIntegration":
+        """Create the inert runtime attachment used during Phase 6-C.
+
+        The attachment deliberately has no healthy live-state dependencies.
+        Every future state dependency is fail-closed if it is ever evaluated,
+        while ``process`` remains hard-disabled by the Phase 6-C lock.
+        """
+
+        def unavailable_portfolio_provider():
+            raise RuntimeError(
+                "Live portfolio state is not connected in Phase 6-C."
+            )
+
+        def unavailable_reconciliation_provider():
+            return None
+
+        def unavailable_fault_tolerance_provider():
+            return None
+
+        def unavailable_kill_switch_provider():
+            raise RuntimeError(
+                "Live kill-switch state is not connected in Phase 6-C."
+            )
+
+        return cls(
+            database_path=database_path,
+            risk_manager=LiveRiskManager(),
+            portfolio_provider=unavailable_portfolio_provider,
+            reconciliation_report_provider=(
+                unavailable_reconciliation_provider
+            ),
+            fault_tolerance_attempt_provider=(
+                unavailable_fault_tolerance_provider
+            ),
+            kill_switch_snapshot_provider=(
+                unavailable_kill_switch_provider
+            ),
+            execution_settings=None,
+            market_price_provider=None,
+            now_provider=now_provider,
+        )
+
     @property
     def enabled(self) -> bool:
         """Return the compile-time integration state.

@@ -1,8 +1,8 @@
-"""Phase 6-C Step 4C-2 Paper runtime attachment-point tests.
+"""Phase 6-C locked-live Paper runtime attachment regression tests.
 
-The existing Paper runtime may expose a typed slot for the locked-live
-integration, but Step 4C-2 must not construct, start, process, or otherwise
-invoke that integration.
+Step 4C-3 supersedes the Step 4C-2 ``None`` attachment with a deliberately
+disabled integration instance.  The Paper runtime must still never start,
+process, or otherwise activate live execution.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ def test_production_bundle_exposes_optional_locked_live_integration_slot():
     assert bundle_fields["locked_live_runtime_integration"].default is None
 
 
-def test_paper_composition_does_not_construct_locked_live_integration():
+def test_paper_composition_does_not_directly_construct_locked_live_integration():
     tree = ast.parse(_source())
 
     constructor_calls = [
@@ -66,10 +66,12 @@ def test_paper_bundle_run_does_not_reference_locked_live_integration():
     assert ".process(" not in source
 
 
-def test_paper_composition_create_returns_slot_as_none_in_source():
+def test_paper_composition_create_attaches_disabled_integration_in_source():
     source = inspect.getsource(PaperTradingComposition.create)
 
-    assert "locked_live_runtime_integration=None" in source
+    assert "LockedLiveRuntimeIntegration.disabled_attachment(" in source
+    assert "locked_live_runtime_integration=None" not in source
+    assert "locked_live_runtime_integration=(" in source
 
 
 def test_paper_composition_has_no_live_runtime_enable_setting():

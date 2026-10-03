@@ -1274,6 +1274,13 @@ class PaperTradingComposition:
             stop_requested=resolved_stop_requested,
         )
 
+        locked_live_runtime_integration = (
+            LockedLiveRuntimeIntegration.disabled_attachment(
+                database_path=settings.database_path,
+                now_provider=resolved_now_provider,
+            )
+        )
+
         return PaperTradingProductionBundle(
             settings=settings,
             day_service=day_service,
@@ -1296,5 +1303,7 @@ class PaperTradingComposition:
                 strategy_routing_snapshot
             ),
             kabu_station_service=kabu_station_service,
-            locked_live_runtime_integration=None,
+            locked_live_runtime_integration=(
+                locked_live_runtime_integration
+            ),
         )
