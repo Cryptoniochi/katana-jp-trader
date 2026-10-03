@@ -27,9 +27,11 @@ class LiveOrderBlockReason(StrEnum):
 
     STATIC_LOCK = "static_lock"
     RUNTIME_LOCK = "runtime_lock"
+    NO_TRANSPORT = "no_transport"
     KILL_SWITCH = "kill_switch"
     RISK_REVALIDATION = "risk_revalidation"
     DUPLICATE = "duplicate"
+    IDEMPOTENCY_CONFLICT = "idempotency_conflict"
 
 
 @dataclass(frozen=True, slots=True)
