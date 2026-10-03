@@ -16,6 +16,7 @@ from app.live.live_execution_journal_repository import (
     LiveExecutionTransitionError,
     SQLiteLiveExecutionJournal,
 )
+from app.live.live_order_adapter import LockedLiveOrderAdapter
 from app.live.live_submission_boundary import LockedLiveSubmissionBoundary
 from app.live.live_submission_coordinator import LockedLiveSubmissionCoordinator
 from app.live.live_submission_coordinator_models import (
@@ -27,13 +28,14 @@ from app.trading.order_models import OrderSide, OrderType, TradeOrder
 NOW = datetime(2026, 10, 3, 1, 0, 0, tzinfo=timezone.utc)
 TRADING_DATE = date(2026, 10, 3)
 EXECUTION_KEY = "execution-key-1"
-FINGERPRINT = "fingerprint-1"
 
 
 def _order(
     *,
     order_id: str = "order-1",
     signal_id: str = "signal-1",
+    quantity: int = 100,
+    limit_price: float = 2500.0,
 ) -> TradeOrder:
     return TradeOrder(
         order_id=order_id,
@@ -41,8 +43,8 @@ def _order(
         code="7203",
         side=OrderSide.BUY,
         order_type=OrderType.LIMIT,
-        quantity=100,
-        limit_price=2500.0,
+        quantity=quantity,
+        limit_price=limit_price,
         stop_price=None,
     )
 
@@ -57,7 +59,7 @@ def _prepare_and_claim(
 ) -> None:
     journal.prepare(
         execution_key=EXECUTION_KEY,
-        order_fingerprint=FINGERPRINT,
+        order_fingerprint=LockedLiveOrderAdapter.create_order_fingerprint(order),
         order_id=order.order_id,
         signal_id=order.signal_id,
     )
@@ -167,7 +169,7 @@ def test_only_claimed_execution_may_start_coordinator(
     order = _order()
     journal.prepare(
         execution_key=EXECUTION_KEY,
-        order_fingerprint=FINGERPRINT,
+        order_fingerprint=LockedLiveOrderAdapter.create_order_fingerprint(order),
         order_id=order.order_id,
         signal_id=order.signal_id,
     )
@@ -219,6 +221,33 @@ def test_signal_id_must_match_journal_before_pending_transition(tmp_path) -> Non
         journal.get_required(EXECUTION_KEY).state
         is LiveExecutionState.CLAIMED
     )
+
+
+@pytest.mark.parametrize(
+    "changed_order",
+    [
+        _order(quantity=200),
+        _order(limit_price=2600.0),
+    ],
+)
+def test_order_fingerprint_must_match_before_pending_transition(
+    tmp_path,
+    changed_order,
+) -> None:
+    journal = _journal(tmp_path)
+    original = _order()
+    _prepare_and_claim(journal, original)
+
+    with pytest.raises(ValueError, match="fingerprint"):
+        _coordinator(journal).evaluate(
+            execution_key=EXECUTION_KEY,
+            order=changed_order,
+            trading_date=TRADING_DATE,
+        )
+
+    record = journal.get_required(EXECUTION_KEY)
+    assert record.state is LiveExecutionState.CLAIMED
+    assert record.submission_pending_at is None
 
 
 def test_second_coordinator_attempt_cannot_retry_pending_execution(

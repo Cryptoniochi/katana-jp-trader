@@ -1,7 +1,8 @@
-"""Phase 6-C Step 2 locked live submission coordinator.
+"""Phase 6-C locked live submission coordinator.
 
 Safety invariants:
 - only a CLAIMED execution may start this path;
+- order identity and immutable content must match the durable journal;
 - the journal is durably SUBMISSION_PENDING before transport evaluation;
 - the transport boundary remains locked and has no broker/network dependency;
 - a LOCKED transport result is not an ambiguous broker outcome;
@@ -27,6 +28,7 @@ from app.live.live_execution_journal_repository import (
     LiveExecutionTransitionError,
     SQLiteLiveExecutionJournal,
 )
+from app.live.live_order_adapter import LockedLiveOrderAdapter
 from app.live.live_submission_boundary import LockedLiveSubmissionBoundary
 from app.live.live_submission_coordinator_models import (
     LiveSubmissionCoordinatorDecision,
@@ -65,7 +67,7 @@ class LockedLiveSubmissionCoordinator:
         order: TradeOrder,
         trading_date: date,
     ) -> LiveSubmissionCoordinatorResult:
-        """Enter SUBMISSION_PENDING and stop at the locked transport."""
+        """Validate immutable order content, enter pending, and stop locked."""
 
         current = self.journal.get_required(execution_key)
         if current.state is not LiveExecutionState.CLAIMED:
@@ -77,6 +79,10 @@ class LockedLiveSubmissionCoordinator:
         self._validate_order_identity(
             current_order_id=current.order_id,
             current_signal_id=current.signal_id,
+            order=order,
+        )
+        self._validate_order_fingerprint(
+            current_order_fingerprint=current.order_fingerprint,
             order=order,
         )
 
@@ -105,7 +111,7 @@ class LockedLiveSubmissionCoordinator:
                 "Phase 6-C locked transport returned an unsupported decision."
             )
 
-        # Re-read durable state after transport evaluation.  A local LOCKED
+        # Re-read durable state after transport evaluation. A local LOCKED
         # result proves that no broker transmission was attempted, so this is
         # intentionally not converted to UNKNOWN.
         after_transport = self.journal.get_required(execution_key)
@@ -141,6 +147,18 @@ class LockedLiveSubmissionCoordinator:
         if order.signal_id != current_signal_id:
             raise ValueError(
                 "TradeOrder signal_id does not match the execution journal."
+            )
+
+    @staticmethod
+    def _validate_order_fingerprint(
+        *,
+        current_order_fingerprint: str,
+        order: TradeOrder,
+    ) -> None:
+        candidate = LockedLiveOrderAdapter.create_order_fingerprint(order)
+        if candidate != current_order_fingerprint:
+            raise ValueError(
+                "TradeOrder fingerprint does not match the execution journal."
             )
 
     def _current_time(self) -> datetime:
