@@ -22,6 +22,9 @@ from pathlib import Path
 from typing import Callable
 
 from app.live.execution_mode import ExecutionModeSettings
+from app.live.live_runtime_kill_switch_composition import (
+    LiveRuntimeKillSwitchComposition,
+)
 from app.live.live_order_safety import (
     FaultToleranceAttemptLike,
     ThreeWayReconciliationLike,
@@ -67,6 +70,9 @@ class LockedLiveRuntimeIntegrationResult:
 NowProvider = Callable[[], datetime]
 ThreeWayProvider = Callable[[], ThreeWayReconciliationLike | None]
 FaultToleranceProvider = Callable[[], FaultToleranceAttemptLike | None]
+BoolProvider = Callable[[], bool]
+FloatProvider = Callable[[], float]
+IntProvider = Callable[[], int]
 
 
 class LockedLiveRuntimeIntegration:
@@ -144,6 +150,71 @@ class LockedLiveRuntimeIntegration:
             ),
             execution_settings=None,
             market_price_provider=None,
+            now_provider=now_provider,
+        )
+
+    @classmethod
+    def disabled_state_connected_attachment(
+        cls,
+        *,
+        database_path: Path,
+        portfolio_provider: PortfolioProvider,
+        reconciliation_report_provider: ThreeWayProvider,
+        fault_tolerance_attempt_provider: FaultToleranceProvider,
+        daily_profit_loss_provider: FloatProvider,
+        consecutive_loss_count_provider: IntProvider,
+        runtime_health_ok_provider: BoolProvider,
+        heartbeat_alive_provider: BoolProvider,
+        broker_available_provider: BoolProvider,
+        manual_blocked_provider: BoolProvider | None = None,
+        risk_manager: LiveRiskManager | None = None,
+        execution_settings: ExecutionModeSettings | None = None,
+        market_price_provider: MarketPriceProvider | None = None,
+        max_daily_loss: float = 50_000.0,
+        max_consecutive_losses: int = 3,
+        now_provider: NowProvider | None = None,
+    ) -> "LockedLiveRuntimeIntegration":
+        """Create a state-connected attachment that is still hard-disabled.
+
+        This factory connects only read-only safety inputs.  It deliberately
+        does not construct the locked-live execution bundle, arm runtime
+        execution, or provide any broker/order transmission path.
+
+        If ``manual_blocked_provider`` is omitted, the Kill Switch composition
+        remains fail-closed and reports the manual block as active.
+        """
+
+        kill_switch_composition = LiveRuntimeKillSwitchComposition(
+            manual_blocked_provider=manual_blocked_provider,
+            daily_profit_loss_provider=daily_profit_loss_provider,
+            consecutive_loss_count_provider=(
+                consecutive_loss_count_provider
+            ),
+            runtime_health_ok_provider=runtime_health_ok_provider,
+            heartbeat_alive_provider=heartbeat_alive_provider,
+            broker_available_provider=broker_available_provider,
+            max_daily_loss=max_daily_loss,
+            max_consecutive_losses=max_consecutive_losses,
+            now_provider=now_provider,
+        )
+
+        return cls(
+            database_path=database_path,
+            risk_manager=(
+                risk_manager
+                if risk_manager is not None
+                else LiveRiskManager()
+            ),
+            portfolio_provider=portfolio_provider,
+            reconciliation_report_provider=(
+                reconciliation_report_provider
+            ),
+            fault_tolerance_attempt_provider=(
+                fault_tolerance_attempt_provider
+            ),
+            kill_switch_snapshot_provider=kill_switch_composition,
+            execution_settings=execution_settings,
+            market_price_provider=market_price_provider,
             now_provider=now_provider,
         )
 
