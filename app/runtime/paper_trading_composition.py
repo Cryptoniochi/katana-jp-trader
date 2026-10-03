@@ -52,6 +52,9 @@ from app.live.live_orchestrator import (
 from app.live.locked_live_runtime_integration import (
     LockedLiveRuntimeIntegration,
 )
+from app.live.live_runtime_read_only_composition import (
+    LiveRuntimeReadOnlyProviderFactory,
+)
 from app.live.paper_shadow_replication import (
     PaperShadowReplicationService,
 )
@@ -109,6 +112,9 @@ from app.market.symbol_strategy_router import (
 )
 from app.market.realtime_signal_engine import (
     RealtimeSignalEngine,
+)
+from app.runtime.daily_report_service import (
+    SQLiteDailyTradeRepository,
 )
 from app.runtime.end_of_day_liquidation_service import (
     EndOfDayLiquidationService,
@@ -223,6 +229,9 @@ class PaperTradingProductionSettings:
     )
     shadow_reconciliation_report_path: Path = Path(
         "reports/live/shadow_reconciliation.json"
+    )
+    live_read_only_report_path: Path = Path(
+        "reports/live/kabu_station_read_only.json"
     )
 
     def __post_init__(self) -> None:
@@ -480,6 +489,15 @@ class PaperTradingProductionSettings:
                 / normalized_shadow_reconciliation_report_path
             )
 
+        normalized_live_read_only_report_path = Path(
+            self.live_read_only_report_path
+        )
+        if not normalized_live_read_only_report_path.is_absolute():
+            normalized_live_read_only_report_path = (
+                ROOT_DIR
+                / normalized_live_read_only_report_path
+            )
+
         object.__setattr__(
             self,
             "database_path",
@@ -544,6 +562,11 @@ class PaperTradingProductionSettings:
             self,
             "shadow_reconciliation_report_path",
             normalized_shadow_reconciliation_report_path.resolve(),
+        )
+        object.__setattr__(
+            self,
+            "live_read_only_report_path",
+            normalized_live_read_only_report_path.resolve(),
         )
 
 
@@ -1274,9 +1297,52 @@ class PaperTradingComposition:
             stop_requested=resolved_stop_requested,
         )
 
+        live_runtime_read_only_providers = (
+            LiveRuntimeReadOnlyProviderFactory.create(
+                daily_trade_repository=SQLiteDailyTradeRepository(
+                    settings.database_path
+                ),
+                runtime_session_service=runtime_session,
+                kabu_station_report_path=(
+                    settings.live_read_only_report_path
+                ),
+                now_provider=resolved_now_provider,
+            )
+        )
+
+        def unavailable_live_portfolio():
+            raise RuntimeError(
+                "Live portfolio state is not connected in Phase 6-C."
+            )
+
         locked_live_runtime_integration = (
-            LockedLiveRuntimeIntegration.disabled_attachment(
+            LockedLiveRuntimeIntegration
+            .disabled_state_connected_attachment(
                 database_path=settings.database_path,
+                portfolio_provider=unavailable_live_portfolio,
+                reconciliation_report_provider=lambda: None,
+                fault_tolerance_attempt_provider=lambda: None,
+                daily_profit_loss_provider=(
+                    live_runtime_read_only_providers
+                    .daily_profit_loss_provider
+                ),
+                consecutive_loss_count_provider=(
+                    live_runtime_read_only_providers
+                    .consecutive_loss_count_provider
+                ),
+                runtime_health_ok_provider=(
+                    live_runtime_read_only_providers
+                    .runtime_health_ok_provider
+                ),
+                heartbeat_alive_provider=(
+                    live_runtime_read_only_providers
+                    .heartbeat_alive_provider
+                ),
+                broker_available_provider=(
+                    live_runtime_read_only_providers
+                    .broker_available_provider
+                ),
+                max_daily_loss=settings.max_daily_loss,
                 now_provider=resolved_now_provider,
             )
         )

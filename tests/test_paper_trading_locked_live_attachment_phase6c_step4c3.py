@@ -77,7 +77,8 @@ def test_disabled_attachment_kill_switch_state_is_fail_closed(
 def test_paper_composition_constructs_only_disabled_attachment() -> None:
     source = inspect.getsource(PaperTradingComposition.create)
 
-    assert "LockedLiveRuntimeIntegration.disabled_attachment(" in source
+    assert "disabled_state_connected_attachment(" in source
+    assert "LockedLiveRuntimeIntegration.disabled_attachment(" not in source
     assert "locked_live_runtime_integration=None" not in source
     assert ".process(" not in source
 

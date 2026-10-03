@@ -69,9 +69,11 @@ def test_paper_bundle_run_does_not_reference_locked_live_integration():
 def test_paper_composition_create_attaches_disabled_integration_in_source():
     source = inspect.getsource(PaperTradingComposition.create)
 
-    assert "LockedLiveRuntimeIntegration.disabled_attachment(" in source
+    assert "disabled_state_connected_attachment(" in source
+    assert "LockedLiveRuntimeIntegration.disabled_attachment(" not in source
     assert "locked_live_runtime_integration=None" not in source
     assert "locked_live_runtime_integration=(" in source
+    assert ".process(" not in source
 
 
 def test_paper_composition_has_no_live_runtime_enable_setting():
