@@ -6,8 +6,12 @@ Safety invariant:
 - no real-order submission method exists;
 - every otherwise-valid order terminates at LOCKED.
 
-The boundary still performs emergency-stop evaluation, final risk revalidation,
+The boundary performs emergency-stop evaluation, final risk revalidation,
 and durable idempotency reservation before reporting the final lock state.
+
+Phase 6-C hardening additionally converts failures from configured safety,
+Kill Switch, market-price, portfolio, and risk providers into auditable
+BLOCKED results instead of allowing an exception to escape toward execution.
 """
 
 from __future__ import annotations
@@ -113,7 +117,7 @@ NowProvider = Callable[[], datetime]
 
 
 class LockedLiveOrderAdapter:
-    """Live order boundary that cannot transmit orders in Phase 6-A."""
+    """Live order boundary that cannot transmit orders."""
 
     def __init__(
         self,
@@ -162,7 +166,7 @@ class LockedLiveOrderAdapter:
 
     @classmethod
     def create_idempotency_key(cls, order: TradeOrder) -> str:
-        """Create the stable Phase 6-A live-order idempotency key."""
+        """Create the stable live-order idempotency key."""
 
         return cls.create_order_fingerprint(order)
 
@@ -180,15 +184,29 @@ class LockedLiveOrderAdapter:
 
         evaluated_at = self._current_time()
 
-        # Phase 6-A Step 3: explicit emergency-stop gates run before Kill Switch,
-        # risk revalidation, and idempotency reservation. Existing callers that
-        # do not yet wire this provider remain compatible while the immutable
-        # static lock still guarantees that no live order can be transmitted.
-        safety_snapshot = (
-            self.safety_snapshot_provider()
-            if self.safety_snapshot_provider is not None
-            else None
-        )
+        # Compatibility note:
+        # Phase 6-A allowed callers without a safety provider.  Phase 6-C runtime
+        # composition will make this provider mandatory.  If a configured
+        # provider fails, however, this boundary now fails closed.
+        safety_snapshot = None
+        if self.safety_snapshot_provider is not None:
+            try:
+                safety_snapshot = self.safety_snapshot_provider()
+            except Exception:
+                return LiveOrderBoundaryResult(
+                    intent=intent,
+                    decision=LiveOrderDecision.BLOCKED,
+                    reason=LiveOrderBlockReason.RECONCILIATION,
+                    evaluated_at=evaluated_at,
+                    risk_assessment=None,
+                    kill_switch_evaluation=None,
+                    safety_snapshot=None,
+                    message=(
+                        "Live order blocked because emergency safety state "
+                        "could not be obtained."
+                    ),
+                )
+
         if safety_snapshot is not None:
             if safety_snapshot.safe_stop_active:
                 return LiveOrderBoundaryResult(
@@ -218,9 +236,24 @@ class LockedLiveOrderAdapter:
                 )
 
         # Kill Switch always wins over risk logic, including risk-reducing orders.
-        kill_evaluation = self.kill_switch_service.evaluate(
-            self.kill_switch_snapshot_provider()
-        )
+        try:
+            kill_snapshot = self.kill_switch_snapshot_provider()
+            kill_evaluation = self.kill_switch_service.evaluate(kill_snapshot)
+        except Exception:
+            return LiveOrderBoundaryResult(
+                intent=intent,
+                decision=LiveOrderDecision.BLOCKED,
+                reason=LiveOrderBlockReason.KILL_SWITCH,
+                evaluated_at=evaluated_at,
+                risk_assessment=None,
+                kill_switch_evaluation=None,
+                safety_snapshot=safety_snapshot,
+                message=(
+                    "Live order blocked because Kill Switch state could not "
+                    "be obtained or evaluated."
+                ),
+            )
+
         if kill_evaluation.is_blocked:
             return LiveOrderBoundaryResult(
                 intent=intent,
@@ -236,15 +269,33 @@ class LockedLiveOrderAdapter:
                 ),
             )
 
-        # Re-read the latest portfolio immediately at the live boundary.
-        signal = self._signal_from_order(
-            intent.order,
-            evaluated_at=evaluated_at,
-        )
-        risk_assessment = self.risk_manager.assess(
-            signal,
-            portfolio=self.portfolio_provider(),
-        )
+        # Re-read current price and portfolio immediately at the live boundary.
+        # Any failure to obtain or evaluate these inputs is fail-closed.
+        try:
+            signal = self._signal_from_order(
+                intent.order,
+                evaluated_at=evaluated_at,
+            )
+            portfolio = self.portfolio_provider()
+            risk_assessment = self.risk_manager.assess(
+                signal,
+                portfolio=portfolio,
+            )
+        except Exception:
+            return LiveOrderBoundaryResult(
+                intent=intent,
+                decision=LiveOrderDecision.BLOCKED,
+                reason=LiveOrderBlockReason.RISK_REVALIDATION,
+                evaluated_at=evaluated_at,
+                risk_assessment=None,
+                kill_switch_evaluation=kill_evaluation,
+                safety_snapshot=safety_snapshot,
+                message=(
+                    "Live order blocked because final risk state could not "
+                    "be obtained or evaluated."
+                ),
+            )
+
         if not risk_assessment.is_approved:
             return LiveOrderBoundaryResult(
                 intent=intent,
@@ -292,9 +343,6 @@ class LockedLiveOrderAdapter:
                 message="Duplicate live-order intent blocked.",
             )
 
-        # Preserve the Phase 6-A public safety invariant: the compile-time/static
-        # lock is the primary final boundary. Risk and idempotency have already
-        # been revalidated above, so this does not bypass those checks.
         if not LIVE_ORDER_TRANSMISSION_ENABLED:
             return LiveOrderBoundaryResult(
                 intent=intent,
@@ -304,11 +352,9 @@ class LockedLiveOrderAdapter:
                 risk_assessment=risk_assessment,
                 kill_switch_evaluation=kill_evaluation,
                 safety_snapshot=safety_snapshot,
-                message="Live order transmission is statically locked in Phase 6-A.",
+                message="Live order transmission is statically locked.",
             )
 
-        # Defense in depth for a future phase: even if the static constant were
-        # deliberately changed, runtime arming would still be required.
         if not self.runtime_armed:
             return LiveOrderBoundaryResult(
                 intent=intent,
@@ -321,8 +367,6 @@ class LockedLiveOrderAdapter:
                 message="Live order transmission is not armed at runtime.",
             )
 
-        # Defense in depth: Phase 6-A has no transport even if the constant is
-        # accidentally changed later without redesigning this adapter.
         return LiveOrderBoundaryResult(
             intent=intent,
             decision=LiveOrderDecision.LOCKED,
@@ -331,7 +375,7 @@ class LockedLiveOrderAdapter:
             risk_assessment=risk_assessment,
             kill_switch_evaluation=kill_evaluation,
             safety_snapshot=safety_snapshot,
-            message="Phase 6-A has no live-order transport.",
+            message="No live-order transport exists in this phase.",
         )
 
     def _signal_from_order(
