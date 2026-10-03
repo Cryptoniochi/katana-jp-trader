@@ -49,6 +49,9 @@ from app.database import initialize_database
 from app.live.live_orchestrator import (
     LiveTradingOrchestrator,
 )
+from app.live.locked_live_runtime_integration import (
+    LockedLiveRuntimeIntegration,
+)
 from app.live.paper_shadow_replication import (
     PaperShadowReplicationService,
 )
@@ -709,6 +712,9 @@ class PaperTradingProductionBundle:
     kabu_station_service: (
         KabuStationRealtimeService | None
     ) = None
+    locked_live_runtime_integration: (
+        LockedLiveRuntimeIntegration | None
+    ) = None
 
     def run(self) -> PaperTradingDayResult:
         """Trading Loopを開始して終日運用を実行する。"""
@@ -1290,4 +1296,5 @@ class PaperTradingComposition:
                 strategy_routing_snapshot
             ),
             kabu_station_service=kabu_station_service,
+            locked_live_runtime_integration=None,
         )
