@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+from app.live.live_order_safety import LiveOrderSafetySnapshot
 from app.live.risk_models import RiskAssessment
 from app.risk.kill_switch_models import KillSwitchEvaluation
 from app.trading.order_models import TradeOrder
@@ -28,6 +29,8 @@ class LiveOrderBlockReason(StrEnum):
     STATIC_LOCK = "static_lock"
     RUNTIME_LOCK = "runtime_lock"
     NO_TRANSPORT = "no_transport"
+    SAFE_STOP = "safe_stop"
+    RECONCILIATION = "reconciliation"
     KILL_SWITCH = "kill_switch"
     RISK_REVALIDATION = "risk_revalidation"
     DUPLICATE = "duplicate"
@@ -60,8 +63,9 @@ class LiveOrderBoundaryResult:
     reason: LiveOrderBlockReason
     evaluated_at: datetime
     risk_assessment: RiskAssessment | None
-    kill_switch_evaluation: KillSwitchEvaluation
-    message: str
+    kill_switch_evaluation: KillSwitchEvaluation | None
+    safety_snapshot: LiveOrderSafetySnapshot | None = None
+    message: str = "Live order boundary evaluated."
 
     def __post_init__(self) -> None:
         if self.evaluated_at.tzinfo is None:

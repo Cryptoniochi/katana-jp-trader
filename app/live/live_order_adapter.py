@@ -20,6 +20,7 @@ from typing import Protocol
 from app.live.live_order_idempotency_repository import (
     LiveOrderIdempotencyConflictError,
 )
+from app.live.live_order_safety import LiveOrderSafetySnapshot
 from app.live.live_order_models import (
     LiveOrderBlockReason,
     LiveOrderBoundaryResult,
@@ -107,6 +108,7 @@ class InMemoryLiveOrderIdempotencyStore:
 PortfolioProvider = Callable[[], RiskPortfolioSnapshot]
 KillSwitchSnapshotProvider = Callable[[], KillSwitchSnapshot]
 MarketPriceProvider = Callable[[str], float]
+SafetySnapshotProvider = Callable[[], LiveOrderSafetySnapshot]
 NowProvider = Callable[[], datetime]
 
 
@@ -122,6 +124,7 @@ class LockedLiveOrderAdapter:
         kill_switch_snapshot_provider: KillSwitchSnapshotProvider,
         idempotency_store: LiveOrderIdempotencyStore,
         market_price_provider: MarketPriceProvider | None = None,
+        safety_snapshot_provider: SafetySnapshotProvider | None = None,
         runtime_armed: bool = False,
         now_provider: NowProvider | None = None,
     ) -> None:
@@ -131,6 +134,7 @@ class LockedLiveOrderAdapter:
         self.kill_switch_snapshot_provider = kill_switch_snapshot_provider
         self.idempotency_store = idempotency_store
         self.market_price_provider = market_price_provider
+        self.safety_snapshot_provider = safety_snapshot_provider
         self.runtime_armed = bool(runtime_armed)
         self.now_provider = (
             now_provider
@@ -176,7 +180,44 @@ class LockedLiveOrderAdapter:
 
         evaluated_at = self._current_time()
 
-        # Emergency stop always wins, including risk-reducing orders.
+        # Phase 6-A Step 3: explicit emergency-stop gates run before Kill Switch,
+        # risk revalidation, and idempotency reservation. Existing callers that
+        # do not yet wire this provider remain compatible while the immutable
+        # static lock still guarantees that no live order can be transmitted.
+        safety_snapshot = (
+            self.safety_snapshot_provider()
+            if self.safety_snapshot_provider is not None
+            else None
+        )
+        if safety_snapshot is not None:
+            if safety_snapshot.safe_stop_active:
+                return LiveOrderBoundaryResult(
+                    intent=intent,
+                    decision=LiveOrderDecision.BLOCKED,
+                    reason=LiveOrderBlockReason.SAFE_STOP,
+                    evaluated_at=evaluated_at,
+                    risk_assessment=None,
+                    kill_switch_evaluation=None,
+                    safety_snapshot=safety_snapshot,
+                    message="Live order blocked because Safe Stop is active.",
+                )
+
+            if not safety_snapshot.reconciliation_consistent:
+                return LiveOrderBoundaryResult(
+                    intent=intent,
+                    decision=LiveOrderDecision.BLOCKED,
+                    reason=LiveOrderBlockReason.RECONCILIATION,
+                    evaluated_at=evaluated_at,
+                    risk_assessment=None,
+                    kill_switch_evaluation=None,
+                    safety_snapshot=safety_snapshot,
+                    message=(
+                        "Live order blocked by three-way reconciliation: "
+                        f"{safety_snapshot.reconciliation_state}"
+                    ),
+                )
+
+        # Kill Switch always wins over risk logic, including risk-reducing orders.
         kill_evaluation = self.kill_switch_service.evaluate(
             self.kill_switch_snapshot_provider()
         )
@@ -188,6 +229,7 @@ class LockedLiveOrderAdapter:
                 evaluated_at=evaluated_at,
                 risk_assessment=None,
                 kill_switch_evaluation=kill_evaluation,
+                safety_snapshot=safety_snapshot,
                 message=(
                     "Live order blocked by Kill Switch: "
                     f"{kill_evaluation.reason.value}"
@@ -211,6 +253,7 @@ class LockedLiveOrderAdapter:
                 evaluated_at=evaluated_at,
                 risk_assessment=risk_assessment,
                 kill_switch_evaluation=kill_evaluation,
+                safety_snapshot=safety_snapshot,
                 message=(
                     "Live order blocked by final risk revalidation: "
                     f"{risk_assessment.reason.value}"
@@ -233,6 +276,7 @@ class LockedLiveOrderAdapter:
                 evaluated_at=evaluated_at,
                 risk_assessment=risk_assessment,
                 kill_switch_evaluation=kill_evaluation,
+                safety_snapshot=safety_snapshot,
                 message="Live-order idempotency conflict blocked.",
             )
 
@@ -244,6 +288,7 @@ class LockedLiveOrderAdapter:
                 evaluated_at=evaluated_at,
                 risk_assessment=risk_assessment,
                 kill_switch_evaluation=kill_evaluation,
+                safety_snapshot=safety_snapshot,
                 message="Duplicate live-order intent blocked.",
             )
 
@@ -258,6 +303,7 @@ class LockedLiveOrderAdapter:
                 evaluated_at=evaluated_at,
                 risk_assessment=risk_assessment,
                 kill_switch_evaluation=kill_evaluation,
+                safety_snapshot=safety_snapshot,
                 message="Live order transmission is statically locked in Phase 6-A.",
             )
 
@@ -271,6 +317,7 @@ class LockedLiveOrderAdapter:
                 evaluated_at=evaluated_at,
                 risk_assessment=risk_assessment,
                 kill_switch_evaluation=kill_evaluation,
+                safety_snapshot=safety_snapshot,
                 message="Live order transmission is not armed at runtime.",
             )
 
@@ -283,6 +330,7 @@ class LockedLiveOrderAdapter:
             evaluated_at=evaluated_at,
             risk_assessment=risk_assessment,
             kill_switch_evaluation=kill_evaluation,
+            safety_snapshot=safety_snapshot,
             message="Phase 6-A has no live-order transport.",
         )
 
