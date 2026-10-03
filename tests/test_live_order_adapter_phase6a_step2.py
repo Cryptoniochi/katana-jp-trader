@@ -11,6 +11,7 @@ from app.live.live_order_models import (
     LiveOrderBlockReason,
     LiveOrderDecision,
 )
+from app.live.live_order_safety import LiveOrderSafetySnapshot
 from app.live.risk_manager import LiveRiskManager
 from app.live.risk_models import RiskLimits, RiskPortfolioSnapshot
 from app.risk.kill_switch_models import KillSwitchSnapshot
@@ -51,6 +52,15 @@ def _kill_snapshot(*, manual_blocked=False):
         runtime_health_ok=True,
         heartbeat_alive=True,
         broker_available=True,
+        evaluated_at=NOW,
+    )
+
+
+def _safety_snapshot() -> LiveOrderSafetySnapshot:
+    return LiveOrderSafetySnapshot(
+        safe_stop_active=False,
+        reconciliation_consistent=True,
+        reconciliation_state="consistent",
         evaluated_at=NOW,
     )
 
@@ -98,6 +108,7 @@ def _adapter(
             manual_blocked=manual_blocked
         ),
         idempotency_store=store,
+        safety_snapshot_provider=_safety_snapshot,
         runtime_armed=runtime_armed,
         now_provider=lambda: NOW,
     )
@@ -180,6 +191,7 @@ def test_duplicate_is_detected_after_restart(tmp_path):
         portfolio_provider=_portfolio,
         kill_switch_snapshot_provider=_kill_snapshot,
         idempotency_store=second_store,
+        safety_snapshot_provider=_safety_snapshot,
         runtime_armed=True,
         now_provider=lambda: NOW,
     )

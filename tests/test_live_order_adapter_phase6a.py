@@ -9,6 +9,7 @@ from app.live.live_order_models import (
     LiveOrderBlockReason,
     LiveOrderDecision,
 )
+from app.live.live_order_safety import LiveOrderSafetySnapshot
 from app.live.risk_manager import LiveRiskManager
 from app.live.risk_models import RiskPortfolioSnapshot
 from app.risk.kill_switch_models import KillSwitchSnapshot
@@ -47,6 +48,15 @@ def _kill_snapshot(
     )
 
 
+def _safety_snapshot() -> LiveOrderSafetySnapshot:
+    return LiveOrderSafetySnapshot(
+        safe_stop_active=False,
+        reconciliation_consistent=True,
+        reconciliation_state="consistent",
+        evaluated_at=NOW,
+    )
+
+
 def _order() -> TradeOrder:
     return TradeOrder(
         order_id="order-phase6a-1",
@@ -73,6 +83,7 @@ def _adapter(
             manual_blocked=manual_blocked
         ),
         idempotency_store=InMemoryLiveOrderIdempotencyStore(),
+        safety_snapshot_provider=_safety_snapshot,
         runtime_armed=runtime_armed,
         now_provider=lambda: NOW,
     )

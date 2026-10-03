@@ -184,28 +184,40 @@ class LockedLiveOrderAdapter:
 
         evaluated_at = self._current_time()
 
-        # Compatibility note:
-        # Phase 6-A allowed callers without a safety provider.  Phase 6-C runtime
-        # composition will make this provider mandatory.  If a configured
-        # provider fails, however, this boundary now fails closed.
-        safety_snapshot = None
-        if self.safety_snapshot_provider is not None:
-            try:
-                safety_snapshot = self.safety_snapshot_provider()
-            except Exception:
-                return LiveOrderBoundaryResult(
-                    intent=intent,
-                    decision=LiveOrderDecision.BLOCKED,
-                    reason=LiveOrderBlockReason.RECONCILIATION,
-                    evaluated_at=evaluated_at,
-                    risk_assessment=None,
-                    kill_switch_evaluation=None,
-                    safety_snapshot=None,
-                    message=(
-                        "Live order blocked because emergency safety state "
-                        "could not be obtained."
-                    ),
-                )
+        # Phase 6-C: emergency safety state is mandatory at the live boundary.
+        # Missing or failing safety wiring must never degrade to a permissive
+        # path, even though the later transport boundary is independently locked.
+        if self.safety_snapshot_provider is None:
+            return LiveOrderBoundaryResult(
+                intent=intent,
+                decision=LiveOrderDecision.BLOCKED,
+                reason=LiveOrderBlockReason.RECONCILIATION,
+                evaluated_at=evaluated_at,
+                risk_assessment=None,
+                kill_switch_evaluation=None,
+                safety_snapshot=None,
+                message=(
+                    "Live order blocked because emergency safety provider "
+                    "is not configured."
+                ),
+            )
+
+        try:
+            safety_snapshot = self.safety_snapshot_provider()
+        except Exception:
+            return LiveOrderBoundaryResult(
+                intent=intent,
+                decision=LiveOrderDecision.BLOCKED,
+                reason=LiveOrderBlockReason.RECONCILIATION,
+                evaluated_at=evaluated_at,
+                risk_assessment=None,
+                kill_switch_evaluation=None,
+                safety_snapshot=None,
+                message=(
+                    "Live order blocked because emergency safety state "
+                    "could not be obtained."
+                ),
+            )
 
         if safety_snapshot is not None:
             if safety_snapshot.safe_stop_active:
