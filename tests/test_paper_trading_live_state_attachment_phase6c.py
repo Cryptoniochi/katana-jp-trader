@@ -67,11 +67,12 @@ def test_manual_kill_switch_is_not_connected_by_paper_composition():
     assert "manual_blocked_provider" not in source
 
 
-def test_unavailable_live_portfolio_fails_closed():
+def test_live_portfolio_uses_saved_read_only_provider():
     source = inspect.getsource(PaperTradingComposition.create)
 
-    assert "def unavailable_live_portfolio" in source
-    assert "Live portfolio state is not connected in Phase 6-C." in source
+    assert "live_runtime_read_only_providers.portfolio_provider" in source
+    assert "def unavailable_live_portfolio" not in source
+    assert "Live portfolio state is not connected in Phase 6-C." not in source
 
 
 def test_composition_does_not_create_kabu_read_only_service():

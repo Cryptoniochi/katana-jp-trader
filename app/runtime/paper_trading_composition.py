@@ -233,6 +233,9 @@ class PaperTradingProductionSettings:
     live_read_only_report_path: Path = Path(
         "reports/live/kabu_station_read_only.json"
     )
+    three_way_reconciliation_report_path: Path = Path(
+        "reports/live/three_way_reconciliation.json"
+    )
 
     def __post_init__(self) -> None:
         """設定値を正規化して検証する。"""
@@ -498,6 +501,15 @@ class PaperTradingProductionSettings:
                 / normalized_live_read_only_report_path
             )
 
+        normalized_three_way_reconciliation_report_path = Path(
+            self.three_way_reconciliation_report_path
+        )
+        if not normalized_three_way_reconciliation_report_path.is_absolute():
+            normalized_three_way_reconciliation_report_path = (
+                ROOT_DIR
+                / normalized_three_way_reconciliation_report_path
+            )
+
         object.__setattr__(
             self,
             "database_path",
@@ -567,6 +579,11 @@ class PaperTradingProductionSettings:
             self,
             "live_read_only_report_path",
             normalized_live_read_only_report_path.resolve(),
+        )
+        object.__setattr__(
+            self,
+            "three_way_reconciliation_report_path",
+            normalized_three_way_reconciliation_report_path.resolve(),
         )
 
 
@@ -1306,21 +1323,24 @@ class PaperTradingComposition:
                 kabu_station_report_path=(
                     settings.live_read_only_report_path
                 ),
+                three_way_reconciliation_report_path=(
+                    settings.three_way_reconciliation_report_path
+                ),
                 now_provider=resolved_now_provider,
             )
         )
-
-        def unavailable_live_portfolio():
-            raise RuntimeError(
-                "Live portfolio state is not connected in Phase 6-C."
-            )
 
         locked_live_runtime_integration = (
             LockedLiveRuntimeIntegration
             .disabled_state_connected_attachment(
                 database_path=settings.database_path,
-                portfolio_provider=unavailable_live_portfolio,
-                reconciliation_report_provider=lambda: None,
+                portfolio_provider=(
+                    live_runtime_read_only_providers.portfolio_provider
+                ),
+                reconciliation_report_provider=(
+                    live_runtime_read_only_providers
+                    .reconciliation_report_provider
+                ),
                 fault_tolerance_attempt_provider=lambda: None,
                 daily_profit_loss_provider=(
                     live_runtime_read_only_providers
