@@ -33,13 +33,13 @@ def test_observer_initializes_peak_from_saved_live_equity(tmp_path):
         snapshot_provider=lambda:snapshot(positions=(
             {"Symbol":"7203","LeavesQty":100,"CurrentPrice":2500.0},
         )),peak_store=store)
-    state=observer.observe()
+    state=observer.initialize()
     assert state.peak_equity==pytest.approx(1_250_000)
 
 def test_observer_never_reduces_peak(tmp_path):
     path=tmp_path/"peak.json"
     store=LiveEquityPeakStore(path,now_provider=lambda:NOW)
-    LiveEquityPeakObserver(snapshot_provider=lambda:snapshot(cash=2_000_000),peak_store=store).observe()
+    LiveEquityPeakObserver(snapshot_provider=lambda:snapshot(cash=2_000_000),peak_store=store).initialize()
     LiveEquityPeakObserver(snapshot_provider=lambda:snapshot(cash=1_000_000),peak_store=store).observe()
     assert store.peak_equity()==pytest.approx(2_000_000)
 
@@ -53,7 +53,7 @@ def test_invalid_saved_snapshot_does_not_update_peak(tmp_path,bad):
     path=tmp_path/"peak.json"
     store=LiveEquityPeakStore(path,now_provider=lambda:NOW)
     with pytest.raises(RuntimeError):
-        LiveEquityPeakObserver(snapshot_provider=lambda:bad,peak_store=store).observe()
+        LiveEquityPeakObserver(snapshot_provider=lambda:bad,peak_store=store).initialize()
     assert not path.exists()
 
 def test_corrupt_existing_peak_is_not_overwritten(tmp_path):

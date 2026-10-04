@@ -16,7 +16,7 @@ SnapshotProvider = Callable[[], KabuStationReadOnlySnapshot | None]
 
 
 class LiveEquityPeakObserver:
-    """Observe saved live-account equity and advance its persistent peak."""
+    """Initialize or advance peak equity from saved live-account state only."""
 
     def __init__(
         self,
@@ -29,7 +29,12 @@ class LiveEquityPeakObserver:
         self.peak_store = peak_store
         self.calculator = calculator or KabuStationSavedEquityCalculator()
 
+    def initialize(self) -> LiveEquityPeakState:
+        """Explicitly create the first peak from a valid saved snapshot."""
+        _, _, equity, _ = self.calculator(self.snapshot_provider())
+        return self.peak_store.initialize(equity)
+
     def observe(self) -> LiveEquityPeakState:
-        snapshot = self.snapshot_provider()
-        _, _, equity, _ = self.calculator(snapshot)
+        """Advance an already initialized peak from a valid saved snapshot."""
+        _, _, equity, _ = self.calculator(self.snapshot_provider())
         return self.peak_store.observe(equity)

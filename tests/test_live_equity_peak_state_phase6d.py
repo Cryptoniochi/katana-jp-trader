@@ -27,7 +27,7 @@ def test_missing_state_fails_closed(tmp_path):
 
 def test_first_observation_initializes_peak(tmp_path):
     subject = store(tmp_path)
-    state = subject.observe(1_250_000.0)
+    state = subject.initialize(1_250_000.0)
 
     assert state.peak_equity == pytest.approx(1_250_000.0)
     assert subject.peak_equity() == pytest.approx(1_250_000.0)
@@ -35,7 +35,7 @@ def test_first_observation_initializes_peak(tmp_path):
 
 def test_higher_observation_advances_peak(tmp_path):
     subject = store(tmp_path)
-    subject.observe(1_000_000.0)
+    subject.initialize(1_000_000.0)
     state = subject.observe(1_300_000.0)
 
     assert state.peak_equity == pytest.approx(1_300_000.0)
@@ -43,7 +43,7 @@ def test_higher_observation_advances_peak(tmp_path):
 
 def test_lower_observation_never_reduces_peak(tmp_path):
     subject = store(tmp_path)
-    subject.observe(1_300_000.0)
+    subject.initialize(1_300_000.0)
     state = subject.observe(1_100_000.0)
 
     assert state.peak_equity == pytest.approx(1_300_000.0)
@@ -51,7 +51,7 @@ def test_lower_observation_never_reduces_peak(tmp_path):
 
 def test_persisted_state_is_readable_by_new_store_instance(tmp_path):
     first = store(tmp_path)
-    first.observe(1_234_567.0)
+    first.initialize(1_234_567.0)
 
     second = store(tmp_path)
     assert second.peak_equity() == pytest.approx(1_234_567.0)
@@ -63,7 +63,7 @@ def test_persisted_state_is_readable_by_new_store_instance(tmp_path):
 )
 def test_invalid_observation_fails_closed(tmp_path, value):
     with pytest.raises(RuntimeError):
-        store(tmp_path).observe(value)
+        store(tmp_path).initialize(value)
 
 
 @pytest.mark.parametrize(
@@ -99,7 +99,7 @@ def test_corrupt_existing_state_is_not_silently_overwritten(tmp_path):
 
 def test_written_payload_contains_only_live_peak_state(tmp_path):
     subject = store(tmp_path)
-    subject.observe(1_500_000.0)
+    subject.initialize(1_500_000.0)
 
     payload = json.loads(subject.path.read_text(encoding="utf-8"))
     assert set(payload) == {"peak_equity", "updated_at"}
