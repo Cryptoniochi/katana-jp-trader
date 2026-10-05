@@ -49,6 +49,15 @@ from app.database import initialize_database
 from app.live.live_orchestrator import (
     LiveTradingOrchestrator,
 )
+from app.live.final_live_readiness import (
+    FinalLiveReadinessGate,
+)
+from app.live.live_runtime_kill_switch_composition import (
+    LiveRuntimeKillSwitchComposition,
+)
+from app.live.live_runtime_safety_state import (
+    LiveRuntimeSafetyStateProvider,
+)
 from app.live.locked_live_runtime_integration import (
     LockedLiveRuntimeIntegration,
 )
@@ -789,6 +798,9 @@ class PaperTradingProductionBundle:
     locked_live_runtime_integration: (
         LockedLiveRuntimeIntegration | None
     ) = None
+    final_live_readiness_gate: (
+        FinalLiveReadinessGate | None
+    ) = None
 
     def run(self) -> PaperTradingDayResult:
         """Trading Loopを開始して終日運用を実行する。"""
@@ -1370,6 +1382,90 @@ class PaperTradingComposition:
             )
         )
 
+        live_runtime_safety_state_provider = (
+            LiveRuntimeSafetyStateProvider(
+                reconciliation_report_provider=(
+                    live_runtime_read_only_providers
+                    .reconciliation_report_provider
+                ),
+                fault_tolerance_attempt_provider=(
+                    live_runtime_read_only_providers
+                    .fault_tolerance_attempt_provider
+                ),
+                now_provider=resolved_now_provider,
+            )
+        )
+
+        live_runtime_kill_switch_composition = (
+            LiveRuntimeKillSwitchComposition(
+                daily_profit_loss_provider=(
+                    live_runtime_read_only_providers
+                    .daily_profit_loss_provider
+                ),
+                consecutive_loss_count_provider=(
+                    live_runtime_read_only_providers
+                    .consecutive_loss_count_provider
+                ),
+                runtime_health_ok_provider=(
+                    live_runtime_read_only_providers
+                    .runtime_health_ok_provider
+                ),
+                heartbeat_alive_provider=(
+                    live_runtime_read_only_providers
+                    .heartbeat_alive_provider
+                ),
+                broker_available_provider=(
+                    live_runtime_read_only_providers
+                    .broker_available_provider
+                ),
+                manual_blocked_provider=(
+                    live_runtime_read_only_providers
+                    .manual_blocked_provider
+                ),
+                max_daily_loss=settings.max_daily_loss,
+                now_provider=resolved_now_provider,
+            )
+        )
+
+        final_live_readiness_gate = FinalLiveReadinessGate(
+            manual_blocked_provider=(
+                live_runtime_read_only_providers
+                .manual_blocked_provider
+            ),
+            daily_profit_loss_provider=(
+                live_runtime_read_only_providers
+                .daily_profit_loss_provider
+            ),
+            consecutive_loss_count_provider=(
+                live_runtime_read_only_providers
+                .consecutive_loss_count_provider
+            ),
+            runtime_health_ok_provider=(
+                live_runtime_read_only_providers
+                .runtime_health_ok_provider
+            ),
+            heartbeat_alive_provider=(
+                live_runtime_read_only_providers
+                .heartbeat_alive_provider
+            ),
+            broker_available_provider=(
+                live_runtime_read_only_providers
+                .broker_available_provider
+            ),
+            portfolio_provider=(
+                live_runtime_read_only_providers
+                .portfolio_provider
+            ),
+            safety_snapshot_provider=(
+                live_runtime_safety_state_provider
+            ),
+            kill_switch_snapshot_provider=(
+                live_runtime_kill_switch_composition
+            ),
+            max_daily_loss=settings.max_daily_loss,
+            now_provider=resolved_now_provider,
+        )
+
         locked_live_runtime_integration = (
             LockedLiveRuntimeIntegration
             .disabled_state_connected_attachment(
@@ -1438,5 +1534,8 @@ class PaperTradingComposition:
             kabu_station_service=kabu_station_service,
             locked_live_runtime_integration=(
                 locked_live_runtime_integration
+            ),
+            final_live_readiness_gate=(
+                final_live_readiness_gate
             ),
         )
