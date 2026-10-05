@@ -58,14 +58,15 @@ def test_manual_live_kill_switch_remains_unconnected_fail_closed() -> None:
     assert "manual_blocked_provider" not in source
 
 
-def test_phase6d_read_only_inputs_connect_while_remaining_inputs_fail_closed() -> None:
+def test_phase6d_read_only_inputs_are_connected_fail_closed_sources() -> None:
     source = inspect.getsource(PaperTradingComposition.create)
 
     assert "live_runtime_read_only_providers.portfolio_provider" in source
     assert ".reconciliation_report_provider" in source
+    assert ".fault_tolerance_attempt_provider" in source
     assert "def unavailable_live_portfolio" not in source
     assert "reconciliation_report_provider=lambda: None" not in source
-    assert "fault_tolerance_attempt_provider=lambda: None" in source
+    assert "fault_tolerance_attempt_provider=lambda: None" not in source
 
 
 def test_paper_runtime_never_constructs_live_execution_pipeline() -> None:
