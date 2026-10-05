@@ -239,6 +239,9 @@ class PaperTradingProductionSettings:
     fault_tolerance_state_path: Path = Path(
         "reports/live/fault_tolerance_state.json"
     )
+    manual_kill_switch_state_path: Path = Path(
+        "reports/live/manual_kill_switch_state.json"
+    )
 
     def __post_init__(self) -> None:
         """設定値を正規化して検証する。"""
@@ -522,6 +525,15 @@ class PaperTradingProductionSettings:
                 / normalized_fault_tolerance_state_path
             )
 
+        normalized_manual_kill_switch_state_path = Path(
+            self.manual_kill_switch_state_path
+        )
+        if not normalized_manual_kill_switch_state_path.is_absolute():
+            normalized_manual_kill_switch_state_path = (
+                ROOT_DIR
+                / normalized_manual_kill_switch_state_path
+            )
+
         object.__setattr__(
             self,
             "database_path",
@@ -601,6 +613,11 @@ class PaperTradingProductionSettings:
             self,
             "fault_tolerance_state_path",
             normalized_fault_tolerance_state_path.resolve(),
+        )
+        object.__setattr__(
+            self,
+            "manual_kill_switch_state_path",
+            normalized_manual_kill_switch_state_path.resolve(),
         )
 
 
@@ -1346,6 +1363,9 @@ class PaperTradingComposition:
                 fault_tolerance_state_path=(
                     settings.fault_tolerance_state_path
                 ),
+                manual_kill_switch_state_path=(
+                    settings.manual_kill_switch_state_path
+                ),
                 now_provider=resolved_now_provider,
             )
         )
@@ -1384,6 +1404,10 @@ class PaperTradingComposition:
                 broker_available_provider=(
                     live_runtime_read_only_providers
                     .broker_available_provider
+                ),
+                manual_blocked_provider=(
+                    live_runtime_read_only_providers
+                    .manual_blocked_provider
                 ),
                 max_daily_loss=settings.max_daily_loss,
                 now_provider=resolved_now_provider,
