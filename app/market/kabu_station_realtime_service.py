@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Iterable
 
-from app.market.kabu_station_models import parse_push_tick
+from app.market.kabu_station_models import KabuStationSymbol, parse_push_tick
 from app.market.kabu_station_realtime_provider import (
     KabuStationRealtimeProvider,
 )
@@ -80,7 +80,14 @@ class KabuStationRealtimeService:
                 "リアルタイム配信対象を指定してください。"
             )
 
+        # This service owns the API registration list, as does the existing
+        # update path. Validate the complete replacement before clearing it.
+        self._validate_registration_codes(normalized_codes)
+        if self._websocket_client is not None:
+            raise RuntimeError("リアルタイムサービスは既に起動しています。")
         self.provider.connect()
+        self.provider.unregister_all()
+        self._registered_codes = ()
         self._registered_codes = (
             self.provider.register_codes(
                 normalized_codes
@@ -114,6 +121,7 @@ class KabuStationRealtimeService:
             raise ValueError(
                 "リアルタイム配信対象を指定してください。"
             )
+        self._validate_registration_codes(normalized_codes)
         if normalized_codes == self._registered_codes:
             return self._registered_codes
 
@@ -139,6 +147,13 @@ class KabuStationRealtimeService:
 
         self._registered_codes = registered
         return self._registered_codes
+
+    @staticmethod
+    def _validate_registration_codes(codes: tuple[str, ...]) -> None:
+        if len(codes) > 50:
+            raise ValueError("API登録銘柄数は50件以内にしてください。")
+        for code in codes:
+            KabuStationSymbol(code=code)
 
     def stop(self) -> tuple[RealtimeBar, ...]:
         """PUSH受信を停止し、途中バーを返す。"""

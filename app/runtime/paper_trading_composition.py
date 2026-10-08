@@ -74,6 +74,7 @@ from app.live.shadow_broker import (
 from app.live.shadow_reconciliation_report import (
     ShadowReconciliationReportWriter,
 )
+from app.market.kabu_station_registration_plan import build_registration_codes
 from app.market.kabu_station_client import (
     KabuStationClient,
     KabuStationClientSettings,
@@ -673,9 +674,10 @@ class RuntimeWatchlistSynchronizer:
                 if str(position.code).strip()
             )
         )
-        runtime_codes = tuple(
-            dict.fromkeys((*position_codes, *watchlist_codes))
-        )[: self.maximum_registered_symbols]
+        runtime_codes = build_registration_codes(
+            watchlist_codes, position_codes,
+            maximum_symbols=self.maximum_registered_symbols,
+        )
 
         if (
             watchlist_codes == self._last_watchlist_codes
@@ -806,9 +808,12 @@ class PaperTradingProductionBundle:
         """Trading Loopを開始して終日運用を実行する。"""
 
         if self.kabu_station_service is not None:
-            self.kabu_station_service.start(
-                self.settings.codes
+            runtime_codes = build_registration_codes(
+                self.settings.codes,
+                (position.code for position in self.paper_broker.list_positions()),
             )
+            self.kabu_station_service.start(runtime_codes)
+            self.trading_loop_component.update_codes(runtime_codes)
 
         self.trading_loop_component.start()
 

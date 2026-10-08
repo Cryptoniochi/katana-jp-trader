@@ -809,42 +809,34 @@ class DynamicWatchlistService:
         cls,
         candidate: DynamicWatchlistCandidate,
     ) -> bool:
-        """候補数合わせより売買セットアップの質を優先する。
+        """Apply quality thresholds without a cliff at ten history days.
 
-        Sprint 125では個別銘柄を除外せず、Explainabilityで観測した
-        スコアだけを使う。履歴成熟度を反映済みのtotal_scoreが40以上、
-        かつ選択戦略そのもののscoreが4以上の候補だけを売買対象とする。
+        Preserve the fallback and strict contracts. Developing candidates
+        interpolate from fallback thresholds at day 10 to strict thresholds
+        at day 20, matching the existing 10--19 day developing tier.
         """
-
         if candidate.exclusion_reasons:
             return False
 
-        # Dynamic Watchlist 2.0:
-        # Do not spend a scarce watchlist slot on a liquid but dormant stock.
-        # A candidate needs useful daily range, current participation, and a
-        # concrete strategy setup in addition to the aggregate score.
-        # Short-history fallback candidates are scored with an explicit
-        # history-maturity discount, and their volume/ATR estimates are not
-        # stable enough for the full opportunity gate.  Keep them available
-        # with a lower confidence threshold so the existing fallback contract
-        # remains intact while mature/developing names use the stricter gate.
         if candidate.selection_tier == "fallback":
-            # Sprint 133-1:
-            # 履歴依存成分はFeature Engine側ですでに減衰済み。
-            # 当日情報で成立するORB等まで排除しないよう、
-            # aggregate thresholdだけをfallback向けに調整する。
             return (
                 candidate.total_score >= 15.0
                 and cls._preferred_strategy_score(candidate) >= 2.5
             )
 
-        if candidate.total_score < 40.0:
-            return False
-        if candidate.atr_ratio < 0.012:
-            return False
-        if candidate.volume_ratio < 0.85:
-            return False
-        return cls._preferred_strategy_score(candidate) >= 5.0
+        progress = 1.0
+        if candidate.selection_tier == "developing":
+            progress = min(
+                1.0, max(0.0, (candidate.history_days - 10) / 10.0)
+            )
+
+        return (
+            candidate.total_score >= 15.0 + 25.0 * progress
+            and candidate.atr_ratio >= 0.012 * progress
+            and candidate.volume_ratio >= 0.85 * progress
+            and cls._preferred_strategy_score(candidate)
+            >= 2.5 + 2.5 * progress
+        )
 
     @staticmethod
     def _resolve_rating_tier(

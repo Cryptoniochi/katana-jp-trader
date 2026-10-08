@@ -16,6 +16,9 @@ class FakeProvider:
         self.connected = True
         return "token"
 
+    def unregister_all(self):
+        self.codes = ()
+
     def register_codes(self, codes):
         self.codes = tuple(codes)
         return self.codes
