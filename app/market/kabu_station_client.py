@@ -239,6 +239,33 @@ class KabuStationClient:
             )
         return tuple(value)
 
+    def send_order(self, payload: JsonObject) -> JsonObject:
+        """現物・信用の注文を発注し、kabuステーション応答を返す。
+
+        この低レベルClientは注文内容の業務ルールを解釈しない。
+        呼び出し側で公式API仕様に適合するpayloadを構築すること。
+        """
+
+        if not isinstance(payload, dict) or not payload:
+            raise ValueError("発注payloadを指定してください。")
+
+        self._ensure_token()
+        response = self._request(
+            "POST",
+            "/sendorder",
+            payload=payload,
+        )
+
+        result = response.get("Result")
+        order_id = str(response.get("OrderId") or "").strip()
+        if result != 0 or not order_id:
+            raise KabuStationResponseError(
+                "発注応答が成功形式ではありません。 "
+                f"result={result} order_id={order_id!r}"
+            )
+
+        return response
+
     def positions(
         self,
         *,
