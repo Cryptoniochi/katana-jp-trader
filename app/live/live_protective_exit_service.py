@@ -229,6 +229,49 @@ class LiveProtectiveExitService:
             plans=plans,
         )
 
+    def evaluate_eod_position(
+        self,
+        *,
+        code: str,
+        trading_date: date,
+    ) -> LiveProtectiveExitPlan:
+        """Re-read one actual live position and build its EOD exit plan."""
+        normalized = self._code(code)
+        now = self._now()
+        try:
+            snapshot = self._snapshot()
+            quantity = self._position_quantities(snapshot).get(normalized, 0)
+        except Exception as error:
+            return self._blocked(
+                reason=LiveProtectiveExitReason.END_OF_DAY,
+                now=now,
+                code=normalized,
+                message=f"Live account position retrieval failed: {error}",
+            )
+
+        if quantity <= 0:
+            return LiveProtectiveExitPlan(
+                decision=LiveProtectiveExitDecision.NO_POSITION,
+                reason=LiveProtectiveExitReason.END_OF_DAY,
+                evaluated_at=now,
+                code=normalized,
+                quantity=0,
+                market_price=None,
+                trigger_price=None,
+                order=None,
+                message="No actual live position exists for the symbol.",
+            )
+
+        return self._exit_plan(
+            reason=LiveProtectiveExitReason.END_OF_DAY,
+            now=now,
+            trading_date=trading_date,
+            code=normalized,
+            quantity=quantity,
+            market_price=None,
+            trigger_price=None,
+        )
+
     def _exit_plan(
         self,
         *,
