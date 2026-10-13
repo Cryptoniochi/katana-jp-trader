@@ -186,3 +186,36 @@ class ExecutionModeRouter:
             "Live注文送信Adapterは未導入です。"
             "現在はShadowモードまで利用できます。"
         )
+
+@dataclass(frozen=True, slots=True)
+class RuntimeExecutionModeRouter:
+    """Select a complete runtime without treating Live as a Paper Broker.
+
+    Paper and Shadow keep their existing runtime objects.  Live is a distinct
+    runtime object and is returned only after the existing daily arming policy
+    succeeds.  This router performs no broker I/O and does not weaken any
+    transport/runtime activation lock inside the selected Live runtime.
+    """
+
+    paper_runtime: object
+    shadow_runtime: object
+    live_runtime: object
+    arming_policy: LiveArmingPolicy = LiveArmingPolicy()
+
+    def resolve(
+        self,
+        settings: ExecutionModeSettings,
+        *,
+        trading_date: date,
+    ) -> object:
+        if settings.mode is TradingExecutionMode.PAPER:
+            return self.paper_runtime
+
+        if settings.mode is TradingExecutionMode.SHADOW:
+            return self.shadow_runtime
+
+        self.arming_policy.require_authorized(
+            settings,
+            trading_date=trading_date,
+        )
+        return self.live_runtime
