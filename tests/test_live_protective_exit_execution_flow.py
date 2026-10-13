@@ -5,6 +5,10 @@ from types import SimpleNamespace
 import pytest
 
 from app.live.live_execution_tracking_flow import LivePositionBaselineConflictError
+from app.live.live_protective_exit_conflict_resolver import (
+    LiveConflictResolutionDecision,
+    LiveConflictResolutionResult,
+)
 from app.live.live_protective_exit_execution_flow import (
     LiveProtectiveExitExecutionDecision,
     LiveProtectiveExitExecutionFlow,
@@ -27,6 +31,19 @@ class State:
 class RefreshAccount:
     def __init__(self, positions): self.positions=positions; self.calls=0
     def refresh(self): self.calls+=1; return State(self.positions)
+
+class PassThroughResolver:
+    def __init__(self, exit_service):
+        self.exit_service = exit_service
+
+    def resolve_stop_loss(self, *, code, stop_price, trading_date):
+        plan = self.exit_service.evaluate_stop_loss(
+            code=code, stop_price=stop_price, trading_date=trading_date
+        )
+        return LiveConflictResolutionResult(
+            LiveConflictResolutionDecision.CLEAR, plan, "clear"
+        )
+
 
 class Tracking:
     def __init__(self, baseline_quantity=None, fail=False):
@@ -51,7 +68,7 @@ def make_flow(positions, price=100.0, tracking=None):
     )
     tracking=tracking or Tracking()
     return LiveProtectiveExitExecutionFlow(
-        exit_service=service, tracking_flow=tracking
+        exit_service=service, tracking_flow=tracking, conflict_resolver=PassThroughResolver(service)
     ), account, tracking
 
 def test_real_refresh_contract_is_used_for_stop_planning():

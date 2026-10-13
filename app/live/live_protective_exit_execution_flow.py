@@ -18,7 +18,9 @@ from app.live.live_protective_exit_service import (
     LiveProtectiveExitPlan,
     LiveProtectiveExitService,
 )
-from app.live.live_exit_order_conflict_service import LiveExitOrderConflictService
+from app.live.live_protective_exit_conflict_resolver import (
+    LiveProtectiveExitConflictResolver,
+)
 from app.trading.order_models import OrderSide, TradeOrder
 
 
@@ -69,19 +71,26 @@ class LiveProtectiveExitExecutionFlow:
         *,
         exit_service: LiveProtectiveExitService,
         tracking_flow: _TrackingFlow,
-        order_conflict_service: LiveExitOrderConflictService | None = None,
+        conflict_resolver: LiveProtectiveExitConflictResolver,
     ) -> None:
         self.exit_service = exit_service
         self.tracking_flow = tracking_flow
-        self.order_conflict_service = order_conflict_service
+        self.conflict_resolver = conflict_resolver
 
     def submit_stop_loss(
         self, *, code: str, stop_price: float, trading_date: date
     ) -> LiveProtectiveExitExecutionResult:
-        plan = self.exit_service.evaluate_stop_loss(
+        resolution = self.conflict_resolver.resolve_stop_loss(
             code=code, stop_price=stop_price, trading_date=trading_date
         )
-        return self._submit_plan(plan=plan, trading_date=trading_date)
+        if resolution.plan is None:
+            plan = self.exit_service.evaluate_stop_loss(
+                code=code, stop_price=stop_price, trading_date=trading_date
+            )
+            return LiveProtectiveExitExecutionResult(
+                LiveProtectiveExitExecutionDecision.BLOCKED, plan, None, None
+            )
+        return self._submit_plan(plan=resolution.plan, trading_date=trading_date)
 
     def submit_end_of_day(self, *, trading_date: date) -> LiveEndOfDayExecutionBatch:
         batch = self.exit_service.plan_end_of_day(trading_date=trading_date)
@@ -118,12 +127,6 @@ class LiveProtectiveExitExecutionFlow:
         order = plan.order
         if order is None or order.side is not OrderSide.SELL:
             raise RuntimeError("EXIT_REQUIRED plan must contain a SELL order")
-        if self.order_conflict_service is not None:
-            conflict = self.order_conflict_service.check(code=order.code)
-            if not conflict.is_clear:
-                return LiveProtectiveExitExecutionResult(
-                    LiveProtectiveExitExecutionDecision.BLOCKED, plan, None, None
-                )
         execution_key = f"protective-exit:{order.order_id}"
         try:
             tracking = self.tracking_flow.submit(
