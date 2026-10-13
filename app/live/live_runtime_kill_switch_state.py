@@ -27,7 +27,7 @@ class LiveRuntimeKillSwitchStateProvider:
         runtime_health_ok_provider: BoolProvider | None = None,
         heartbeat_alive_provider: BoolProvider | None = None,
         broker_available_provider: BoolProvider | None = None,
-        max_daily_loss: float = 50_000.0,
+        max_daily_loss: float = 20_000.0,
         max_consecutive_losses: int = 3,
         now_provider: NowProvider | None = None,
     ) -> None:

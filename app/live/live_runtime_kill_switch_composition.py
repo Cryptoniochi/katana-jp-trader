@@ -38,7 +38,7 @@ class LiveRuntimeKillSwitchComposition:
         heartbeat_alive_provider: BoolProvider,
         broker_available_provider: BoolProvider,
         manual_blocked_provider: BoolProvider | None = None,
-        max_daily_loss: float = 50_000.0,
+        max_daily_loss: float = 20_000.0,
         max_consecutive_losses: int = 3,
         now_provider: NowProvider | None = None,
     ) -> None:

@@ -157,12 +157,12 @@ class PaperTradingProductionSettings:
     continue_on_cycle_error: bool = True
     stop_on_cycle_failure: bool = False
     stop_on_resource_critical: bool = True
-    max_position_count: int = 5
+    max_position_count: int = 20
     max_position_value: float = 1_000_000.0
     max_total_exposure: float = 5_000_000.0
     minimum_cash_balance: float = 500_000.0
-    max_daily_loss: float = 50_000.0
-    max_daily_entries: int = 5
+    max_daily_loss: float = 20_000.0
+    max_daily_entries: int = 20
     risk_trace_enabled: bool = True
     risk_trace_path: Path = Path(
         "logs/risk/paper_trading_trace.jsonl"

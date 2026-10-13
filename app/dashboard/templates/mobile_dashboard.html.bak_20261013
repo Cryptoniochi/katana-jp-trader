@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#071219">
+  <title>{{ page_title }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='/dashboard.css') }}">
+</head>
+<body class="mobile-body">
+  <main class="mobile-page">
+    <header class="mobile-header">
+      <div><p class="eyebrow">PROJECT KATANA</p><h1>Monitor</h1></div>
+      <div id="mobile-status" class="status-pill">UNKNOWN</div>
+    </header>
+    <div class="mobile-data-status"><p id="mobile-updated-at" class="muted">Loading...</p><p class="muted">Data completeness and service health</p></div>
+
+    <section class="mobile-primary-grid">
+      <article class="mobile-primary-card"><span>Today's P/L</span><strong id="mobile-today-pl">—</strong></article>
+      <article class="mobile-primary-card"><span>Positions</span><strong id="mobile-positions">—</strong></article>
+      <article class="mobile-primary-card"><span>Signals</span><strong id="mobile-signals">—</strong></article>
+      <article class="mobile-primary-card"><span>Executions</span><strong id="mobile-executions">—</strong></article>
+      <article class="mobile-primary-card"><span>Wins / Losses</span><strong id="mobile-win-loss">—</strong></article>
+      <article class="mobile-primary-card"><span>Win Rate</span><strong id="mobile-win-rate">—</strong></article>
+    </section>
+
+    <section>
+      <div class="mobile-section-title"><h2>Today's Trade Results</h2></div>
+      <div id="mobile-daily-symbol-results" class="mobile-card-list"></div>
+    </section>
+
+    <section>
+      <div class="mobile-section-title"><h2>Runtime</h2><span id="mobile-runtime-state" class="status-pill">UNKNOWN</span></div>
+      <article class="mobile-detail-card">
+        <div class="mobile-detail-grid">
+          <div><span>Date</span><b id="mobile-runtime-date">—</b></div>
+          <div><span>PID</span><b id="mobile-runtime-pid">—</b></div>
+          <div><span>Cycles</span><b id="mobile-runtime-cycles">—</b></div>
+          <div><span>Failed</span><b id="mobile-runtime-failed">—</b></div>
+          <div><span>Realized P/L</span><b id="mobile-realized">—</b></div>
+          <div><span>Unrealized P/L</span><b id="mobile-unrealized">—</b></div>
+        </div>
+        <p id="mobile-runtime-message" class="mobile-card-message">—</p>
+      </article>
+    </section>
+
+    <section>
+      <div class="mobile-section-title"><h2>Operational Readiness</h2><span id="mobile-readiness-state" class="status-pill">UNKNOWN</span></div>
+      <div id="mobile-readiness-checks" class="mobile-card-list"></div>
+      <article class="mobile-detail-card"><p id="mobile-readiness-message" class="mobile-card-message">Operational Readiness has not been loaded yet.</p></article>
+    </section>
+
+    <section>
+      <div class="mobile-section-title"><h2>Today's Schedule</h2><span id="mobile-schedule-state" class="status-pill">UNKNOWN</span></div>
+      <article class="mobile-detail-card">
+        <div class="mobile-detail-grid">
+          <div><span>Business day</span><b id="mobile-schedule-business-day">—</b></div>
+          <div><span>Next action</span><b id="mobile-schedule-next-action">—</b></div>
+          <div><span>Process ID</span><b id="mobile-schedule-pid">—</b></div>
+          <div><span>Last exit</span><b id="mobile-schedule-exit">—</b></div>
+        </div>
+        <p id="mobile-schedule-message" class="mobile-card-message">Schedule has not been loaded yet.</p>
+      </article>
+    </section>
+
+    <section>
+      <div class="mobile-section-title"><h2>Watchlist</h2><span id="mobile-watchlist-state" class="status-pill">UNKNOWN</span></div>
+      <article class="mobile-detail-card">
+        <div class="mobile-detail-grid">
+          <div><span>Selected</span><b id="mobile-watchlist-selected">0</b></div>
+          <div><span>Eligible</span><b id="mobile-watchlist-eligible">0</b></div>
+          <div><span>Evaluated</span><b id="mobile-watchlist-evaluated">0</b></div>
+          <div><span>Applied</span><b id="mobile-watchlist-applied">NO</b></div>
+        </div>
+      </article>
+      <div id="mobile-watchlist-candidates" class="mobile-card-list"></div>
+    </section>
+
+    <section><div class="mobile-section-title"><h2>Today's Executions</h2></div><div id="mobile-trades" class="mobile-card-list"></div></section>
+    <section><div class="mobile-section-title"><h2>Open Positions</h2></div><div id="mobile-position-list" class="mobile-card-list"></div></section>
+
+    <section>
+      <div class="mobile-section-title"><h2>End-of-Day Check</h2><span id="mobile-full-day-state" class="status-pill">UNKNOWN</span></div>
+      <article class="mobile-detail-card"><p id="mobile-full-day-message" class="mobile-card-message">Full-Day Validation has not been loaded yet.</p></article>
+    </section>
+  </main>
+
+  <script>
+    const yen = new Intl.NumberFormat("ja-JP",{style:"currency",currency:"JPY",maximumFractionDigits:0});
+    const val=(v,f=String)=>v===null||v===undefined?"—":f(v);
+
+    function formatJst(v){
+      if(!v)return"—";
+      const d=new Date(v);
+      if(Number.isNaN(d.getTime()))return String(v);
+      return new Intl.DateTimeFormat("ja-JP",{timeZone:"Asia/Tokyo",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}).format(d);
+    }
+
+    function todayKey(){
+      const p=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Tokyo",year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(new Date());
+      const g=t=>p.find(x=>x.type===t)?.value??"";
+      return `${g("year")}-${g("month")}-${g("day")}`;
+    }
+
+    async function getJson(url){
+      try{const r=await fetch(url,{cache:"no-store"});return r.ok?await r.json():{};}catch(_){return{};}
+    }
+
+    function status(el,value){
+      const s=String(value??"unknown").toLowerCase();
+      el.textContent=s.replaceAll("_"," ").toUpperCase();
+      el.dataset.status=["healthy","available","running","ready","pass"].includes(s)?"healthy":["failed","critical","error","fail"].includes(s)?"failed":"neutral";
+    }
+
+    const empty=text=>`<article class="mobile-empty-card">${text}</article>`;
+
+    async function refresh(){
+      const [summary,runtime,watchlist,strategies,fullDay,namesPayload,readiness,schedule,dailyReport]=await Promise.all([
+        getJson("/api/dashboard/summary"),
+        getJson("/api/dashboard/paper-trading-runtime"),
+        getJson("/api/dashboard/dynamic-watchlist"),
+        getJson("/api/dashboard/strategies"),
+        getJson("/api/dashboard/full-day-validation"),
+        getJson("/api/dashboard/symbol-names"),
+        getJson("/api/dashboard/operational-readiness"),
+        getJson("/api/dashboard/paper-trading-schedule"),
+        getJson(`/api/dashboard/daily-report?report_date=${todayKey()}`)
+      ]);
+
+      const snapshot=summary.snapshot??{};
+      const portfolio=snapshot.portfolio??{};
+      const live=snapshot.live_summary??{};
+      const health=snapshot.system_health??{};
+      const names=namesPayload.symbol_names??namesPayload.names??namesPayload??{};
+      const runtimeToday=runtime.available===true&&String(runtime.trading_date??"")===todayKey();
+      const dailyReportToday=dailyReport.available===true&&String(dailyReport.report_date??"")===todayKey();
+      const dailySummary=dailyReport.summary??{};
+      const todayPl=dailyReportToday?(dailySummary.net_profit_loss??null):(runtimeToday?(runtime.realized_profit_loss??runtime.net_profit_loss??runtime.session_equity_change??null):null);
+
+      document.getElementById("mobile-updated-at").textContent=`Updated: ${formatJst(summary.generated_at)}`;
+      document.getElementById("mobile-today-pl").textContent=val(todayPl,yen.format);
+      document.getElementById("mobile-positions").textContent=runtime.portfolio_position_count??portfolio.position_count??0;
+      document.getElementById("mobile-signals").textContent=runtime.signal_count??live.signal_count??0;
+      document.getElementById("mobile-executions").textContent=runtime.execution_count??live.execution_count??0;
+      document.getElementById("mobile-win-loss").textContent=dailyReportToday?`${dailySummary.win_count??0}勝 ${dailySummary.loss_count??0}敗` : "—";
+      document.getElementById("mobile-win-rate").textContent=dailyReportToday&&dailySummary.win_rate!==null&&dailySummary.win_rate!==undefined?`${(Number(dailySummary.win_rate)*100).toFixed(1)}%` : "—";
+      const symbolResults=dailyReportToday?(dailyReport.symbol_breakdown??[]):[];
+      document.getElementById("mobile-daily-symbol-results").innerHTML=symbolResults.length?symbolResults.map(row=>{
+        const code=String(row.code??row.key??"—");
+        const name=row.name??names[code]??"";
+        const label=name?`${code} ${name}`:code;
+        const pnl=Number(row.net_profit_loss??0);
+        const outcome=pnl>0?"WIN":pnl<0?"LOSS":"FLAT";
+        return `<article class="mobile-detail-card"><div class="mobile-card-heading"><strong>${label}</strong><span>${outcome}</span></div><div class="mobile-trade-row"><span>${row.trade_count??0} trade</span><span>${val(pnl,yen.format)}</span></div></article>`;
+      }).join(""):empty("No completed trades today.");
+      const closedDay=schedule.business_day===false;
+      const readinessReady=String(readiness.overall_state??readiness.state??readiness.status??"").toLowerCase()==="ready"||readiness.ready_for_paper_trading===true;
+      const healthState=String(health.status??"").toLowerCase();
+      const healthFailed=["critical","failed","error"].includes(healthState);
+      const overallDisplayState=healthFailed?healthState:(readinessReady?(closedDay?"closed_day":"ready"):(health.status??(snapshot.partial?"partial":"available")));
+      status(document.getElementById("mobile-status"),overallDisplayState);
+      const runtimeDisplayState=runtimeToday?(runtime.state??runtime.status??"running"):(closedDay?"closed_day":"not_reported");
+      status(document.getElementById("mobile-runtime-state"),runtimeDisplayState);
+      document.getElementById("mobile-runtime-date").textContent=runtimeToday?(runtime.trading_date??"—"):"—";
+      document.getElementById("mobile-runtime-pid").textContent=runtimeToday?(runtime.process_id??runtime.pid??"—"):"—";
+      document.getElementById("mobile-runtime-cycles").textContent=runtimeToday?(runtime.cycle_count??runtime.cycles??"—"):"—";
+      document.getElementById("mobile-runtime-failed").textContent=runtimeToday?(runtime.failed_cycle_count??runtime.failed_cycles??"—"):"—";
+      document.getElementById("mobile-realized").textContent=dailyReportToday?val(dailySummary.net_profit_loss,yen.format):(runtimeToday?val(runtime.realized_profit_loss,yen.format):"—");
+      document.getElementById("mobile-unrealized").textContent=runtimeToday?val(runtime.unrealized_profit_loss??portfolio.total_unrealized_profit_loss,yen.format):"—";
+      document.getElementById("mobile-runtime-message").textContent=runtimeToday?(runtime.message??"—"):(closedDay?"Tokyo market is closed today.":"No Paper Trading Runtime report for today.");
+
+      const dataState=String(summary.data_status??summary.state??"").toLowerCase();
+      if(dataState==="stale"){document.querySelector(".mobile-data-status")?.setAttribute("data-status","stale");}
+
+      status(document.getElementById("mobile-readiness-state"),readiness.overall_state??readiness.state??readiness.status??(readiness.ready_for_paper_trading?"ready":"unknown"));
+      document.getElementById("mobile-readiness-message").textContent=readiness.message??(readiness.ready_for_paper_trading===true?"Ready for paper trading.":readiness.ready_for_paper_trading===false?"Not ready for paper trading.":"—");
+      const readinessRows=readiness.checks??readiness.items??[];
+      document.getElementById("mobile-readiness-checks").innerHTML=readinessRows.length?readinessRows.map(r=>{
+        const level=String(r.level??r.state??r.status??(r.is_ok?"pass":"fail")).toLowerCase();
+        const label=r.label??r.name??r.key??"—";
+        return `<article class="mobile-detail-card"><div class="mobile-card-heading"><strong>${label}</strong><span>${level.toUpperCase()}</span></div><small>${r.message??"—"}</small></article>`;
+      }).join(""):empty("No readiness checks reported.");
+
+      status(document.getElementById("mobile-schedule-state"),schedule.state??schedule.status??"unknown");
+      document.getElementById("mobile-schedule-business-day").textContent=schedule.business_day===null||schedule.business_day===undefined?"—":String(schedule.business_day);
+      document.getElementById("mobile-schedule-next-action").textContent=formatJst(schedule.next_action_at);
+      document.getElementById("mobile-schedule-pid").textContent=schedule.process_id??schedule.pid??"—";
+      document.getElementById("mobile-schedule-exit").textContent=schedule.last_exit_code??"—";
+      document.getElementById("mobile-schedule-message").textContent=schedule.message??"—";
+
+      status(document.getElementById("mobile-watchlist-state"),watchlist.schedule_state??(watchlist.available?"available":"unknown"));
+      document.getElementById("mobile-watchlist-selected").textContent=watchlist.selected_count??0;
+      document.getElementById("mobile-watchlist-eligible").textContent=watchlist.eligible_count??0;
+      document.getElementById("mobile-watchlist-evaluated").textContent=watchlist.evaluated_count??0;
+      document.getElementById("mobile-watchlist-applied").textContent=watchlist.applied?"YES":"NO";
+
+      const wr=watchlist.candidates??watchlist.selected_candidates??[];
+      document.getElementById("mobile-watchlist-candidates").innerHTML=wr.length?wr.slice(0,8).map((r,i)=>{
+        const code=String(r.code??"—");
+        const name=r.name??names[code]??"";
+        const label=name?`${code} ${name}`:code;
+        const strategy=r.preferred_strategy??r.strategy_name??r.strategy??"—";
+        const score=r.total_score??r.score??null;
+        return `<article class="mobile-detail-card"><div class="mobile-card-heading"><strong>#${i+1} ${label}</strong><span>${score===null?"—":Number(score).toFixed(1)}</span></div><small>${strategy}</small></article>`;
+      }).join(""):empty("No selected candidates.");
+
+      const trades=(strategies.recent_trades??[]).filter(t=>{
+        if(!t.executed_at)return false;
+        const p=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Tokyo",year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(new Date(t.executed_at));
+        const g=k=>p.find(x=>x.type===k)?.value??"";
+        return `${g("year")}-${g("month")}-${g("day")}`===todayKey();
+      });
+
+      document.getElementById("mobile-trades").innerHTML=trades.length?trades.slice(0,10).map(t=>{
+        const code=String(t.code??"—");
+        const name=t.name??names[code]??"";
+        const label=name?`${code} ${name}`:code;
+        return `<article class="mobile-detail-card"><div class="mobile-card-heading"><strong>${label}</strong><span>${t.side??"—"}</span></div><div class="mobile-trade-row"><span>${t.strategy_name??"—"}</span><span>${t.quantity??"—"} shares</span><span>${val(t.execution_price,yen.format)}</span></div><small>${formatJst(t.executed_at)}</small></article>`;
+      }).join(""):empty("No executions today.");
+
+      const positions=runtimeToday&&Array.isArray(runtime.positions)?runtime.positions:(portfolio.positions??[]);
+      document.getElementById("mobile-position-list").innerHTML=positions.length?positions.map(p=>{
+        const code=String(p.code??"—");
+        const name=p.name??names[code]??"";const label=name?`${code} ${name}`:code;
+        return `<article class="mobile-detail-card"><div class="mobile-card-heading"><strong>${label}</strong><span>${p.side??"—"}</span></div><div class="mobile-detail-grid"><div><span>Qty</span><b>${p.quantity??"—"}</b></div><div><span>Market</span><b>${val(p.market_price,yen.format)}</b></div><div><span>Average</span><b>${val(p.average_cost,yen.format)}</b></div><div><span>Unrealized</span><b>${val(p.unrealized_profit_loss,yen.format)}</b></div></div></article>`;
+      }).join(""):empty("No open positions.");
+
+      status(document.getElementById("mobile-full-day-state"),fullDay.state??"unknown");
+      document.getElementById("mobile-full-day-message").textContent=fullDay.message??"Full-Day Validation has not been loaded yet.";
+    }
+
+    refresh();
+    window.setInterval(refresh,30000);
+  </script>
+</body>
+</html>

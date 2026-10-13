@@ -36,11 +36,11 @@ class RiskReason(StrEnum):
 class RiskLimits:
     """リアルタイム取引のリスク上限。"""
 
-    max_position_count: int = 5
+    max_position_count: int = 20
     max_position_value: float = 1_000_000.0
     max_total_exposure: float = 5_000_000.0
     minimum_cash_balance: float = 500_000.0
-    max_daily_loss: float = 50_000.0
+    max_daily_loss: float = 20_000.0
     max_drawdown_rate: float = 0.10
     max_consecutive_losses: int = 3
 

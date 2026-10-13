@@ -170,7 +170,7 @@ class LockedLiveRuntimeIntegration:
         risk_manager: LiveRiskManager | None = None,
         execution_settings: ExecutionModeSettings | None = None,
         market_price_provider: MarketPriceProvider | None = None,
-        max_daily_loss: float = 50_000.0,
+        max_daily_loss: float = 20_000.0,
         max_consecutive_losses: int = 3,
         now_provider: NowProvider | None = None,
     ) -> "LockedLiveRuntimeIntegration":

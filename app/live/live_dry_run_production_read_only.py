@@ -106,7 +106,7 @@ class ProductionDryRunReadOnlyFactory:
     def create(
         *,
         paths: ProductionReadOnlyPaths | None = None,
-        max_daily_loss: float = 50_000.0,
+        max_daily_loss: float = 20_000.0,
         max_consecutive_losses: int = 3,
         runtime_stale_after_seconds: float = 180.0,
         broker_maximum_age_seconds: float = 120.0,

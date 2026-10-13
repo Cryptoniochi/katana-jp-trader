@@ -71,7 +71,7 @@ class FinalLiveReadinessGate:
         portfolio_provider: PortfolioProvider,
         safety_snapshot_provider: SafetySnapshotProvider,
         kill_switch_snapshot_provider: KillSwitchSnapshotProvider,
-        max_daily_loss: float = 50_000.0,
+        max_daily_loss: float = 20_000.0,
         max_consecutive_losses: int = 3,
         now_provider: NowProvider | None = None,
     ) -> None:

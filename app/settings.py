@@ -139,11 +139,11 @@ class JQuantsSettings:
 class RiskSettings:
     """主要リスク設定。"""
 
-    max_position_count: int = 5
+    max_position_count: int = 20
     max_position_value: float = 1_000_000.0
     max_total_exposure: float = 5_000_000.0
     minimum_cash_balance: float = 500_000.0
-    max_daily_loss: float = 50_000.0
+    max_daily_loss: float = 20_000.0
 
     def __post_init__(self) -> None:
         if self.max_position_count <= 0:

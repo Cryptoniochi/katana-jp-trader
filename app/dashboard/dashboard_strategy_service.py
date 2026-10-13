@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+JST = timezone(timedelta(hours=9))
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +135,7 @@ class DashboardStrategyService:
         target_date = (
             trading_date
             if trading_date is not None
-            else generated_at.astimezone().date()
+            else generated_at.astimezone(JST).date()
         )
 
         if not self.database_path.exists():
@@ -297,14 +299,15 @@ class DashboardStrategyService:
         ):
             return {}
 
+        start_utc, end_utc = cls._jst_day_utc_range(trading_date)
         rows = connection.execute(
             """
             SELECT strategy_name, COUNT(*)
             FROM trade_signals
-            WHERE substr(generated_at, 1, 10) = ?
+            WHERE generated_at >= ? AND generated_at < ?
             GROUP BY strategy_name
             """,
-            (trading_date.isoformat(),),
+            (start_utc, end_utc),
         ).fetchall()
 
         return {
@@ -330,16 +333,17 @@ class DashboardStrategyService:
         ):
             return {}
 
+        start_utc, end_utc = cls._jst_day_utc_range(trading_date)
         rows = connection.execute(
             """
             SELECT s.strategy_name, COUNT(*)
             FROM trade_executions AS e
             JOIN trade_signals AS s
               ON s.signal_id = e.signal_id
-            WHERE substr(e.executed_at, 1, 10) = ?
+            WHERE e.executed_at >= ? AND e.executed_at < ?
             GROUP BY s.strategy_name
             """,
-            (trading_date.isoformat(),),
+            (start_utc, end_utc),
         ).fetchall()
 
         return {
@@ -490,6 +494,8 @@ class DashboardStrategyService:
                         "price": price,
                         "cost": commission + slippage,
                         "strategy_name": strategy_name,
+                        "executed_at": executed_at,
+                        "execution_id": execution_id,
                     }
                 )
                 continue
@@ -507,6 +513,7 @@ class DashboardStrategyService:
             )
             realized = 0.0
             pnl_by_entry_strategy: dict[str, float] = {}
+            matched_details: list[dict[str, Any]] = []
 
             while remaining_exit > 0 and entries:
                 entry = entries[0]
@@ -544,6 +551,14 @@ class DashboardStrategyService:
                     )
                     + matched_pnl
                 )
+                matched_details.append({
+                    "entry_execution_id": str(entry["execution_id"]),
+                    "entry_at": entry["executed_at"],
+                    "entry_price": float(entry["price"]),
+                    "quantity": matched,
+                    "strategy_name": entry_strategy,
+                    "realized_profit_loss": matched_pnl,
+                })
 
                 entry["remaining"] = (
                     int(entry["remaining"])
@@ -558,7 +573,7 @@ class DashboardStrategyService:
                 {
                     "execution_id": execution_id,
                     "trading_date": (
-                        executed_at.date()
+                        executed_at.astimezone(JST).date()
                     ),
                     "realized_profit_loss": (
                         realized
@@ -569,6 +584,10 @@ class DashboardStrategyService:
                     "pnl_by_entry_strategy": (
                         pnl_by_entry_strategy
                     ),
+                    "code": code,
+                    "exit_at": executed_at,
+                    "exit_price": price,
+                    "matched_details": tuple(matched_details),
                 }
             )
 
@@ -645,71 +664,52 @@ class DashboardStrategyService:
         self,
         connection: sqlite3.Connection,
     ) -> tuple[dict[str, Any], ...]:
-        if not self._table_exists(
-            connection,
-            "trade_journal",
-        ):
-            return ()
+        """trade_executionsを正本としてFIFO決済済み取引を返す。"""
 
-        rows = connection.execute(
-            """
-            SELECT
-                trade_id,
-                strategy_name,
-                code,
-                entry_at,
-                exit_at,
-                entry_price,
-                exit_price,
-                quantity,
-                realized_profit_loss,
-                return_rate,
-                holding_minutes,
-                exit_reason,
-                maximum_favorable_excursion_rate,
-                maximum_adverse_excursion_rate
-            FROM trade_journal
-            ORDER BY exit_at DESC, id DESC
-            LIMIT ?
-            """,
-            (self.recent_trade_limit,),
-        ).fetchall()
+        completed: list[dict[str, Any]] = []
+        for item in self._analyze_executions(connection):
+            if item.get("realized_profit_loss") is None:
+                continue
+            exit_at = item["exit_at"]
+            for detail in item.get("matched_details", ()):
+                entry_at = detail["entry_at"]
+                entry_price = float(detail["entry_price"])
+                exit_price = float(item["exit_price"])
+                quantity = int(detail["quantity"])
+                pnl = float(detail["realized_profit_loss"])
+                denominator = entry_price * quantity
+                completed.append({
+                    "trade_id": f'{detail["entry_execution_id"]}->{item["execution_id"]}',
+                    "strategy_name": self.DISPLAY_NAMES.get(
+                        str(detail["strategy_name"]), str(detail["strategy_name"])
+                    ),
+                    "code": str(item["code"]),
+                    "entry_at": entry_at.isoformat(),
+                    "exit_at": exit_at.isoformat(),
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "quantity": quantity,
+                    "realized_profit_loss": pnl,
+                    "return_rate": pnl / denominator if denominator else 0.0,
+                    "holding_minutes": max(
+                        0.0, (exit_at - entry_at).total_seconds() / 60.0
+                    ),
+                    "exit_reason": None,
+                    "maximum_favorable_excursion_rate": None,
+                    "maximum_adverse_excursion_rate": None,
+                })
 
-        return tuple(
-            {
-                "trade_id": str(row[0]),
-                "strategy_name": (
-                    self.DISPLAY_NAMES.get(
-                        str(row[1]),
-                        str(row[1]),
-                    )
-                ),
-                "code": str(row[2]),
-                "entry_at": str(row[3]),
-                "exit_at": str(row[4]),
-                "entry_price": float(row[5]),
-                "exit_price": float(row[6]),
-                "quantity": int(row[7]),
-                "realized_profit_loss": float(row[8]),
-                "return_rate": float(row[9]),
-                "holding_minutes": float(row[10]),
-                "exit_reason": (
-                    str(row[11])
-                    if row[11] is not None
-                    else None
-                ),
-                "maximum_favorable_excursion_rate": (
-                    float(row[12])
-                    if row[12] is not None
-                    else None
-                ),
-                "maximum_adverse_excursion_rate": (
-                    float(row[13])
-                    if row[13] is not None
-                    else None
-                ),
-            }
-            for row in rows
+        completed.sort(key=lambda x: x["exit_at"], reverse=True)
+        return tuple(completed[: self.recent_trade_limit])
+
+    @staticmethod
+    def _jst_day_utc_range(trading_date: date) -> tuple[str, str]:
+        """JSTの営業日をDB保存形式のUTC ISO範囲へ変換する。"""
+        start_jst = datetime.combine(trading_date, time.min, tzinfo=JST)
+        end_jst = start_jst + timedelta(days=1)
+        return (
+            start_jst.astimezone(timezone.utc).isoformat(),
+            end_jst.astimezone(timezone.utc).isoformat(),
         )
 
     def _current_time(self) -> datetime:

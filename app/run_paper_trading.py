@@ -265,7 +265,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "最大保有銘柄数。未指定時は環境変数"
-            "KATANA_MAX_POSITION_COUNTまたは既定値5です。"
+            "KATANA_MAX_POSITION_COUNTまたは既定値20です。"
         ),
     )
     parser.add_argument(
@@ -301,7 +301,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "日次損失上限。未指定時は環境変数"
-            "KATANA_MAX_DAILY_LOSSまたは既定値50000です。"
+            "KATANA_MAX_DAILY_LOSSまたは既定値20000です。"
         ),
     )
     parser.add_argument(
@@ -310,7 +310,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "1日最大新規エントリー数。未指定時は環境変数"
-            "KATANA_MAX_DAILY_ENTRIESまたは既定値5です。"
+            "KATANA_MAX_DAILY_ENTRIESまたは既定値20です。"
         ),
     )
     parser.add_argument(
@@ -600,7 +600,7 @@ def create_production_settings(
     max_position_count = _resolve_int_setting(
         arguments.max_position_count,
         resolved_environ.get("KATANA_MAX_POSITION_COUNT"),
-        5,
+        20,
         "最大保有銘柄数",
     )
     max_position_value = _resolve_float_setting(
@@ -624,13 +624,13 @@ def create_production_settings(
     max_daily_loss = _resolve_float_setting(
         arguments.max_daily_loss,
         resolved_environ.get("KATANA_MAX_DAILY_LOSS"),
-        50_000.0,
+        20_000.0,
         "日次損失上限",
     )
     max_daily_entries = _resolve_int_setting(
         arguments.max_daily_entries,
         resolved_environ.get("KATANA_MAX_DAILY_ENTRIES"),
-        5,
+        20,
         "1日最大新規エントリー数",
     )
 

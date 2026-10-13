@@ -66,7 +66,7 @@ class LiveDryRunOperatorComposition:
         paths: LiveDryRunOperatorPaths | None = None,
         risk_manager: LiveRiskManager | None = None,
         market_price_provider: MarketPriceProvider | None = None,
-        max_daily_loss: float = 50_000.0,
+        max_daily_loss: float = 20_000.0,
         max_consecutive_losses: int = 3,
         now_provider: NowProvider | None = None,
     ) -> LiveDryRunOperatorBundle:
@@ -140,7 +140,7 @@ class LiveDryRunOperatorComposition:
         read_only_paths: ProductionReadOnlyPaths | None = None,
         risk_manager: LiveRiskManager | None = None,
         market_price_provider: MarketPriceProvider | None = None,
-        max_daily_loss: float = 50_000.0,
+        max_daily_loss: float = 20_000.0,
         max_consecutive_losses: int = 3,
         runtime_stale_after_seconds: float = 180.0,
         broker_maximum_age_seconds: float = 120.0,

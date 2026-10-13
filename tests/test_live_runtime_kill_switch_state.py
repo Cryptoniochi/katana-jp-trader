@@ -69,14 +69,14 @@ def test_provider_exception_fails_closed(provider_name):
 
 def test_daily_loss_at_limit_blocks():
     snapshot = _healthy_provider(
-        daily_profit_loss_provider=lambda: -50_000.0
+        daily_profit_loss_provider=lambda: -20_000.0
     )()
     assert snapshot.daily_loss_blocked is True
 
 
 def test_daily_loss_above_limit_does_not_block():
     snapshot = _healthy_provider(
-        daily_profit_loss_provider=lambda: -49_999.0
+        daily_profit_loss_provider=lambda: -19_999.0
     )()
     assert snapshot.daily_loss_blocked is False
 

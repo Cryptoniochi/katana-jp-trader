@@ -129,30 +129,49 @@
 
       const snapshot=summary.snapshot??{};
       const portfolio=snapshot.portfolio??{};
-      const live=snapshot.live_summary??{};
       const health=snapshot.system_health??{};
       const names=namesPayload.symbol_names??namesPayload.names??namesPayload??{};
       const runtimeToday=runtime.available===true&&String(runtime.trading_date??"")===todayKey();
-      const dailyReportToday=dailyReport.available===true&&String(dailyReport.report_date??"")===todayKey();
-      const dailySummary=dailyReport.summary??{};
-      const todayPl=dailyReportToday?(dailySummary.net_profit_loss??null):(runtimeToday?(runtime.realized_profit_loss??runtime.net_profit_loss??runtime.session_equity_change??null):null);
+      const strategyRows=Array.isArray(strategies.strategies)?strategies.strategies:[];
+      const signalCount=strategyRows.reduce((n,r)=>n+Number(r.signal_count??0),0);
+      const executionCount=strategyRows.reduce((n,r)=>n+Number(r.execution_count??0),0);
+      const tradeCount=strategyRows.reduce((n,r)=>n+Number(r.completed_trade_count??0),0);
+      const winCount=strategyRows.reduce((n,r)=>n+Number(r.win_count??0),0);
+      const lossCount=strategyRows.reduce((n,r)=>n+Number(r.loss_count??0),0);
+      const realized=strategyRows.reduce((n,r)=>n+Number(r.net_profit_loss??0),0);
+      const winRate=tradeCount>0?winCount/tradeCount:null;
+      const positions=runtimeToday&&Array.isArray(runtime.positions)?runtime.positions:(portfolio.positions??[]);
+      const unrealized=runtimeToday?(runtime.unrealized_profit_loss??portfolio.total_unrealized_profit_loss??0):(portfolio.total_unrealized_profit_loss??0);
+      const todayPl=realized+Number(unrealized??0);
 
       document.getElementById("mobile-updated-at").textContent=`Updated: ${formatJst(summary.generated_at)}`;
       document.getElementById("mobile-today-pl").textContent=val(todayPl,yen.format);
-      document.getElementById("mobile-positions").textContent=runtime.portfolio_position_count??portfolio.position_count??0;
-      document.getElementById("mobile-signals").textContent=runtime.signal_count??live.signal_count??0;
-      document.getElementById("mobile-executions").textContent=runtime.execution_count??live.execution_count??0;
-      document.getElementById("mobile-win-loss").textContent=dailyReportToday?`${dailySummary.win_count??0}勝 ${dailySummary.loss_count??0}敗` : "—";
-      document.getElementById("mobile-win-rate").textContent=dailyReportToday&&dailySummary.win_rate!==null&&dailySummary.win_rate!==undefined?`${(Number(dailySummary.win_rate)*100).toFixed(1)}%` : "—";
-      const symbolResults=dailyReportToday?(dailyReport.symbol_breakdown??[]):[];
+      document.getElementById("mobile-positions").textContent=positions.length;
+      document.getElementById("mobile-signals").textContent=signalCount;
+      document.getElementById("mobile-executions").textContent=executionCount;
+      document.getElementById("mobile-win-loss").textContent=tradeCount>0?`${winCount}勝 ${lossCount}敗`:"—";
+      document.getElementById("mobile-win-rate").textContent=winRate===null?"—":`${(winRate*100).toFixed(1)}%`;
+
+      const completedTrades=Array.isArray(strategies.recent_completed_trades)?strategies.recent_completed_trades:[];
+      const byCode=new Map();
+      for(const t of completedTrades){
+        if(!t.exit_at)continue;
+        const p=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Tokyo",year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(new Date(t.exit_at));
+        const g=k=>p.find(x=>x.type===k)?.value??"";
+        if(`${g("year")}-${g("month")}-${g("day")}`!==todayKey())continue;
+        const code=String(t.code??"—");
+        const item=byCode.get(code)??{code,name:names[code]??"",trade_count:0,net_profit_loss:0};
+        item.trade_count+=1;
+        item.net_profit_loss+=Number(t.realized_profit_loss??0);
+        byCode.set(code,item);
+      }
+      const symbolResults=[...byCode.values()];
       document.getElementById("mobile-daily-symbol-results").innerHTML=symbolResults.length?symbolResults.map(row=>{
-        const code=String(row.code??row.key??"—");
-        const name=row.name??names[code]??"";
-        const label=name?`${code} ${name}`:code;
-        const pnl=Number(row.net_profit_loss??0);
-        const outcome=pnl>0?"WIN":pnl<0?"LOSS":"FLAT";
-        return `<article class="mobile-detail-card"><div class="mobile-card-heading"><strong>${label}</strong><span>${outcome}</span></div><div class="mobile-trade-row"><span>${row.trade_count??0} trade</span><span>${val(pnl,yen.format)}</span></div></article>`;
+        const label=row.name?`${row.code} ${row.name}`:row.code;
+        const outcome=row.net_profit_loss>0?"WIN":row.net_profit_loss<0?"LOSS":"FLAT";
+        return `<article class="mobile-detail-card"><div class="mobile-card-heading"><strong>${label}</strong><span>${outcome}</span></div><div class="mobile-trade-row"><span>${row.trade_count} trade</span><span>${val(row.net_profit_loss,yen.format)}</span></div></article>`;
       }).join(""):empty("No completed trades today.");
+
       const closedDay=schedule.business_day===false;
       const readinessReady=String(readiness.overall_state??readiness.state??readiness.status??"").toLowerCase()==="ready"||readiness.ready_for_paper_trading===true;
       const healthState=String(health.status??"").toLowerCase();
@@ -165,8 +184,8 @@
       document.getElementById("mobile-runtime-pid").textContent=runtimeToday?(runtime.process_id??runtime.pid??"—"):"—";
       document.getElementById("mobile-runtime-cycles").textContent=runtimeToday?(runtime.cycle_count??runtime.cycles??"—"):"—";
       document.getElementById("mobile-runtime-failed").textContent=runtimeToday?(runtime.failed_cycle_count??runtime.failed_cycles??"—"):"—";
-      document.getElementById("mobile-realized").textContent=dailyReportToday?val(dailySummary.net_profit_loss,yen.format):(runtimeToday?val(runtime.realized_profit_loss,yen.format):"—");
-      document.getElementById("mobile-unrealized").textContent=runtimeToday?val(runtime.unrealized_profit_loss??portfolio.total_unrealized_profit_loss,yen.format):"—";
+      document.getElementById("mobile-realized").textContent=val(realized,yen.format);
+      document.getElementById("mobile-unrealized").textContent=val(unrealized,yen.format);
       document.getElementById("mobile-runtime-message").textContent=runtimeToday?(runtime.message??"—"):(closedDay?"Tokyo market is closed today.":"No Paper Trading Runtime report for today.");
 
       const dataState=String(summary.data_status??summary.state??"").toLowerCase();
@@ -210,7 +229,6 @@
         const g=k=>p.find(x=>x.type===k)?.value??"";
         return `${g("year")}-${g("month")}-${g("day")}`===todayKey();
       });
-
       document.getElementById("mobile-trades").innerHTML=trades.length?trades.slice(0,10).map(t=>{
         const code=String(t.code??"—");
         const name=t.name??names[code]??"";
@@ -218,10 +236,10 @@
         return `<article class="mobile-detail-card"><div class="mobile-card-heading"><strong>${label}</strong><span>${t.side??"—"}</span></div><div class="mobile-trade-row"><span>${t.strategy_name??"—"}</span><span>${t.quantity??"—"} shares</span><span>${val(t.execution_price,yen.format)}</span></div><small>${formatJst(t.executed_at)}</small></article>`;
       }).join(""):empty("No executions today.");
 
-      const positions=runtimeToday&&Array.isArray(runtime.positions)?runtime.positions:(portfolio.positions??[]);
       document.getElementById("mobile-position-list").innerHTML=positions.length?positions.map(p=>{
         const code=String(p.code??"—");
-        const name=p.name??names[code]??"";const label=name?`${code} ${name}`:code;
+        const name=p.name??names[code]??"";
+        const label=name?`${code} ${name}`:code;
         return `<article class="mobile-detail-card"><div class="mobile-card-heading"><strong>${label}</strong><span>${p.side??"—"}</span></div><div class="mobile-detail-grid"><div><span>Qty</span><b>${p.quantity??"—"}</b></div><div><span>Market</span><b>${val(p.market_price,yen.format)}</b></div><div><span>Average</span><b>${val(p.average_cost,yen.format)}</b></div><div><span>Unrealized</span><b>${val(p.unrealized_profit_loss,yen.format)}</b></div></div></article>`;
       }).join(""):empty("No open positions.");
 
