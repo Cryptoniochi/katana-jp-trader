@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
 from app.live.live_exit_order_conflict_service import LiveExitOrderConflictService
+from app.live.live_cancel_journal_repository import SQLiteLiveCancelJournalRepository
 from app.live.live_protective_cancel_service import LiveProtectiveCancelService
 from app.live.live_protective_exit_conflict_resolver import LiveProtectiveExitConflictResolver
 from app.live.live_protective_exit_execution_flow import (
@@ -38,7 +39,7 @@ class Tracking:
     def __init__(self): self.calls=[]
     def submit(self,**kwargs): self.calls.append(kwargs); return object()
 
-def build(rows):
+def build(rows, tmp_path):
     broker=Orders(rows)
     tracking=Tracking()
     service=LiveProtectiveExitService(
@@ -48,7 +49,10 @@ def build(rows):
     )
     resolver=LiveProtectiveExitConflictResolver(
         conflict_service=LiveExitOrderConflictService(order_reader=broker),
-        cancel_service=LiveProtectiveCancelService(client=broker),
+        cancel_service=LiveProtectiveCancelService(
+            client=broker,
+            journal_repository=SQLiteLiveCancelJournalRepository(tmp_path / "katana.db"),
+        ),
         exit_service=service,
     )
     flow=LiveProtectiveExitExecutionFlow(
@@ -58,22 +62,22 @@ def build(rows):
     )
     return flow,tracking,broker
 
-def test_active_sell_blocks_before_tracking():
-    f,t,b=build([{"ID":"s","Symbol":"3911","Side":"1","State":3,"LeavesQty":100}])
+def test_active_sell_blocks_before_tracking(tmp_path):
+    f,t,b=build([{"ID":"s","Symbol":"3911","Side":"1","State":3,"LeavesQty":100}], tmp_path)
     r=f.submit_stop_loss(code="3911",stop_price=200,trading_date=DAY)
     assert r.decision is LiveProtectiveExitExecutionDecision.BLOCKED
     assert t.calls==[]
     assert b.cancel_calls==1
 
-def test_active_buy_blocks_before_tracking():
-    f,t,b=build([{"ID":"b","Symbol":"3911","Side":"2","State":2,"LeavesQty":100}])
+def test_active_buy_blocks_before_tracking(tmp_path):
+    f,t,b=build([{"ID":"b","Symbol":"3911","Side":"2","State":2,"LeavesQty":100}], tmp_path)
     r=f.submit_stop_loss(code="3911",stop_price=200,trading_date=DAY)
     assert r.decision is LiveProtectiveExitExecutionDecision.BLOCKED
     assert t.calls==[]
     assert b.cancel_calls==1
 
-def test_terminal_order_allows_tracking():
-    f,t,b=build([{"ID":"d","Symbol":"3911","Side":"1","State":5,"LeavesQty":0}])
+def test_terminal_order_allows_tracking(tmp_path):
+    f,t,b=build([{"ID":"d","Symbol":"3911","Side":"1","State":5,"LeavesQty":0}], tmp_path)
     r=f.submit_stop_loss(code="3911",stop_price=200,trading_date=DAY)
     assert r.decision is LiveProtectiveExitExecutionDecision.SUBMISSION_STARTED
     assert len(t.calls)==1

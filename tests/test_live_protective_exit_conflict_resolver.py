@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
 from app.live.live_exit_order_conflict_service import LiveExitOrderConflictService
+from app.live.live_cancel_journal_repository import SQLiteLiveCancelJournalRepository
 from app.live.live_protective_cancel_service import LiveProtectiveCancelService
 from app.live.live_protective_exit_conflict_resolver import (
     LiveConflictResolutionDecision,
@@ -67,7 +68,7 @@ class Broker:
         return {"Result": 0, "OrderId": order_id}
 
 
-def build(account, broker):
+def build(account, broker, tmp_path):
     exit_service = LiveProtectiveExitService(
         account_state_provider=account,
         market_price_provider=lambda _code: 190,
@@ -75,15 +76,18 @@ def build(account, broker):
     )
     return LiveProtectiveExitConflictResolver(
         conflict_service=LiveExitOrderConflictService(order_reader=broker),
-        cancel_service=LiveProtectiveCancelService(client=broker),
+        cancel_service=LiveProtectiveCancelService(
+            client=broker,
+            journal_repository=SQLiteLiveCancelJournalRepository(tmp_path / "katana.db"),
+        ),
         exit_service=exit_service,
     )
 
 
-def test_cancel_then_replan_uses_fresh_smaller_position():
+def test_cancel_then_replan_uses_fresh_smaller_position(tmp_path):
     account = MutableAccount([40])
     broker = Broker()
-    result = build(account, broker).resolve_stop_loss(
+    result = build(account, broker, tmp_path).resolve_stop_loss(
         code="3911", stop_price=200, trading_date=DAY
     )
     assert result.decision is LiveConflictResolutionDecision.REPLANNED
@@ -97,10 +101,10 @@ def test_cancel_then_replan_uses_fresh_smaller_position():
     assert account.calls == 1
 
 
-def test_cancel_then_replan_zero_position_does_not_submit():
+def test_cancel_then_replan_zero_position_does_not_submit(tmp_path):
     account = MutableAccount([0])
     broker = Broker()
-    result = build(account, broker).resolve_stop_loss(
+    result = build(account, broker, tmp_path).resolve_stop_loss(
         code="3911", stop_price=200, trading_date=DAY
     )
     assert result.decision is LiveConflictResolutionDecision.REPLANNED
@@ -110,10 +114,10 @@ def test_cancel_then_replan_zero_position_does_not_submit():
     assert broker.cancel_calls == 1
 
 
-def test_ambiguous_cancel_blocks_without_replan():
+def test_ambiguous_cancel_blocks_without_replan(tmp_path):
     account = MutableAccount([100])
     broker = Broker(cancel_error=RuntimeError("timeout"))
-    result = build(account, broker).resolve_stop_loss(
+    result = build(account, broker, tmp_path).resolve_stop_loss(
         code="3911", stop_price=200, trading_date=DAY
     )
     assert result.decision is LiveConflictResolutionDecision.BLOCKED
@@ -122,10 +126,10 @@ def test_ambiguous_cancel_blocks_without_replan():
     assert account.calls == 0
 
 
-def test_nonterminal_after_cancel_blocks_without_replan():
+def test_nonterminal_after_cancel_blocks_without_replan(tmp_path):
     account = MutableAccount([100])
     broker = Broker(remain_active=True)
-    result = build(account, broker).resolve_stop_loss(
+    result = build(account, broker, tmp_path).resolve_stop_loss(
         code="3911", stop_price=200, trading_date=DAY
     )
     assert result.decision is LiveConflictResolutionDecision.BLOCKED
@@ -134,10 +138,10 @@ def test_nonterminal_after_cancel_blocks_without_replan():
     assert account.calls == 0
 
 
-def test_no_conflict_does_not_cancel_and_plans_from_live_position():
+def test_no_conflict_does_not_cancel_and_plans_from_live_position(tmp_path):
     account = MutableAccount([70])
     broker = Broker(state=5)
-    result = build(account, broker).resolve_stop_loss(
+    result = build(account, broker, tmp_path).resolve_stop_loss(
         code="3911", stop_price=200, trading_date=DAY
     )
     assert result.decision is LiveConflictResolutionDecision.CLEAR
