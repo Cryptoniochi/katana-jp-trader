@@ -94,7 +94,7 @@ class LiveEndOfDayExitBatch:
 
 
 class LiveAccountStateProvider(Protocol):
-    def snapshot(self) -> Any: ...
+    def refresh(self) -> Any: ...
 
 
 MarketPriceProvider = Callable[[str], float]
@@ -268,7 +268,14 @@ class LiveProtectiveExitService:
 
     def _snapshot(self) -> Any:
         provider = self.account_state_provider
-        snapshot = provider() if callable(provider) else provider.snapshot()
+        if callable(provider):
+            snapshot = provider()
+        elif hasattr(provider, "refresh"):
+            snapshot = provider.refresh()
+        elif hasattr(provider, "snapshot"):
+            snapshot = provider.snapshot()
+        else:
+            raise RuntimeError("live account state provider has no refresh method")
         self._require_fresh_complete(snapshot)
         return snapshot
 

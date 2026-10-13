@@ -186,9 +186,24 @@ class LiveExecutionTrackingFlow:
         self.submission_coordinator = submission_coordinator
         self.submitted_lifecycle = submitted_lifecycle
 
-    def submit(self, *, execution_key: str, order: TradeOrder, trading_date) -> LiveExecutionTrackingResult:
+    def submit(
+        self,
+        *,
+        execution_key: str,
+        order: TradeOrder,
+        trading_date,
+        required_baseline_quantity: int | None = None,
+    ) -> LiveExecutionTrackingResult:
         # This read must complete before the coordinator can reach transport.
         baseline = self.position_consistency_service.capture_baseline(order)
+        if required_baseline_quantity is not None:
+            if required_baseline_quantity < 0:
+                raise ValueError("required_baseline_quantity must be non-negative")
+            if baseline.quantity != required_baseline_quantity:
+                raise LivePositionBaselineConflictError(
+                    "fresh pre-submission live position changed after exit planning; "
+                    "submission is blocked and the exit must be replanned"
+                )
         durable = self.baseline_repository.save_once(
             execution_key, order=order, baseline=baseline
         )
