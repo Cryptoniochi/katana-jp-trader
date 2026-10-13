@@ -18,6 +18,7 @@ from app.live.live_protective_exit_service import (
     LiveProtectiveExitPlan,
     LiveProtectiveExitService,
 )
+from app.live.live_exit_order_conflict_service import LiveExitOrderConflictService
 from app.trading.order_models import OrderSide, TradeOrder
 
 
@@ -64,10 +65,15 @@ class _TrackingFlow(Protocol):
 
 class LiveProtectiveExitExecutionFlow:
     def __init__(
-        self, *, exit_service: LiveProtectiveExitService, tracking_flow: _TrackingFlow
+        self,
+        *,
+        exit_service: LiveProtectiveExitService,
+        tracking_flow: _TrackingFlow,
+        order_conflict_service: LiveExitOrderConflictService | None = None,
     ) -> None:
         self.exit_service = exit_service
         self.tracking_flow = tracking_flow
+        self.order_conflict_service = order_conflict_service
 
     def submit_stop_loss(
         self, *, code: str, stop_price: float, trading_date: date
@@ -112,6 +118,12 @@ class LiveProtectiveExitExecutionFlow:
         order = plan.order
         if order is None or order.side is not OrderSide.SELL:
             raise RuntimeError("EXIT_REQUIRED plan must contain a SELL order")
+        if self.order_conflict_service is not None:
+            conflict = self.order_conflict_service.check(code=order.code)
+            if not conflict.is_clear:
+                return LiveProtectiveExitExecutionResult(
+                    LiveProtectiveExitExecutionDecision.BLOCKED, plan, None, None
+                )
         execution_key = f"protective-exit:{order.order_id}"
         try:
             tracking = self.tracking_flow.submit(
