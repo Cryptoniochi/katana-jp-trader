@@ -14,6 +14,7 @@ from app.live.execution_mode import (
     ExecutionModeSettings,
     LiveArmingPolicy,
     LiveTradingUnavailableError,
+    RuntimeExecutionModeRouter,
     TradingExecutionMode,
 )
 from app.notifications.notification_models import (
@@ -56,34 +57,79 @@ def _run_selected_runtime(
     error_output,
     now_provider,
     paper_trading_runner,
+    live_trading_runner=None,
 ):
-    """Dispatch the production session without ever falling Live back to Paper.
+    """Dispatch through the production execution-mode router.
 
     PAPER and SHADOW intentionally retain the existing application runner.
-    SHADOW remains the existing Paper runtime plus its shadow-replication
-    facilities.  LIVE is a distinct runtime boundary: daily arming is checked,
-    then execution is refused until the dedicated production Live cycle runner
-    is explicitly wired in a later phase.
+    LIVE is a distinct callable and can never fall back to Paper.  The router
+    performs the daily Live authorization before returning the Live runtime.
     """
 
-    if settings.mode is TradingExecutionMode.LIVE:
-        trading_date = _trading_date(now_provider=now_provider)
-        LiveArmingPolicy().require_authorized(
-            settings,
+    trading_date = _trading_date(now_provider=now_provider)
+
+    # Keep the helper backward-compatible without referencing a function that is
+    # defined later in this module at function-definition time.  Name lookup here
+    # happens only when the function is called, after module initialization.
+    if live_trading_runner is None:
+        live_trading_runner = _unconfigured_live_trading_runner
+
+    def run_paper():
+        return paper_trading_runner(
+            application_arguments,
+            environ=environ,
+            output=output,
+            error_output=error_output,
+        )
+
+    def run_shadow():
+        return paper_trading_runner(
+            application_arguments,
+            environ=environ,
+            output=output,
+            error_output=error_output,
+        )
+
+    def run_live():
+        return live_trading_runner(
+            application_arguments,
+            settings=settings,
             trading_date=trading_date,
-        )
-        raise LiveTradingUnavailableError(
-            "Live production cycle runner is not wired yet. "
-            "Refusing to fall back to Paper Trading."
+            environ=environ,
+            output=output,
+            error_output=error_output,
         )
 
-    return paper_trading_runner(
-        application_arguments,
-        environ=environ,
-        output=output,
-        error_output=error_output,
+    selected = RuntimeExecutionModeRouter(
+        paper_runtime=run_paper,
+        shadow_runtime=run_shadow,
+        live_runtime=run_live,
+        arming_policy=LiveArmingPolicy(),
+    ).resolve(settings, trading_date=trading_date)
+    return selected()
+
+
+
+def _unconfigured_live_trading_runner(
+    application_arguments,
+    *,
+    settings,
+    trading_date,
+    environ,
+    output,
+    error_output,
+):
+    """Fail closed until the concrete Live dependency composition is supplied.
+
+    This is intentionally not a Paper fallback.  Production activation must
+    replace this callable with a runner backed by FinalLiveRuntimeFactory and
+    LiveProductionApplicationFactory.
+    """
+
+    raise LiveTradingUnavailableError(
+        "Live production routing is active, but the concrete Live dependency "
+        "composition is not configured. Refusing to fall back to Paper Trading."
     )
-
 
 def build_argument_parser() -> argparse.ArgumentParser:
     """運用ランナー固有のCLI引数を定義する。"""
@@ -125,6 +171,7 @@ def run(
     sleeper=None,
     market_clock=None,
     paper_trading_runner=run_paper_trading,
+    live_trading_runner=_unconfigured_live_trading_runner,
     notification_gateway_factory: (
         RuntimeNotificationGatewayFactory
     ) = create_runtime_notification_gateway,
@@ -274,6 +321,7 @@ def run(
                 error_output=error_output,
                 now_provider=now_provider,
                 paper_trading_runner=paper_trading_runner,
+                live_trading_runner=live_trading_runner,
             )
         )
     except KeyboardInterrupt:
