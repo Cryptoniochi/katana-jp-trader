@@ -109,7 +109,7 @@ def test_eod_active_order_is_cancelled_before_submission(tmp_path):
     assert len(tracking.calls)==1
     assert tracking.calls[0]["order"].quantity==40
 
-def test_eod_ambiguous_cancel_blocks_submission(tmp_path):
+def test_eod_unfinished_sell_blocks_without_cancel_attempt(tmp_path):
     class BadBroker(Broker):
         def cancel_order(self,oid):
             self.cancel_calls.append(oid)
@@ -119,7 +119,10 @@ def test_eod_ambiguous_cancel_blocks_submission(tmp_path):
     result=flow.submit_all(trading_date=DAY)
     assert result.decision is LiveEodExecutionDecision.BLOCKED
     assert tracking.calls==[]
-    assert broker.cancel_calls==["OID"]
+    # EOD must never cancel an unfinished SELL.  It may be the liquidation
+    # already in flight, so fail closed and leave it untouched.
+    assert broker.cancel_calls==[]
+    assert "SELL" in result.message
 
 def test_eod_multiple_symbols_are_each_replanned(tmp_path):
     flow,tracking=build(tmp_path,Account({"3911":30,"7203":20}),Broker())
@@ -128,3 +131,25 @@ def test_eod_multiple_symbols_are_each_replanned(tmp_path):
     assert [(c["order"].code,c["order"].quantity) for c in tracking.calls]==[
         ("3911",30),("7203",20)
     ]
+
+
+def test_eod_existing_unfinished_sell_is_never_cancelled_or_resubmitted(tmp_path):
+    broker=Broker([{"ID":"SELL-OID","Symbol":"3911","Side":"1","State":3,"LeavesQty":40}])
+    flow,tracking=build(tmp_path,Account({"3911":40}),broker)
+    result=flow.submit_all(trading_date=DAY)
+    assert result.decision is LiveEodExecutionDecision.BLOCKED
+    assert broker.cancel_calls==[]
+    assert tracking.calls==[]
+    assert "SELL" in result.message
+
+
+def test_eod_mixed_buy_and_sell_conflicts_fail_closed_without_cancellation(tmp_path):
+    broker=Broker([
+        {"ID":"BUY-OID","Symbol":"3911","Side":"2","State":3,"LeavesQty":10},
+        {"ID":"SELL-OID","Symbol":"3911","Side":"1","State":3,"LeavesQty":40},
+    ])
+    flow,tracking=build(tmp_path,Account({"3911":40}),broker)
+    result=flow.submit_all(trading_date=DAY)
+    assert result.decision is LiveEodExecutionDecision.BLOCKED
+    assert broker.cancel_calls==[]
+    assert tracking.calls==[]

@@ -59,11 +59,67 @@ class LiveProtectiveExitConflictResolver:
     def resolve_eod(
         self, *, code: str, trading_date
     ) -> LiveConflictResolutionResult:
-        return self._resolve(
-            code=code,
-            replan=lambda: self.exit_service.evaluate_eod_position(
+        """Resolve EOD conflicts without ever cancelling an unfinished SELL.
+
+        An unfinished SELL may itself be a previously submitted protective/EOD
+        liquidation.  Cancelling it merely because the live position has not yet
+        reflected an asynchronous fill can create cancel/replace churn and duplicate
+        exit risk.  EOD therefore fails closed while any unfinished SELL exists.
+
+        Unfinished BUY orders are still cancelled through the existing durable
+        cancellation path before a fresh live-position replan.
+        """
+        first = self.conflict_service.check(code=code)
+        if first.is_clear:
+            return LiveConflictResolutionResult(
+                LiveConflictResolutionDecision.CLEAR,
+                self.exit_service.evaluate_eod_position(
+                    code=code, trading_date=trading_date
+                ),
+                "No cancellation required.",
+            )
+        if not first.conflicts:
+            return LiveConflictResolutionResult(
+                LiveConflictResolutionDecision.BLOCKED,
+                None,
+                "Broker order state is unavailable or ambiguous.",
+            )
+
+        # Side "1" is SELL in kabu Station.  Never cancel an unfinished SELL
+        # from the EOD path: it may be the liquidation already in flight.
+        if any(conflict.side == "1" for conflict in first.conflicts):
+            return LiveConflictResolutionResult(
+                LiveConflictResolutionDecision.BLOCKED,
+                None,
+                "Unfinished SELL exists for EOD symbol; leave it in place and "
+                "wait for broker reconciliation before any new liquidation.",
+            )
+
+        # Only BUY conflicts remain.  These may increase exposure and must be
+        # durably cancelled before the position is replanned.
+        for conflict in first.conflicts:
+            cancelled = self.cancel_service.cancel_and_reconcile(
+                broker_order_id=conflict.broker_order_id
+            )
+            if not cancelled.is_cancelled:
+                return LiveConflictResolutionResult(
+                    LiveConflictResolutionDecision.BLOCKED,
+                    None,
+                    cancelled.message,
+                )
+        second = self.conflict_service.check(code=code)
+        if not second.is_clear:
+            return LiveConflictResolutionResult(
+                LiveConflictResolutionDecision.BLOCKED,
+                None,
+                "Broker conflict remains after cancellation.",
+            )
+        return LiveConflictResolutionResult(
+            LiveConflictResolutionDecision.REPLANNED,
+            self.exit_service.evaluate_eod_position(
                 code=code, trading_date=trading_date
             ),
+            "BUY conflicts cancelled; replanned from fresh live position.",
         )
 
     def _resolve(self, *, code: str, replan) -> LiveConflictResolutionResult:

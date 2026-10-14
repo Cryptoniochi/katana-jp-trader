@@ -30,10 +30,10 @@ class LiveEodExecutionResult:
 class LiveEodLiquidationFlow:
     """Liquidate actual Live positions and prove the account is flat.
 
-    Each pass re-reads authoritative broker positions through plan_end_of_day.
-    COMPLETE is returned only when a fresh read contains no position plans.
-    The bounded pass count prevents an infinite loop when fills do not settle,
-    positions reappear, or the broker/account view cannot converge.
+    COMPLETE is returned only after a fresh authoritative account read is flat.
+    Once this invocation starts an exit for a symbol, a later non-flat read never
+    submits that symbol again.  Real fills are asynchronous, so the safe response
+    is BLOCKED/pending reconciliation rather than cancel/replace churn.
     """
 
     def __init__(
@@ -53,10 +53,9 @@ class LiveEodLiquidationFlow:
 
     def submit_all(self, *, trading_date) -> LiveEodExecutionResult:
         results: list[LiveProtectiveExitExecutionResult] = []
+        submitted_symbols: set[str] = set()
 
         for pass_number in range(1, self.max_passes + 1):
-            # Fresh authoritative account read at the beginning of every pass.
-            # An empty plan set is the only proof accepted here for flatness.
             try:
                 plans = self.exit_service.plan_end_of_day(
                     trading_date=trading_date
@@ -75,6 +74,22 @@ class LiveEodLiquidationFlow:
                     "Fresh live account verification confirms all positions are flat.",
                 )
 
+            # A symbol submitted earlier in this invocation is still visible in
+            # the authoritative position view.  Do not resolve conflicts again:
+            # doing so could cancel the still-working EOD SELL and resubmit it.
+            pending = sorted(
+                {candidate.code for candidate in plans}
+                & submitted_symbols
+            )
+            if pending:
+                return LiveEodExecutionResult(
+                    LiveEodExecutionDecision.BLOCKED,
+                    tuple(results),
+                    "EOD exit submission is still awaiting authoritative flat "
+                    "confirmation; no cancel or resubmission was attempted. "
+                    f"Pending symbols: {','.join(pending)}",
+                )
+
             for candidate in plans:
                 resolution = self.conflict_resolver.resolve_eod(
                     code=candidate.code,
@@ -88,9 +103,6 @@ class LiveEodLiquidationFlow:
                         f"{resolution.message}",
                     )
 
-                # Keep the existing proven execution path.  A future cleanup may
-                # expose this as a public method; the safety semantics are
-                # unchanged here.
                 result = self.execution_flow._submit_plan(
                     plan=resolution.plan,
                     trading_date=trading_date,
@@ -102,9 +114,12 @@ class LiveEodLiquidationFlow:
                         tuple(results),
                         f"EOD liquidation blocked for {candidate.code}.",
                     )
+                if (
+                    result.decision
+                    is LiveProtectiveExitExecutionDecision.SUBMISSION_STARTED
+                ):
+                    submitted_symbols.add(candidate.code)
 
-        # We intentionally do not return COMPLETE merely because all submission
-        # calls returned.  A final fresh broker read must prove flatness.
         try:
             remaining = self.exit_service.plan_end_of_day(
                 trading_date=trading_date

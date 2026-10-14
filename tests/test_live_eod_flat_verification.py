@@ -55,7 +55,7 @@ def test_eod_requires_fresh_empty_read_before_complete():
     assert execution.calls == ["3911"]
 
 
-def test_eod_reprocesses_position_that_remains_after_first_pass():
+def test_eod_does_not_resubmit_position_that_remains_after_submission():
     service=ExitService([[plan("3911")], [plan("3911")], []])
     execution=Execution()
     result=LiveEodLiquidationFlow(
@@ -64,9 +64,10 @@ def test_eod_reprocesses_position_that_remains_after_first_pass():
         execution_flow=execution,
         max_passes=3,
     ).submit_all(trading_date="2026-10-14")
-    assert result.decision is LiveEodExecutionDecision.COMPLETE
-    assert execution.calls == ["3911", "3911"]
-    assert service.reads == 3
+    assert result.decision is LiveEodExecutionDecision.BLOCKED
+    assert execution.calls == ["3911"]
+    assert service.reads == 2
+    assert "no cancel or resubmission" in result.message
 
 
 def test_eod_blocks_when_account_never_reaches_flat_within_bound():
@@ -83,9 +84,10 @@ def test_eod_blocks_when_account_never_reaches_flat_within_bound():
         max_passes=2,
     ).submit_all(trading_date="2026-10-14")
     assert result.decision is LiveEodExecutionDecision.BLOCKED
-    assert execution.calls == ["3911", "3911"]
-    # Two work passes plus one final authoritative verification.
-    assert service.reads == 3
+    assert execution.calls == ["3911"]
+    # The second authoritative read still sees the submitted symbol, so the
+    # flow fails closed without a second submission.
+    assert service.reads == 2
     assert "3911" in result.message
 
 
