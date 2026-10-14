@@ -86,6 +86,7 @@ class CycleProtectionService(Protocol):
 NowProvider = Callable[[], datetime]
 Sleeper = Callable[[float], None]
 StopPredicate = Callable[[], bool]
+MarketDataHealthProvider = Callable[[], object]
 
 
 class LiveTradingOrchestrator:
@@ -100,6 +101,9 @@ class LiveTradingOrchestrator:
         now_provider: NowProvider | None = None,
         sleeper: Sleeper = sleep,
         stop_requested: StopPredicate | None = None,
+        market_data_health_provider: MarketDataHealthProvider | None = None,
+        market_data_stale_after_seconds: float = 180.0,
+        market_data_startup_grace_seconds: float = 180.0,
     ) -> None:
         """依存関係と実行制御処理を設定する。"""
 
@@ -117,6 +121,23 @@ class LiveTradingOrchestrator:
             if stop_requested is not None
             else lambda: False
         )
+        if market_data_stale_after_seconds <= 0:
+            raise ValueError(
+                "market_data_stale_after_seconds must be greater than 0"
+            )
+        if market_data_startup_grace_seconds < 0:
+            raise ValueError(
+                "market_data_startup_grace_seconds must be 0 or greater"
+            )
+        self.market_data_health_provider = market_data_health_provider
+        self.market_data_stale_after_seconds = (
+            market_data_stale_after_seconds
+        )
+        self.market_data_startup_grace_seconds = (
+            market_data_startup_grace_seconds
+        )
+        self._market_data_session_state = None
+        self._market_data_session_started_at: datetime | None = None
         self._diagnostic_cycle_count = 0
         self._diagnostic_decisions: Counter[str] = Counter()
         self._diagnostic_fetched_bar_count = 0
@@ -271,6 +292,10 @@ class LiveTradingOrchestrator:
                 observed_at=started_at,
             )
             self._record_market_result(market_result)
+            self._validate_market_data_health(
+                market_result=market_result,
+                observed_at=started_at,
+            )
             paper_result = None
 
             if self.cycle_protection_service is not None:
@@ -314,6 +339,94 @@ class LiveTradingOrchestrator:
                 market_result=None,
                 paper_trading_result=None,
                 error_message=str(error),
+            )
+
+    def _validate_market_data_health(
+        self,
+        *,
+        market_result: RealtimeMarketPollResult,
+        observed_at: datetime,
+    ) -> None:
+        # Fail closed when realtime market data becomes stale in-session.
+        session = market_result.session
+
+        if not session.is_trading:
+            self._market_data_session_state = session.state
+            self._market_data_session_started_at = None
+            return
+
+        if self._market_data_session_state != session.state:
+            self._market_data_session_state = session.state
+            self._market_data_session_started_at = observed_at
+
+        if self.market_data_health_provider is None:
+            return
+
+        status = self.market_data_health_provider()
+        is_connected = bool(getattr(status, "is_connected", False))
+        registered_codes = tuple(
+            getattr(status, "registered_codes", ()) or ()
+        )
+        last_message_at = getattr(status, "last_message_at", None)
+        last_error = getattr(status, "last_error", None)
+
+        if not is_connected:
+            raise RuntimeError(
+                "market_data_unavailable: realtime provider disconnected"
+                + (f" error={last_error}" if last_error else "")
+            )
+
+        if not registered_codes:
+            raise RuntimeError(
+                "market_data_unavailable: no realtime symbols registered"
+            )
+
+        session_started_at = self._market_data_session_started_at
+        if session_started_at is None:
+            session_started_at = observed_at
+            self._market_data_session_started_at = observed_at
+
+        elapsed_since_session_start = (
+            observed_at - session_started_at
+        ).total_seconds()
+
+        if last_message_at is None:
+            if (
+                elapsed_since_session_start
+                > self.market_data_startup_grace_seconds
+            ):
+                raise RuntimeError(
+                    "market_data_stale: no realtime PUSH received "
+                    f"within {self.market_data_startup_grace_seconds:.0f}s "
+                    f"of session start; registered={len(registered_codes)}"
+                )
+            return
+
+        if last_message_at.tzinfo is None:
+            raise RuntimeError(
+                "market_data_invalid: last_message_at must be timezone-aware"
+            )
+
+        message_age_seconds = (
+            observed_at.astimezone(timezone.utc)
+            - last_message_at.astimezone(timezone.utc)
+        ).total_seconds()
+
+        if message_age_seconds < 0:
+            message_age_seconds = 0.0
+
+        if (
+            elapsed_since_session_start
+            < self.market_data_startup_grace_seconds
+        ):
+            return
+
+        if message_age_seconds > self.market_data_stale_after_seconds:
+            raise RuntimeError(
+                "market_data_stale: realtime PUSH age "
+                f"{message_age_seconds:.1f}s exceeds "
+                f"{self.market_data_stale_after_seconds:.1f}s; "
+                f"registered={len(registered_codes)}"
             )
 
     def _record_market_result(

@@ -82,6 +82,7 @@ class PaperTradingRuntime:
         database_path: Path | None = None,
         process_id_provider: Callable[[], int] = os.getpid,
         now_provider: Callable[[], datetime] | None = None,
+        runtime_diagnostics_provider: Callable[[], object] | None = None,
     ) -> None:
         """Trading Loop・Portfolio・Risk・Heartbeat・時計を設定する。"""
 
@@ -98,6 +99,7 @@ class PaperTradingRuntime:
             None if database_path is None else Path(database_path)
         )
         self.process_id_provider = process_id_provider
+        self.runtime_diagnostics_provider = runtime_diagnostics_provider
         self.last_status_publish_error: str | None = None
         self.now_provider = (
             now_provider
@@ -674,6 +676,17 @@ class PaperTradingRuntime:
             ),
             "error_message": error_message,
         }
+
+        if self.runtime_diagnostics_provider is not None:
+            try:
+                runtime_diagnostics = self.runtime_diagnostics_provider()
+            except Exception as error:
+                payload["runtime_diagnostics_error"] = (
+                    f"{type(error).__name__}: {error}"
+                )
+            else:
+                if isinstance(runtime_diagnostics, dict):
+                    payload.update(runtime_diagnostics)
 
         try:
             self.status_path.parent.mkdir(

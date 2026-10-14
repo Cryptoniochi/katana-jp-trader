@@ -201,6 +201,8 @@ class PaperTradingProductionSettings:
     strategy_routing_fail_open: bool = True
     maximum_codes_per_poll: int = 10
     rate_limit_cooldown_seconds: float = 60.0
+    market_data_stale_after_seconds: float = 180.0
+    market_data_startup_grace_seconds: float = 180.0
     market_data_mode: str = "kabu-station-realtime"
     kabu_station_api_password: str | None = None
     kabu_station_base_url: str = (
@@ -354,6 +356,16 @@ class PaperTradingProductionSettings:
             raise ValueError(
                 "1回の最大取得銘柄数は"
                 "0より大きい必要があります。"
+            )
+
+        if self.market_data_stale_after_seconds <= 0:
+            raise ValueError(
+                "market_data_stale_after_seconds must be greater than 0"
+            )
+
+        if self.market_data_startup_grace_seconds < 0:
+            raise ValueError(
+                "market_data_startup_grace_seconds must be 0 or greater"
             )
 
         if self.rate_limit_cooldown_seconds < 0:
@@ -1263,6 +1275,13 @@ class PaperTradingComposition:
             ),
             cycle_protection_service=tick_protective_stop_service,
             now_provider=resolved_now_provider,
+            market_data_health_provider=kabu_provider.status,
+            market_data_stale_after_seconds=(
+                settings.market_data_stale_after_seconds
+            ),
+            market_data_startup_grace_seconds=(
+                settings.market_data_startup_grace_seconds
+            ),
         )
 
         runtime_session = RuntimeSessionService(
@@ -1310,11 +1329,73 @@ class PaperTradingComposition:
             ),
         )
 
+        def provide_runtime_diagnostics() -> dict[str, object]:
+            provider_status = kabu_provider.status()
+            diagnostics = live_orchestrator.diagnostic_snapshot()
+            registered_codes = tuple(
+                getattr(provider_status, "registered_codes", ()) or ()
+            )
+            last_message_at = getattr(
+                provider_status, "last_message_at", None
+            )
+            decision_counts = dict(
+                getattr(diagnostics, "market_decision_counts", {}) or {}
+            )
+            return {
+                "market_data": {
+                    "is_connected": bool(
+                        getattr(provider_status, "is_connected", False)
+                    ),
+                    "registered_code_count": len(registered_codes),
+                    "registered_codes": list(registered_codes),
+                    "last_message_at": (
+                        None
+                        if last_message_at is None
+                        else last_message_at.isoformat()
+                    ),
+                    "last_error": getattr(
+                        provider_status, "last_error", None
+                    ),
+                },
+                "diagnostics": {
+                    "cycle_count": int(
+                        getattr(diagnostics, "cycle_count", 0) or 0
+                    ),
+                    "market_decision_counts": decision_counts,
+                    "no_new_bar_cycle_count": int(
+                        decision_counts.get("no_new_bar", 0) or 0
+                    ),
+                    "new_bars_saved_cycle_count": int(
+                        decision_counts.get("new_bars_saved", 0) or 0
+                    ),
+                    "fetched_bar_count": int(
+                        getattr(diagnostics, "fetched_bar_count", 0) or 0
+                    ),
+                    "new_bar_count": int(
+                        getattr(diagnostics, "new_bar_count", 0) or 0
+                    ),
+                    "saved_bar_count": int(
+                        getattr(diagnostics, "saved_bar_count", 0) or 0
+                    ),
+                    "paper_trading_call_count": int(
+                        getattr(diagnostics, "paper_trading_call_count", 0)
+                        or 0
+                    ),
+                    "paper_trading_input_bar_count": int(
+                        getattr(
+                            diagnostics, "paper_trading_input_bar_count", 0
+                        )
+                        or 0
+                    ),
+                },
+            }
+
         runtime_bundle = PaperTradingRuntimeFactory.create(
             database_path=settings.database_path,
             cycle_runner=runtime_watchlist_cycle_runner,
             portfolio_reader=portfolio_service,
             now_provider=resolved_now_provider,
+            runtime_diagnostics_provider=provide_runtime_diagnostics,
         )
 
         watchlist_execution_integrity_hook = (

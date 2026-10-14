@@ -63,7 +63,8 @@ class PaperTradingRuntimeFactory:
         cycle_runner: PaperTradingRuntimeCycleRunner,
         portfolio_reader: PaperTradingRuntimePortfolioReader,
         status_path: Path | None = DEFAULT_RUNTIME_STATUS_PATH,
-        now_provider: Callable[[], datetime] | None = None,
+            now_provider: Callable[[], datetime] | None = None,
+        runtime_diagnostics_provider: Callable[[], object] | None = None,
     ) -> PaperTradingRuntimeBundle:
         """??Component??Runtime????????????"""
 
@@ -77,6 +78,7 @@ class PaperTradingRuntimeFactory:
             database_path=resolved_database_path,
             status_path=status_path,
             now_provider=now_provider,
+            runtime_diagnostics_provider=runtime_diagnostics_provider,
         )
 
         daily_repository = (

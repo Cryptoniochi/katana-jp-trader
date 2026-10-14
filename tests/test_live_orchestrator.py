@@ -522,3 +522,182 @@ def test_orchestrator_reset_diagnostics() -> None:
     snapshot = orchestrator.diagnostic_snapshot()
     assert snapshot.cycle_count == 0
     assert snapshot.decision_counts == {}
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class FakeMarketDataStatus:
+    is_connected: bool = True
+    registered_codes: tuple[str, ...] = ("7203",)
+    last_message_at: datetime | None = None
+    last_error: str | None = None
+
+
+class FixedMonitor:
+    def __init__(
+        self,
+        *,
+        state: MarketSessionState,
+        decision: RealtimePollDecision = RealtimePollDecision.NO_NEW_BAR,
+    ) -> None:
+        self.state = state
+        self.decision = decision
+
+    def poll(self, *, codes, observed_at):
+        snapshot = MarketSessionSnapshot(
+            observed_at=observed_at,
+            trading_date=observed_at.date(),
+            is_trading_day=True,
+            state=self.state,
+        )
+        return RealtimeMarketPollResult(
+            session=snapshot,
+            decision=self.decision,
+            code_count=len(tuple(codes)),
+            fetched_bar_count=0,
+            new_bar_count=0,
+            saved_bar_count=0,
+            new_bars=(),
+        )
+
+
+def test_market_data_health_allows_fresh_push() -> None:
+    now = datetime(2026, 10, 14, 0, 10, tzinfo=timezone.utc)
+    status = FakeMarketDataStatus(
+        last_message_at=now - timedelta(seconds=10),
+    )
+    orchestrator = LiveTradingOrchestrator(
+        market_monitor=FixedMonitor(state=MarketSessionState.MORNING),
+        paper_trading_service=FakePaperService(),
+        now_provider=lambda: now,
+        market_data_health_provider=lambda: status,
+        market_data_stale_after_seconds=180.0,
+        market_data_startup_grace_seconds=0.0,
+    )
+
+    result = orchestrator.run_cycle(
+        cycle_number=1,
+        codes=("7203",),
+        continue_on_error=True,
+    )
+
+    assert result.is_completed
+
+
+def test_market_data_health_fails_closed_for_stale_push() -> None:
+    now = datetime(2026, 10, 14, 0, 10, tzinfo=timezone.utc)
+    status = FakeMarketDataStatus(
+        last_message_at=now - timedelta(seconds=181),
+    )
+    orchestrator = LiveTradingOrchestrator(
+        market_monitor=FixedMonitor(state=MarketSessionState.MORNING),
+        paper_trading_service=FakePaperService(),
+        now_provider=lambda: now,
+        market_data_health_provider=lambda: status,
+        market_data_stale_after_seconds=180.0,
+        market_data_startup_grace_seconds=0.0,
+    )
+
+    result = orchestrator.run_cycle(
+        cycle_number=1,
+        codes=("7203",),
+        continue_on_error=True,
+    )
+
+    assert result.is_failed
+    assert "market_data_stale" in (result.error_message or "")
+
+
+def test_market_data_health_fails_closed_when_disconnected() -> None:
+    now = datetime(2026, 10, 14, 0, 10, tzinfo=timezone.utc)
+    status = FakeMarketDataStatus(
+        is_connected=False,
+        last_error="websocket disconnected",
+    )
+    orchestrator = LiveTradingOrchestrator(
+        market_monitor=FixedMonitor(state=MarketSessionState.MORNING),
+        paper_trading_service=FakePaperService(),
+        now_provider=lambda: now,
+        market_data_health_provider=lambda: status,
+        market_data_startup_grace_seconds=0.0,
+    )
+
+    result = orchestrator.run_cycle(
+        cycle_number=1,
+        codes=("7203",),
+        continue_on_error=True,
+    )
+
+    assert result.is_failed
+    assert "market_data_unavailable" in (result.error_message or "")
+
+
+def test_market_data_health_does_not_fail_during_lunch_break() -> None:
+    now = datetime(2026, 10, 14, 2, 45, tzinfo=timezone.utc)
+    status = FakeMarketDataStatus(
+        last_message_at=now - timedelta(hours=1),
+    )
+    orchestrator = LiveTradingOrchestrator(
+        market_monitor=FixedMonitor(state=MarketSessionState.LUNCH_BREAK),
+        paper_trading_service=FakePaperService(),
+        now_provider=lambda: now,
+        market_data_health_provider=lambda: status,
+        market_data_stale_after_seconds=180.0,
+        market_data_startup_grace_seconds=0.0,
+    )
+
+    result = orchestrator.run_cycle(
+        cycle_number=1,
+        codes=("7203",),
+        continue_on_error=True,
+    )
+
+    assert result.is_completed
+
+
+def test_market_data_health_gives_afternoon_session_fresh_grace() -> None:
+    morning = datetime(2026, 10, 14, 2, 29, tzinfo=timezone.utc)
+    lunch = datetime(2026, 10, 14, 2, 45, tzinfo=timezone.utc)
+    afternoon = datetime(2026, 10, 14, 3, 30, tzinfo=timezone.utc)
+
+    current = [morning]
+    status = FakeMarketDataStatus(
+        last_message_at=morning - timedelta(seconds=10),
+    )
+
+    monitor = FixedMonitor(state=MarketSessionState.MORNING)
+    orchestrator = LiveTradingOrchestrator(
+        market_monitor=monitor,
+        paper_trading_service=FakePaperService(),
+        now_provider=lambda: current[0],
+        market_data_health_provider=lambda: status,
+        market_data_stale_after_seconds=180.0,
+        market_data_startup_grace_seconds=180.0,
+    )
+
+    first = orchestrator.run_cycle(
+        cycle_number=1,
+        codes=("7203",),
+        continue_on_error=True,
+    )
+    assert first.is_completed
+
+    current[0] = lunch
+    monitor.state = MarketSessionState.LUNCH_BREAK
+    lunch_result = orchestrator.run_cycle(
+        cycle_number=2,
+        codes=("7203",),
+        continue_on_error=True,
+    )
+    assert lunch_result.is_completed
+
+    current[0] = afternoon
+    monitor.state = MarketSessionState.AFTERNOON
+    afternoon_result = orchestrator.run_cycle(
+        cycle_number=3,
+        codes=("7203",),
+        continue_on_error=True,
+    )
+
+    assert afternoon_result.is_completed
