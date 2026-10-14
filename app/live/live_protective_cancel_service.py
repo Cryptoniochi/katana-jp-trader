@@ -61,10 +61,10 @@ class LiveProtectiveCancelService:
                     oid,
                     "Durable journal already records cancellation.",
                 )
-            return self._blocked(
-                oid,
-                "A durable cancel attempt already exists; automatic cancel retry is prohibited.",
-            )
+            # A prior process may have crashed or timed out after sending the
+            # irreversible cancel.  Never send it again.  Only a read-only
+            # /orders observation may resolve the durable ambiguity.
+            return self._reconcile_existing_attempt(oid)
 
         try:
             self.client.cancel_order(oid)
@@ -114,6 +114,56 @@ class LiveProtectiveCancelService:
             LiveCancelDecision.CANCELLED,
             oid,
             "Broker order is terminal after cancel.",
+        )
+
+    def _reconcile_existing_attempt(self, oid: str) -> LiveCancelResult:
+        try:
+            rows = self.client.orders(product=0)
+            matched = [
+                row
+                for row in rows
+                if isinstance(row, dict)
+                and str(row.get("ID") or row.get("OrderId") or "").strip().lower()
+                == oid.lower()
+            ]
+            if len(matched) != 1:
+                return self._blocked(
+                    oid,
+                    "Existing durable cancel remains ambiguous: "
+                    f"expected one broker order, found {len(matched)}.",
+                )
+            state = matched[0].get("State")
+            if isinstance(state, bool) or state is None:
+                return self._blocked(
+                    oid, "Existing durable cancel remains ambiguous: invalid State."
+                )
+            if int(state) != 5:
+                return self._blocked(
+                    oid,
+                    "Existing durable cancel remains ambiguous; "
+                    f"broker order is non-terminal: State={state}.",
+                )
+        except Exception as exc:
+            return self._blocked(
+                oid, f"Read-only cancel recovery failed: {exc}"
+            )
+
+        try:
+            self.journal_repository.recover_cancelled(
+                oid,
+                "Read-only broker reconciliation proved the order terminal.",
+            )
+        except Exception as exc:
+            return self._blocked(
+                oid,
+                "Broker proves cancellation terminal but durable recovery failed: "
+                f"{exc}",
+            )
+        return LiveCancelResult(
+            LiveCancelDecision.CANCELLED,
+            oid,
+            "Read-only broker reconciliation proved the order terminal; "
+            "cancel was not re-sent.",
         )
 
     @staticmethod

@@ -61,8 +61,10 @@ def test_ambiguous_cancel_is_persisted_unknown_and_not_retried_after_restart(tmp
     repo2 = SQLiteLiveCancelJournalRepository(db)
     svc2 = LiveProtectiveCancelService(client=broker, journal_repository=repo2)
     second = svc2.cancel_and_reconcile(broker_order_id="OID")
-    assert second.decision is LiveCancelDecision.BLOCKED
+    assert second.decision is LiveCancelDecision.CANCELLED
+    # Restart recovery is read-only. cancel_order must never be sent twice.
     assert broker.cancel_calls == 1
+    assert repo2.get("OID").state is LiveCancelJournalState.CANCELLED
 
 
 def test_nonterminal_after_cancel_becomes_unknown_and_is_not_retried(tmp_path):

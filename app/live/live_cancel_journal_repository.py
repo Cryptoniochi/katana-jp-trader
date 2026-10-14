@@ -105,6 +105,56 @@ class SQLiteLiveCancelJournalRepository:
             message=message,
         )
 
+    def recover_cancelled(
+        self,
+        broker_order_id: str,
+        message: str | None = None,
+    ) -> LiveCancelJournalRecord:
+        """Promote an ambiguous durable attempt after read-only broker proof.
+
+        This transition is intentionally limited to CANCEL_PENDING/UNKNOWN and
+        performs no broker action.  It exists so a restart after a timeout can
+        recover without ever re-sending cancelorder.
+        """
+        oid = broker_order_id.strip()
+        if not oid:
+            raise ValueError("broker_order_id is required")
+        now = self._now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE live_cancel_journal
+                SET state=?, updated_at=?, message=?
+                WHERE broker_order_id=?
+                  AND state IN (?,?)
+                """,
+                (
+                    LiveCancelJournalState.CANCELLED.value,
+                    now,
+                    message,
+                    oid,
+                    LiveCancelJournalState.CANCEL_PENDING.value,
+                    LiveCancelJournalState.UNKNOWN.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                row = connection.execute(
+                    "SELECT state FROM live_cancel_journal WHERE broker_order_id=?",
+                    (oid,),
+                ).fetchone()
+                current = None if row is None else row["state"]
+                raise RuntimeError(
+                    f"invalid live cancel recovery: {oid} "
+                    f"{current!r} -> {LiveCancelJournalState.CANCELLED.value!r}"
+                )
+            row = connection.execute(
+                "SELECT broker_order_id,state,created_at,updated_at,message "
+                "FROM live_cancel_journal WHERE broker_order_id=?",
+                (oid,),
+            ).fetchone()
+        assert row is not None
+        return self._record(row)
+
     def _transition(
         self,
         broker_order_id: str,
