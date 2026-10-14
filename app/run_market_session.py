@@ -6,9 +6,16 @@ import argparse
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from threading import Event
 from typing import TextIO
 
+from app.live.execution_mode import (
+    ExecutionModeSettings,
+    LiveArmingPolicy,
+    LiveTradingUnavailableError,
+    TradingExecutionMode,
+)
 from app.notifications.notification_models import (
     NotificationSeverity,
 )
@@ -22,6 +29,60 @@ from app.runtime.session_runner import (
     MarketSessionRunDecision,
     MarketSessionRunner,
 )
+
+
+TOKYO = ZoneInfo("Asia/Tokyo")
+
+
+def _trading_date(*, now_provider=None):
+    """Return the Tokyo trading date without performing broker I/O."""
+
+    current = (
+        now_provider()
+        if now_provider is not None
+        else datetime.now(timezone.utc)
+    )
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return current.astimezone(TOKYO).date()
+
+
+def _run_selected_runtime(
+    *,
+    settings: ExecutionModeSettings,
+    application_arguments,
+    environ,
+    output,
+    error_output,
+    now_provider,
+    paper_trading_runner,
+):
+    """Dispatch the production session without ever falling Live back to Paper.
+
+    PAPER and SHADOW intentionally retain the existing application runner.
+    SHADOW remains the existing Paper runtime plus its shadow-replication
+    facilities.  LIVE is a distinct runtime boundary: daily arming is checked,
+    then execution is refused until the dedicated production Live cycle runner
+    is explicitly wired in a later phase.
+    """
+
+    if settings.mode is TradingExecutionMode.LIVE:
+        trading_date = _trading_date(now_provider=now_provider)
+        LiveArmingPolicy().require_authorized(
+            settings,
+            trading_date=trading_date,
+        )
+        raise LiveTradingUnavailableError(
+            "Live production cycle runner is not wired yet. "
+            "Refusing to fall back to Paper Trading."
+        )
+
+    return paper_trading_runner(
+        application_arguments,
+        environ=environ,
+        output=output,
+        error_output=error_output,
+    )
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -74,6 +135,18 @@ def run(
     arguments, paper_arguments = (
         parser.parse_known_args(argv)
     )
+    environment = environ if environ is not None else {}
+    try:
+        execution_settings = ExecutionModeSettings.from_environment(
+            environment
+        )
+    except ValueError as error:
+        print(
+            f"Invalid execution mode configuration: {error}",
+            file=error_output,
+        )
+        return 2
+
     stop_event = Event()
 
     try:
@@ -193,11 +266,14 @@ def run(
 
     try:
         result = runner.run(
-            lambda: paper_trading_runner(
-                paper_arguments,
+            lambda: _run_selected_runtime(
+                settings=execution_settings,
+                application_arguments=paper_arguments,
                 environ=environ,
                 output=output,
                 error_output=error_output,
+                now_provider=now_provider,
+                paper_trading_runner=paper_trading_runner,
             )
         )
     except KeyboardInterrupt:
