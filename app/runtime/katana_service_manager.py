@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -20,6 +21,75 @@ from app.runtime.katana_service_models import (
     ServiceEvent,
     ServiceEventType,
 )
+
+
+
+def _terminate_process_tree(
+    process: subprocess.Popen,
+    *,
+    timeout_seconds: float,
+) -> None:
+    """Stop a managed process and, on Windows, its full descendant tree."""
+
+    if process.poll() is not None:
+        return
+
+    # A shared shutdown deadline can legitimately leave no graceful wait
+    # budget for a later component. Never pass 0 to subprocess timeouts.
+    timeout_seconds = max(float(timeout_seconds), 0.001)
+
+    if os.name != "nt":
+        process.terminate()
+        try:
+            process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        return
+
+    # The Windows venv launcher starts the base interpreter as a child.
+    # Terminating only the Popen PID can therefore orphan the real Python
+    # process and its descendants. taskkill /T addresses the complete tree.
+    completed = subprocess.run(
+        [
+            "taskkill",
+            "/PID",
+            str(process.pid),
+            "/T",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+    )
+
+    try:
+        process.wait(timeout=timeout_seconds)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    # Graceful tree termination did not complete; force the same tree.
+    subprocess.run(
+        [
+            "taskkill",
+            "/PID",
+            str(process.pid),
+            "/T",
+            "/F",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+    )
+
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        # Last-resort protection for unusual/mocked process handles.
+        process.kill()
+        process.wait()
 
 
 DEFAULT_STATUS_PATH = Path(
@@ -339,9 +409,6 @@ class KatanaServiceManager:
             if process is None:
                 continue
 
-            if process.poll() is None:
-                process.terminate()
-
         deadline = (
             self.monotonic_provider()
             + timeout_seconds
@@ -358,11 +425,10 @@ class KatanaServiceManager:
                 deadline - self.monotonic_provider(),
             )
 
-            try:
-                process.wait(timeout=remaining)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+            _terminate_process_tree(
+                process,
+                timeout_seconds=remaining,
+            )
 
             component.last_exit_code = process.returncode
             component.process = None

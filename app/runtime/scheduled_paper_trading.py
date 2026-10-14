@@ -12,6 +12,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from app.market.market_calendar import TokyoMarketCalendar
+from app.runtime.katana_service_manager import (
+    _terminate_process_tree,
+)
 from app.runtime.scheduled_paper_trading_models import (
     ScheduledTradingState,
     ScheduledTradingStatus,
@@ -388,13 +391,10 @@ class ScheduledPaperTradingController:
             return
 
         if self.process.poll() is None:
-            self.process.terminate()
-
-            try:
-                self.process.wait(timeout=15.0)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait()
+            _terminate_process_tree(
+                self.process,
+                timeout_seconds=15.0,
+            )
 
         self.last_exit_code = (
             self.process.returncode
