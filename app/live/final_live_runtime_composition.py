@@ -35,6 +35,8 @@ from app.live.live_protective_cancel_service import LiveProtectiveCancelService
 from app.live.live_protective_exit_conflict_resolver import LiveProtectiveExitConflictResolver
 from app.live.live_protective_exit_execution_flow import LiveProtectiveExitExecutionFlow
 from app.live.live_protective_exit_service import LiveProtectiveExitService
+from app.live.live_protective_stop_repository import SQLiteLiveProtectiveStopRepository
+from app.live.live_protective_stop_cycle import LiveProtectiveStopCycle
 from app.live.live_submitted_execution_lifecycle import LiveSubmittedExecutionLifecycle
 from app.live.locked_live_runtime_composition import (
     LockedLiveRuntimeBundle,
@@ -70,6 +72,8 @@ class FinalLiveRuntimeBundle:
     conflict_service: LiveExitOrderConflictService
     conflict_resolver: LiveProtectiveExitConflictResolver
     protective_exit_execution_flow: LiveProtectiveExitExecutionFlow
+    protective_stop_repository: SQLiteLiveProtectiveStopRepository
+    protective_stop_cycle: LiveProtectiveStopCycle
     eod_liquidation_flow: LiveEodLiquidationFlow
 
 
@@ -177,6 +181,13 @@ class FinalLiveRuntimeFactory:
             tracking_flow=prepared_tracking_flow,
             conflict_resolver=conflict_resolver,
         )
+        protective_stop_repository = SQLiteLiveProtectiveStopRepository(
+            db, now_provider=now_provider
+        )
+        protective_stop_cycle = LiveProtectiveStopCycle(
+            repository=protective_stop_repository,
+            execution_flow=protective_exit_execution_flow,
+        )
         eod_liquidation_flow = LiveEodLiquidationFlow(
             exit_service=protective_exit_service,
             conflict_resolver=conflict_resolver,
@@ -200,5 +211,7 @@ class FinalLiveRuntimeFactory:
             conflict_service=conflict_service,
             conflict_resolver=conflict_resolver,
             protective_exit_execution_flow=protective_exit_execution_flow,
+            protective_stop_repository=protective_stop_repository,
+            protective_stop_cycle=protective_stop_cycle,
             eod_liquidation_flow=eod_liquidation_flow,
         )
