@@ -131,6 +131,85 @@ class SQLiteLiveProtectiveStopRepository:
             )
         return self.get_by_execution_key(key, required=True)
 
+    def synchronize_confirmed_entry_fill(
+        self,
+        *,
+        code: str,
+        entry_execution_key: str,
+        trading_date: date,
+        cumulative_quantity: int,
+        average_fill_price: float,
+        stop_loss_rate: float = 0.01,
+    ) -> LiveProtectiveStopRecord:
+        """Create/update ACTIVE stop state from broker-confirmed cumulative fills.
+
+        Quantity may only move forward.  Replaying the same confirmed cumulative
+        fill is idempotent.  Once an exit is pending/retired, entry fill state is
+        never rewritten.
+        """
+        normalized = self._code(code)
+        key = entry_execution_key.strip()
+        if not key:
+            raise ValueError("entry_execution_key must not be empty")
+        if isinstance(cumulative_quantity, bool) or cumulative_quantity <= 0:
+            raise ValueError("cumulative_quantity must be a positive integer")
+        if average_fill_price <= 0:
+            raise ValueError("average_fill_price must be greater than zero")
+        if not 0 < stop_loss_rate < 1:
+            raise ValueError("stop_loss_rate must be between zero and one")
+
+        existing = self.get_by_execution_key(key)
+        if existing is None:
+            return self.record_filled_entry(
+                code=normalized,
+                entry_execution_key=key,
+                trading_date=trading_date,
+                quantity=cumulative_quantity,
+                fill_price=average_fill_price,
+                stop_loss_rate=stop_loss_rate,
+            )
+
+        if (
+            existing.code != normalized
+            or existing.trading_date != trading_date
+            or existing.stop_loss_rate != float(stop_loss_rate)
+        ):
+            raise RuntimeError(
+                "Confirmed fill conflicts with existing protective stop identity."
+            )
+        if existing.state is not LiveProtectiveStopState.ACTIVE:
+            raise RuntimeError(
+                "Confirmed entry fill cannot rewrite a non-ACTIVE protective stop."
+            )
+        if cumulative_quantity < existing.quantity:
+            raise RuntimeError("Confirmed cumulative fill quantity moved backwards.")
+        if cumulative_quantity == existing.quantity:
+            if existing.fill_price != float(average_fill_price):
+                raise RuntimeError(
+                    "Same cumulative fill quantity has a different average fill price."
+                )
+            return existing
+
+        now = self._now()
+        stop_price = float(average_fill_price) * (1.0 - float(stop_loss_rate))
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE live_protective_stops
+                SET quantity = ?, fill_price = ?, stop_price = ?, updated_at = ?
+                WHERE entry_execution_key = ? AND state = ?
+                """,
+                (
+                    int(cumulative_quantity),
+                    float(average_fill_price),
+                    stop_price,
+                    now.isoformat(),
+                    key,
+                    LiveProtectiveStopState.ACTIVE.value,
+                ),
+            )
+        return self.get_by_execution_key(key, required=True)
+
     def get_current(self, code: str) -> LiveProtectiveStopRecord | None:
         normalized = self._code(code)
         with self._connect() as connection:
