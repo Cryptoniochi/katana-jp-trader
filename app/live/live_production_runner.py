@@ -78,6 +78,7 @@ class LiveProductionRunner:
         entry_submitter: LiveEntrySubmitter,
         protective_cycle: LiveProtectiveCycle,
         reconciliation_cycle: LiveProtectiveCycle | None = None,
+        position_protection_reconciliation: LiveProtectiveCycle | None = None,
         arming_policy: LiveArmingPolicy | None = None,
     ) -> None:
         self.execution_settings = execution_settings
@@ -85,6 +86,7 @@ class LiveProductionRunner:
         self.entry_submitter = entry_submitter
         self.protective_cycle = protective_cycle
         self.reconciliation_cycle = reconciliation_cycle
+        self.position_protection_reconciliation = position_protection_reconciliation
         self.arming_policy = arming_policy or LiveArmingPolicy()
 
     def run_cycle(self, *, trading_date: date) -> LiveProductionCycleResult:
@@ -112,6 +114,17 @@ class LiveProductionRunner:
                 return LiveProductionCycleResult(
                     decision=LiveCycleDecision.BLOCKED,
                     message="Live entry reconciliation is unresolved; new entries blocked.",
+                )
+
+        if self.position_protection_reconciliation is not None:
+            position_protection = self.position_protection_reconciliation(trading_date)
+            if int(getattr(position_protection, "blocked", 0) or 0) > 0:
+                return LiveProductionCycleResult(
+                    decision=LiveCycleDecision.BLOCKED,
+                    message=(
+                        "Live position/protective-stop reconciliation is unresolved; "
+                        "new entries blocked."
+                    ),
                 )
 
         protection = self.protective_cycle(trading_date)

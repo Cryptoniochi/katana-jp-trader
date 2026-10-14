@@ -89,5 +89,8 @@ class LiveProductionApplicationFactory:
             entry_submitter=submitter,
             protective_cycle=protective_cycle,
             reconciliation_cycle=reconciliation_cycle,
+            position_protection_reconciliation=getattr(
+                final_runtime, "position_protection_reconciliation", None
+            ),
         )
         return LiveProductionApplication(runner=runner)

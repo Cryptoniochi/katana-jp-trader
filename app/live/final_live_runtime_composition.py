@@ -40,6 +40,7 @@ from app.live.live_protective_exit_execution_flow import LiveProtectiveExitExecu
 from app.live.live_protective_exit_service import LiveProtectiveExitService
 from app.live.live_protective_stop_repository import SQLiteLiveProtectiveStopRepository
 from app.live.live_protective_stop_cycle import LiveProtectiveStopCycle
+from app.live.live_position_protection_reconciliation import LivePositionProtectionReconciliation
 from app.live.live_submitted_execution_lifecycle import LiveSubmittedExecutionLifecycle
 from app.live.locked_live_runtime_composition import (
     LockedLiveRuntimeBundle,
@@ -79,6 +80,7 @@ class FinalLiveRuntimeBundle:
     confirmed_entry_stop_recorder: LiveConfirmedEntryStopRecorder
     entry_reconciliation_registry: SQLiteLiveEntryReconciliationRegistry
     entry_reconciliation_cycle: LiveEntryReconciliationCycle
+    position_protection_reconciliation: LivePositionProtectionReconciliation
     protective_stop_cycle: LiveProtectiveStopCycle
     eod_liquidation_flow: LiveEodLiquidationFlow
 
@@ -200,6 +202,10 @@ class FinalLiveRuntimeFactory:
             stop_recorder=confirmed_entry_stop_recorder,
             journal=foundation.journal,
         )
+        position_protection_reconciliation = LivePositionProtectionReconciliation(
+            repository=protective_stop_repository,
+            exit_service=protective_exit_service,
+        )
         protective_stop_cycle = LiveProtectiveStopCycle(
             repository=protective_stop_repository,
             execution_flow=protective_exit_execution_flow,
@@ -231,6 +237,7 @@ class FinalLiveRuntimeFactory:
             confirmed_entry_stop_recorder=confirmed_entry_stop_recorder,
             entry_reconciliation_registry=entry_reconciliation_registry,
             entry_reconciliation_cycle=entry_reconciliation_cycle,
+            position_protection_reconciliation=position_protection_reconciliation,
             protective_stop_cycle=protective_stop_cycle,
             eod_liquidation_flow=eod_liquidation_flow,
         )
