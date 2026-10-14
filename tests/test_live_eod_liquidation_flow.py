@@ -26,9 +26,18 @@ class State:
 
 class Account:
     def __init__(self, positions):
-        self.positions=positions
+        self.positions=dict(positions)
     def refresh(self):
         return State(tuple(Position(c,q) for c,q in self.positions.items() if q))
+    def fill_sell(self, code, quantity):
+        current=self.positions.get(code,0)
+        if quantity > current:
+            raise AssertionError("test attempted to sell more than actual position")
+        remaining=current-quantity
+        if remaining:
+            self.positions[code]=remaining
+        else:
+            self.positions.pop(code,None)
 
 class Broker:
     def __init__(self, rows=()):
@@ -45,10 +54,15 @@ class Broker:
         return {"Result":0,"OrderId":oid}
 
 class Tracking:
-    def __init__(self):
+    def __init__(self, account):
+        self.account=account
         self.calls=[]
     def submit(self,**kwargs):
         self.calls.append(kwargs)
+        order=kwargs["order"]
+        # This fixture models a successful, immediately reflected SELL fill.
+        # The EOD flow must then perform a fresh account read to prove flatness.
+        self.account.fill_sell(order.code,order.quantity)
         return object()
 
 def build(tmp_path, account, broker):
@@ -65,7 +79,7 @@ def build(tmp_path, account, broker):
         ),
         exit_service=service,
     )
-    tracking=Tracking()
+    tracking=Tracking(account)
     execution=LiveProtectiveExitExecutionFlow(
         exit_service=service,
         tracking_flow=tracking,
