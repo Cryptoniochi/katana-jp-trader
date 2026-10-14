@@ -24,6 +24,8 @@ from app.live.live_account_runtime_composition import (
 from app.live.live_cancel_journal_repository import SQLiteLiveCancelJournalRepository
 from app.live.live_confirmed_entry_stop_recorder import LiveConfirmedEntryStopRecorder
 from app.live.live_eod_liquidation_flow import LiveEodLiquidationFlow
+from app.live.live_entry_reconciliation_registry import SQLiteLiveEntryReconciliationRegistry
+from app.live.live_entry_reconciliation_cycle import LiveEntryReconciliationCycle
 from app.live.live_execution_position_consistency import LiveExecutionPositionConsistencyService
 from app.live.live_execution_reconciliation import LiveExecutionReconciliationService
 from app.live.live_execution_tracking_flow import (
@@ -75,6 +77,8 @@ class FinalLiveRuntimeBundle:
     protective_exit_execution_flow: LiveProtectiveExitExecutionFlow
     protective_stop_repository: SQLiteLiveProtectiveStopRepository
     confirmed_entry_stop_recorder: LiveConfirmedEntryStopRecorder
+    entry_reconciliation_registry: SQLiteLiveEntryReconciliationRegistry
+    entry_reconciliation_cycle: LiveEntryReconciliationCycle
     protective_stop_cycle: LiveProtectiveStopCycle
     eod_liquidation_flow: LiveEodLiquidationFlow
 
@@ -189,6 +193,13 @@ class FinalLiveRuntimeFactory:
         confirmed_entry_stop_recorder = LiveConfirmedEntryStopRecorder(
             repository=protective_stop_repository,
         )
+        entry_reconciliation_registry = SQLiteLiveEntryReconciliationRegistry(db)
+        entry_reconciliation_cycle = LiveEntryReconciliationCycle(
+            registry=entry_reconciliation_registry,
+            tracking_flow=tracking_flow,
+            stop_recorder=confirmed_entry_stop_recorder,
+            journal=foundation.journal,
+        )
         protective_stop_cycle = LiveProtectiveStopCycle(
             repository=protective_stop_repository,
             execution_flow=protective_exit_execution_flow,
@@ -218,6 +229,8 @@ class FinalLiveRuntimeFactory:
             protective_exit_execution_flow=protective_exit_execution_flow,
             protective_stop_repository=protective_stop_repository,
             confirmed_entry_stop_recorder=confirmed_entry_stop_recorder,
+            entry_reconciliation_registry=entry_reconciliation_registry,
+            entry_reconciliation_cycle=entry_reconciliation_cycle,
             protective_stop_cycle=protective_stop_cycle,
             eod_liquidation_flow=eod_liquidation_flow,
         )

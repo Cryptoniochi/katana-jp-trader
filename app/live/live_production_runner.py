@@ -77,12 +77,14 @@ class LiveProductionRunner:
         entry_intent_provider: Callable[[], Sequence[LiveEntryIntent]],
         entry_submitter: LiveEntrySubmitter,
         protective_cycle: LiveProtectiveCycle,
+        reconciliation_cycle: LiveProtectiveCycle | None = None,
         arming_policy: LiveArmingPolicy | None = None,
     ) -> None:
         self.execution_settings = execution_settings
         self.entry_intent_provider = entry_intent_provider
         self.entry_submitter = entry_submitter
         self.protective_cycle = protective_cycle
+        self.reconciliation_cycle = reconciliation_cycle
         self.arming_policy = arming_policy or LiveArmingPolicy()
 
     def run_cycle(self, *, trading_date: date) -> LiveProductionCycleResult:
@@ -102,8 +104,22 @@ class LiveProductionRunner:
             trading_date=trading_date,
         )
 
-        # Existing real positions are protected before considering new risk.
-        self.protective_cycle(trading_date)
+        # Reconcile prior submissions first, then protect existing positions.
+        # Any unresolved/ambiguous Live state blocks new risk for this cycle.
+        if self.reconciliation_cycle is not None:
+            reconciliation = self.reconciliation_cycle(trading_date)
+            if int(getattr(reconciliation, "blocked", 0) or 0) > 0:
+                return LiveProductionCycleResult(
+                    decision=LiveCycleDecision.BLOCKED,
+                    message="Live entry reconciliation is unresolved; new entries blocked.",
+                )
+
+        protection = self.protective_cycle(trading_date)
+        if int(getattr(protection, "blocked", 0) or 0) > 0:
+            return LiveProductionCycleResult(
+                decision=LiveCycleDecision.BLOCKED,
+                message="Live protective-stop state is unresolved; new entries blocked.",
+            )
 
         intents = tuple(self.entry_intent_provider())
         if not intents:

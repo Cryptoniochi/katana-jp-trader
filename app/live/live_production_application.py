@@ -48,7 +48,7 @@ class LiveProductionApplicationFactory:
         execution_settings: ExecutionModeSettings,
         final_runtime: FinalLiveRuntimeBundle,
         entry_intent_provider: Callable[[], Sequence[LiveEntryIntent]],
-        protective_cycle: ProtectiveCycle,
+        protective_cycle: ProtectiveCycle | None = None,
     ) -> LiveProductionApplication:
         if execution_settings.mode is not TradingExecutionMode.LIVE:
             raise LiveProductionWiringError(
@@ -63,17 +63,31 @@ class LiveProductionApplicationFactory:
                 "A broker-independent Live entry intent provider is required."
             )
         if protective_cycle is None:
+            protective_cycle = final_runtime.protective_stop_cycle
+
+        # Production composition supplies both durable reconciliation objects.
+        # Minimal/test runtimes from the existing application seam may supply
+        # neither; preserve that compatibility without permitting half-wiring.
+        reconciliation_registry = getattr(
+            final_runtime, "entry_reconciliation_registry", None
+        )
+        reconciliation_cycle = getattr(
+            final_runtime, "entry_reconciliation_cycle", None
+        )
+        if (reconciliation_registry is None) != (reconciliation_cycle is None):
             raise LiveProductionWiringError(
-                "A Live protective cycle is required before entries can run."
+                "Live entry reconciliation registry and cycle must be wired together."
             )
 
         submitter = FinalLiveEntrySubmitter(
-            prepared_tracking_flow=final_runtime.prepared_tracking_flow
+            prepared_tracking_flow=final_runtime.prepared_tracking_flow,
+            reconciliation_registry=reconciliation_registry,
         )
         runner = LiveProductionRunner(
             execution_settings=execution_settings,
             entry_intent_provider=entry_intent_provider,
             entry_submitter=submitter,
             protective_cycle=protective_cycle,
+            reconciliation_cycle=reconciliation_cycle,
         )
         return LiveProductionApplication(runner=runner)

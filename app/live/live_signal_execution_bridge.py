@@ -98,11 +98,24 @@ class FinalLiveEntrySubmitter:
     prepared tracking flow.
     """
 
-    def __init__(self, *, prepared_tracking_flow: PreparedTrackingFlowLike) -> None:
+    def __init__(
+        self,
+        *,
+        prepared_tracking_flow: PreparedTrackingFlowLike,
+        reconciliation_registry=None,
+    ) -> None:
         self.prepared_tracking_flow = prepared_tracking_flow
+        self.reconciliation_registry = reconciliation_registry
 
     def __call__(self, intent: LiveEntryIntent, trading_date: date) -> object:
         order = self._to_trade_order(intent)
+        # Persist recovery identity before any path can reach broker transport.
+        if self.reconciliation_registry is not None:
+            self.reconciliation_registry.prepare(
+                execution_key=intent.execution_key,
+                trading_date=trading_date,
+                order=order,
+            )
         return self.prepared_tracking_flow.submit(
             execution_key=intent.execution_key,
             order=order,
