@@ -36,11 +36,18 @@ class LivePendingEntryExecution:
         )
 
 
+class LiveDailyEntryLimitError(RuntimeError):
+    """Raised before transport when the durable daily Live-entry cap is reached."""
+
+
 class SQLiteLiveEntryReconciliationRegistry:
     """Crash-safe queue prepared before an entry can reach Live submission."""
 
-    def __init__(self, database_path: Path) -> None:
+    def __init__(self, database_path: Path, *, max_entries_per_day: int = 20) -> None:
+        if isinstance(max_entries_per_day, bool) or max_entries_per_day <= 0:
+            raise ValueError("max_entries_per_day must be a positive integer")
         self.database_path=Path(database_path)
+        self.max_entries_per_day=int(max_entries_per_day)
         self.database_path.parent.mkdir(parents=True,exist_ok=True)
         with self._connect() as c:
             c.execute("""CREATE TABLE IF NOT EXISTS live_entry_reconciliation_registry(
@@ -60,9 +67,22 @@ class SQLiteLiveEntryReconciliationRegistry:
             raise ValueError("Live entry reconciliation registry accepts BUY MARKET only.")
         candidate=(trading_date.isoformat(),order.order_id,order.signal_id,order.code,int(order.quantity))
         with self._connect() as c:
-            c.execute("""INSERT OR IGNORE INTO live_entry_reconciliation_registry
-                (execution_key,trading_date,order_id,signal_id,code,quantity,state)
-                VALUES(?,?,?,?,?,?,?)""",(key,*candidate,LiveEntryReconciliationState.PENDING.value))
+            # BEGIN IMMEDIATE makes the "count then reserve" operation atomic
+            # even if two Live workers are accidentally started.
+            c.execute("BEGIN IMMEDIATE")
+            existing=c.execute("""SELECT trading_date,order_id,signal_id,code,quantity,state
+                FROM live_entry_reconciliation_registry WHERE execution_key=?""",(key,)).fetchone()
+            if existing is None:
+                count=int(c.execute("""SELECT COUNT(*) FROM live_entry_reconciliation_registry
+                    WHERE trading_date=?""",(trading_date.isoformat(),)).fetchone()[0])
+                if count >= self.max_entries_per_day:
+                    raise LiveDailyEntryLimitError(
+                        f"Daily Live entry limit reached: {count}/{self.max_entries_per_day} "
+                        f"for {trading_date.isoformat()}."
+                    )
+                c.execute("""INSERT INTO live_entry_reconciliation_registry
+                    (execution_key,trading_date,order_id,signal_id,code,quantity,state)
+                    VALUES(?,?,?,?,?,?,?)""",(key,*candidate,LiveEntryReconciliationState.PENDING.value))
             row=c.execute("""SELECT trading_date,order_id,signal_id,code,quantity,state
                 FROM live_entry_reconciliation_registry WHERE execution_key=?""",(key,)).fetchone()
         if row is None: raise RuntimeError("Live entry reconciliation row disappeared.")
@@ -70,6 +90,13 @@ class SQLiteLiveEntryReconciliationRegistry:
         if existing != candidate:
             raise RuntimeError("execution_key is already bound to a different Live entry.")
         return self.get_required(key)
+
+    def count_for_date(self, trading_date: date) -> int:
+        """Return durable entry reservations for one trading date."""
+        with self._connect() as c:
+            row=c.execute("""SELECT COUNT(*) FROM live_entry_reconciliation_registry
+                WHERE trading_date=?""",(trading_date.isoformat(),)).fetchone()
+        return int(row[0])
 
     def list_pending(self) -> tuple[LivePendingEntryExecution,...]:
         with self._connect() as c:

@@ -32,6 +32,8 @@ class LiveProtectiveStopRecord:
     stop_price: float
     stop_loss_rate: float
     state: LiveProtectiveStopState
+    exit_execution_key: str | None
+    exit_order_id: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -256,12 +258,51 @@ class SQLiteLiveProtectiveStopRepository:
             raise KeyError(key)
         return record
 
-    def mark_exit_pending(self, *, entry_execution_key: str) -> LiveProtectiveStopRecord:
-        return self._transition(
-            entry_execution_key=entry_execution_key,
-            from_states=(LiveProtectiveStopState.ACTIVE,),
-            to_state=LiveProtectiveStopState.EXIT_PENDING,
-        )
+    def mark_exit_pending(
+        self,
+        *,
+        entry_execution_key: str,
+        exit_execution_key: str | None = None,
+        exit_order_id: str | None = None,
+    ) -> LiveProtectiveStopRecord:
+        # Optional only for backward compatibility with pre-6C-3B-8 rows/tests.
+        # An identity-less EXIT_PENDING row is deliberately NOT considered
+        # protected by LiveProtectiveStopCycle while a real position remains.
+        execution_key=str(exit_execution_key or "").strip() or None
+        order_id=str(exit_order_id or "").strip() or None
+        if (execution_key is None) != (order_id is None):
+            raise ValueError(
+                "exit_execution_key and exit_order_id must be supplied together"
+            )
+        current=self.get_by_execution_key(entry_execution_key, required=True)
+        assert current is not None
+        if current.state is LiveProtectiveStopState.EXIT_PENDING:
+            if (
+                current.exit_execution_key != execution_key
+                or current.exit_order_id != order_id
+            ):
+                raise RuntimeError("EXIT_PENDING stop is bound to a different exit.")
+            return current
+        if current.state is not LiveProtectiveStopState.ACTIVE:
+            raise RuntimeError(
+                f"Invalid protective stop transition {current.state.value} -> exit_pending."
+            )
+        now=self._now()
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE live_protective_stops
+                   SET state=?, exit_execution_key=?, exit_order_id=?, updated_at=?
+                   WHERE entry_execution_key=? AND state=?""",
+                (
+                    LiveProtectiveStopState.EXIT_PENDING.value,
+                    execution_key,
+                    order_id,
+                    now.isoformat(),
+                    entry_execution_key,
+                    LiveProtectiveStopState.ACTIVE.value,
+                ),
+            )
+        return self.get_by_execution_key(entry_execution_key, required=True)
 
     def retire(self, *, entry_execution_key: str) -> LiveProtectiveStopRecord:
         return self._transition(
@@ -320,11 +361,27 @@ class SQLiteLiveProtectiveStopRepository:
                     stop_price REAL NOT NULL,
                     stop_loss_rate REAL NOT NULL,
                     state TEXT NOT NULL,
+                    exit_execution_key TEXT,
+                    exit_order_id TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(live_protective_stops)"
+                ).fetchall()
+            }
+            if "exit_execution_key" not in columns:
+                connection.execute(
+                    "ALTER TABLE live_protective_stops ADD COLUMN exit_execution_key TEXT"
+                )
+            if "exit_order_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE live_protective_stops ADD COLUMN exit_order_id TEXT"
+                )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_live_protective_stops_code_state
@@ -363,6 +420,14 @@ class SQLiteLiveProtectiveStopRepository:
             stop_price=float(row["stop_price"]),
             stop_loss_rate=float(row["stop_loss_rate"]),
             state=LiveProtectiveStopState(str(row["state"])),
+            exit_execution_key=(
+                str(row["exit_execution_key"]).strip()
+                if row["exit_execution_key"] is not None else None
+            ),
+            exit_order_id=(
+                str(row["exit_order_id"]).strip()
+                if row["exit_order_id"] is not None else None
+            ),
             created_at=datetime.fromisoformat(str(row["created_at"])),
             updated_at=datetime.fromisoformat(str(row["updated_at"])),
         )

@@ -26,6 +26,7 @@ from app.run_paper_trading import (
     create_runtime_notification_gateway,
     run as run_paper_trading,
 )
+from app.run_live_production import run_live_production
 from app.runtime.session_runner import (
     MarketSessionRunDecision,
     MarketSessionRunner,
@@ -171,7 +172,7 @@ def run(
     sleeper=None,
     market_clock=None,
     paper_trading_runner=run_paper_trading,
-    live_trading_runner=_unconfigured_live_trading_runner,
+    live_trading_runner=run_live_production,
     notification_gateway_factory: (
         RuntimeNotificationGatewayFactory
     ) = create_runtime_notification_gateway,
