@@ -162,12 +162,7 @@ def run(
             )
         )
 
-    return (
-        0
-        if result.failed_count == 0
-        and result.delivered_count > 0
-        else 1
-    )
+    return 0 if result.delivered_count > 0 else 1
 
 
 if __name__ == "__main__":

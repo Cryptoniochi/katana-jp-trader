@@ -118,3 +118,75 @@ def test_marker_prevents_duplicate_send(
 
     assert status.state is MorningPreflightScheduleState.COMPLETED
     assert commands == []
+
+
+def test_atomic_claim_prevents_parallel_duplicate_send(
+    tmp_path: Path,
+) -> None:
+    claim = (
+        tmp_path
+        / "markers"
+        / "2026-08-03.sending.lock"
+    )
+    claim.parent.mkdir(parents=True)
+    claim.write_text("claimed", encoding="utf-8")
+    commands = []
+
+    scheduler = MorningPreflightScheduler(
+        enabled=True,
+        status_path=tmp_path / "status.json",
+        marker_directory=tmp_path / "markers",
+        calendar=TokyoMarketCalendar.with_custom_holidays(
+            []
+        ),
+        now_provider=lambda: datetime(
+            2026,
+            8,
+            3,
+            0,
+            0,
+            tzinfo=timezone.utc,
+        ),
+        command_runner=lambda *args, **kwargs: (
+            commands.append((args, kwargs))
+        ),
+    )
+
+    status = scheduler.run_once()
+
+    assert status.state is MorningPreflightScheduleState.COMPLETED
+    assert commands == []
+    assert "another scheduler process" in status.message
+
+
+def test_failed_send_releases_atomic_claim(
+    tmp_path: Path,
+) -> None:
+    scheduler = MorningPreflightScheduler(
+        enabled=True,
+        status_path=tmp_path / "status.json",
+        marker_directory=tmp_path / "markers",
+        calendar=TokyoMarketCalendar.with_custom_holidays(
+            []
+        ),
+        now_provider=lambda: datetime(
+            2026,
+            8,
+            3,
+            0,
+            0,
+            tzinfo=timezone.utc,
+        ),
+        command_runner=lambda *args, **kwargs: (
+            SimpleNamespace(returncode=1)
+        ),
+    )
+
+    status = scheduler.run_once()
+
+    assert status.state is MorningPreflightScheduleState.FAILED
+    assert not (
+        tmp_path
+        / "markers"
+        / "2026-08-03.sending.lock"
+    ).exists()

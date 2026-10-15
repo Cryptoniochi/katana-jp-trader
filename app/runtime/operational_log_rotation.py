@@ -76,12 +76,24 @@ def rotate_log_file(
             )
             source.replace(destination)
 
-    target.replace(
-        target.with_name(
-            f"{target.name}.1"
-        )
+    first_backup = target.with_name(
+        f"{target.name}.1"
     )
-    target.touch()
+
+    try:
+        target.replace(first_backup)
+        target.touch()
+    except PermissionError:
+        # Windows may keep an actively redirected service log open
+        # (for example: ``>> katana_service.log 2>&1``), which prevents
+        # renaming the file.  Preserve the current contents in .1 and
+        # truncate the original file in place so the existing writer can
+        # continue using the same path/handle.
+        import shutil
+
+        shutil.copyfile(target, first_backup)
+        with target.open("r+b") as stream:
+            stream.truncate(0)
 
     return LogRotationResult(
         path=target,

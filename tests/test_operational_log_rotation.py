@@ -59,3 +59,71 @@ def test_operational_targets_are_supported(
     )
 
     assert len(results) == 3
+
+
+def test_locked_log_falls_back_to_copy_and_truncate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "katana_service.log"
+    path.write_bytes(b"x" * 20)
+
+    original_replace = Path.replace
+
+    def locked_replace(self, target):
+        if self == path:
+            raise PermissionError("simulated Windows file lock")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", locked_replace)
+
+    result = rotate_log_file(
+        path,
+        maximum_bytes=10,
+        backup_count=3,
+    )
+
+    assert result.rotated
+    assert result.original_size == 20
+    assert path.exists()
+    assert path.stat().st_size == 0
+    assert (
+        tmp_path / "katana_service.log.1"
+    ).read_bytes() == b"x" * 20
+
+
+def test_locked_log_fallback_preserves_backup_generations(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "katana_service.log"
+    path.write_bytes(b"current-current")
+    (tmp_path / "katana_service.log.1").write_bytes(b"previous-1")
+    (tmp_path / "katana_service.log.2").write_bytes(b"previous-2")
+
+    original_replace = Path.replace
+
+    def locked_replace(self, target):
+        if self == path:
+            raise PermissionError("simulated Windows file lock")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", locked_replace)
+
+    result = rotate_log_file(
+        path,
+        maximum_bytes=10,
+        backup_count=3,
+    )
+
+    assert result.rotated
+    assert path.stat().st_size == 0
+    assert (
+        tmp_path / "katana_service.log.1"
+    ).read_bytes() == b"current-current"
+    assert (
+        tmp_path / "katana_service.log.2"
+    ).read_bytes() == b"previous-1"
+    assert (
+        tmp_path / "katana_service.log.3"
+    ).read_bytes() == b"previous-2"

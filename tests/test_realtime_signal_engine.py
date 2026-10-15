@@ -382,3 +382,16 @@ def test_engine_rejects_empty_enabled_strategies() -> None:
         RealtimeSignalEngine(
             enabled_strategy_names=()
         )
+
+
+def test_default_registry_applies_conservative_orb_volume_filter() -> None:
+    """Production default ORB requires breakout volume confirmation."""
+
+    registry = RealtimeSignalEngine._default_registry(
+        ("orb",),
+        high_breakout_candidate_provider=None,
+    )
+    composite = registry.create("7203")
+    orb = composite._strategies[0]
+
+    assert orb.settings.breakout_volume_ratio == 0.8

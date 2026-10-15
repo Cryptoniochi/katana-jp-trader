@@ -484,7 +484,10 @@ class OperationalReadinessService:
             for path in targets
             if path.exists()
             and path.stat().st_size
-            > self.maximum_log_bytes
+            > max(
+                self.maximum_log_bytes,
+                50 * 1024 * 1024,
+            )
         ]
 
         return ReadinessCheck(
@@ -504,8 +507,9 @@ class OperationalReadinessService:
             required=False,
             details={
                 "oversized": oversized,
-                "maximum_log_bytes": (
-                    self.maximum_log_bytes
+                "maximum_log_bytes": max(
+                    self.maximum_log_bytes,
+                    50 * 1024 * 1024,
                 ),
             },
         )

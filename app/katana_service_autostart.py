@@ -244,6 +244,12 @@ def write_task_command(
         ")\r\n"
         f'if not exist "{log_path_value.parent}" '
         f'mkdir "{log_path_value.parent}"\r\n'
+        f'"{python_path}" -m app.run_operational_maintenance '
+        f'--project-directory "{resolved_project}"\r\n'
+        "if errorlevel 1 (\r\n"
+        "    echo ERROR: Operational log maintenance failed.\r\n"
+        "    exit /b 1\r\n"
+        ")\r\n"
         f'"{python_path}" -m app.run_katana_service '
         f'--database-path "{resolved_database}" '
         f'--dashboard-port {resolved_port} '

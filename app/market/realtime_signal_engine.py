@@ -479,7 +479,9 @@ class RealtimeSignalEngine:
             factories={
                 "orb": (
                     lambda _code: OrbSignalStrategy(
-                        settings=OrbSignalStrategySettings()
+                        settings=OrbSignalStrategySettings(
+                            breakout_volume_ratio=0.8
+                        )
                     )
                 ),
                 "pullback": (

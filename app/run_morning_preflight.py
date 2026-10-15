@@ -163,12 +163,12 @@ def run(
         f"{result.payload['ready_for_next_business_day']}"
     )
 
-    return (
-        0
-        if result.failed_count == 0
-        and result.delivered_count > 0
-        else 1
-    )
+    # Treat any successful delivery as a completed daily notification.
+    # Retrying the whole Morning Pre-Flight after a partial channel failure
+    # (for example, Discord succeeded but LINE failed) resends the already
+    # delivered channels every retry interval and creates duplicate alerts.
+    # Retry only when no configured channel received the notification.
+    return 0 if result.delivered_count > 0 else 1
 
 
 if __name__ == "__main__":

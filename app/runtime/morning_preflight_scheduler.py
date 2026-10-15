@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -122,6 +123,9 @@ class MorningPreflightScheduler:
         marker_path = self._marker_path(
             target_date
         )
+        claim_path = self._claim_path(
+            target_date
+        )
 
         if marker_path.exists():
             return self._publish(
@@ -135,9 +139,28 @@ class MorningPreflightScheduler:
                 ),
             )
 
+        # Claim the daily send atomically before launching the notification.
+        # This closes the race where two scheduler processes can both observe
+        # a missing .sent marker and send the same Discord message.
+        if not self._try_acquire_claim(
+            claim_path=claim_path,
+            now=now,
+        ):
+            return self._publish(
+                now=now,
+                state=MorningPreflightScheduleState.COMPLETED,
+                business_day=True,
+                next_action_at=None,
+                message=(
+                    "Morning Pre-Flight is already being "
+                    "handled by another scheduler process."
+                ),
+            )
+
         monotonic_now = self.monotonic_provider()
 
         if monotonic_now < self._retry_after_monotonic:
+            self._release_claim(claim_path)
             return self._publish(
                 now=now,
                 state=MorningPreflightScheduleState.RETRY_WAIT,
@@ -160,21 +183,26 @@ class MorningPreflightScheduler:
             ),
         )
 
-        completed = self.command_runner(
-            [
-                sys.executable,
-                "-m",
-                "app.run_morning_preflight",
-            ],
-            check=False,
-            cwd=Path.cwd(),
-            timeout=self.settings.command_timeout_seconds,
-        )
-        self.last_exit_code = int(
-            completed.returncode
-        )
+        try:
+            completed = self.command_runner(
+                [
+                    sys.executable,
+                    "-m",
+                    "app.run_morning_preflight",
+                ],
+                check=False,
+                cwd=Path.cwd(),
+                timeout=self.settings.command_timeout_seconds,
+            )
+            self.last_exit_code = int(
+                completed.returncode
+            )
+        except BaseException:
+            self._release_claim(claim_path)
+            raise
 
         if completed.returncode != 0:
+            self._release_claim(claim_path)
             self._retry_after_monotonic = (
                 self.monotonic_provider()
                 + self.settings.retry_interval_seconds
@@ -194,7 +222,7 @@ class MorningPreflightScheduler:
             parents=True,
             exist_ok=True,
         )
-        marker_path.write_text(
+        claim_path.write_text(
             json.dumps(
                 {
                     "target_date": target_date.isoformat(),
@@ -206,6 +234,7 @@ class MorningPreflightScheduler:
             ),
             encoding="utf-8",
         )
+        claim_path.replace(marker_path)
 
         return self._publish(
             now=now,
@@ -243,6 +272,54 @@ class MorningPreflightScheduler:
             self.marker_directory
             / f"{target_date.isoformat()}.sent.json"
         )
+
+
+    def _claim_path(
+        self,
+        target_date,
+    ) -> Path:
+        return (
+            self.marker_directory
+            / f"{target_date.isoformat()}.sending.lock"
+        )
+
+    @staticmethod
+    def _try_acquire_claim(
+        *,
+        claim_path: Path,
+        now: datetime,
+    ) -> bool:
+        claim_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        try:
+            descriptor = os.open(
+                claim_path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            )
+        except FileExistsError:
+            return False
+
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(now.isoformat())
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            try:
+                claim_path.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+        return True
+
+    @staticmethod
+    def _release_claim(claim_path: Path) -> None:
+        try:
+            claim_path.unlink()
+        except FileNotFoundError:
+            pass
 
     def _publish(
         self,

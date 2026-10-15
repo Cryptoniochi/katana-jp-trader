@@ -13,6 +13,15 @@ platform.
 > realtime market data. J-Quants is no longer required by the active
 > runtime. Live brokerage execution is not implemented.
 
+### 2026-10-15 ORB paper-trading adjustment
+
+- Paper-trading review identified weak realtime ORB entry quality as the first strategy-adjustment target.
+- Production realtime ORB now requires breakout-bar volume to be at least **0.8x** the average opening-range 5-minute-bar volume.
+- Pullback Breakout, High Breakout, stop-loss, take-profit, and Risk Gate settings are unchanged.
+- A dedicated regression test locks the production default at `breakout_volume_ratio=0.8`.
+- Focused regression after the change: **57 passed**.
+- Repository-wide validation must be run with the project-standard **Python 3.14** environment before Git commit/push.
+
 ------------------------------------------------------------------------
 
 ## Current capabilities

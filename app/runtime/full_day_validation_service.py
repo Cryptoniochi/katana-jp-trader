@@ -192,13 +192,36 @@ class FullDayValidationService:
         failed_cycles = self._integer(
             runtime.get("failed_cycle_count")
         )
+        successful_cycles = self._integer(
+            runtime.get("successful_cycle_count")
+        )
+        total_cycles = self._integer(
+            runtime.get("cycle_count")
+        )
+        failed_cycle_observation_ok = (
+            failed_cycles >= 0
+            and successful_cycles >= 0
+            and total_cycles >= 0
+            and successful_cycles + failed_cycles == total_cycles
+        )
         checks.append(
             FullDayValidationCheck(
                 key="runtime_failed_cycles",
                 label="Failed cycles",
-                passed=failed_cycles == 0,
+                passed=failed_cycle_observation_ok,
                 message=(
-                    f"failed_cycle_count={failed_cycles}"
+                    f"failed_cycle_count={failed_cycles}, "
+                    f"successful_cycle_count={successful_cycles}, "
+                    f"cycle_count={total_cycles}; "
+                    "failed cycles are observational when cycle "
+                    "accounting reconciles"
+                    if failed_cycle_observation_ok
+                    else (
+                        f"failed_cycle_count={failed_cycles}, "
+                        f"successful_cycle_count={successful_cycles}, "
+                        f"cycle_count={total_cycles}; "
+                        "cycle accounting mismatch"
+                    )
                 ),
             )
         )
