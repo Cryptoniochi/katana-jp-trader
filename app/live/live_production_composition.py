@@ -83,6 +83,12 @@ class ConcreteLiveProductionApplication:
         self.sleeper=sleeper or time.sleep
 
     def run(self)->int:
+        market_open=datetime.strptime("09:00","%H:%M").time()
+        lunch_start=datetime.strptime("11:30","%H:%M").time()
+        lunch_end=datetime.strptime("12:30","%H:%M").time()
+        market_close=datetime.strptime("15:30","%H:%M").time()
+        stop_at=datetime.strptime("15:35","%H:%M").time()
+
         self.session_service.start()
         try:
             self.market_service.start(self.registration_codes)
@@ -91,23 +97,50 @@ class ConcreteLiveProductionApplication:
                 if now.tzinfo is None:
                     raise ValueError("now_provider must return timezone-aware datetime.")
                 local=now.astimezone(TOKYO)
-                if local.date()!=self.trading_date or local.time().replace(tzinfo=None)>=datetime.strptime("15:30","%H:%M").time():
+                local_time=local.time().replace(tzinfo=None)
+                if local.date()!=self.trading_date or local_time>=market_close:
                     break
-                # Lunch: keep heartbeat alive, but do not generate/submit entries.
+
+                # The scheduled service starts at 08:45. Keep market data and
+                # heartbeat alive, but never evaluate or submit entries before
+                # the Tokyo cash session opens at 09:00.
                 self.session_service.record_heartbeat()
-                if datetime.strptime("11:30","%H:%M").time() <= local.time().replace(tzinfo=None) < datetime.strptime("12:30","%H:%M").time():
+                if local_time < market_open:
                     self.sleeper(self.cycle_interval_seconds)
                     continue
+
+                # Lunch: keep heartbeat alive, but do not generate/submit entries.
+                if lunch_start <= local_time < lunch_end:
+                    self.sleeper(self.cycle_interval_seconds)
+                    continue
+
                 result=self.application.run_cycle(trading_date=self.trading_date)
                 self.session_service.record_cycle(
                     successful=(getattr(result.decision,"value","")!="blocked")
                 )
                 self.sleeper(self.cycle_interval_seconds)
 
-            # EOD is authoritative and fail-closed; it performs its own fresh reads.
-            result=self.eod_liquidation_flow.submit_all(trading_date=self.trading_date)
-            decision=getattr(getattr(result,"decision",None),"value","")
-            return 0 if decision in {"complete","completed","no_action"} else 1
+            # From 15:30 through 15:35, repeatedly perform authoritative EOD
+            # verification.  A still-working SELL is left untouched by the EOD
+            # conflict resolver; retries therefore poll for flatness without
+            # cancel/replace churn or duplicate submission.
+            while True:
+                result=self.eod_liquidation_flow.submit_all(
+                    trading_date=self.trading_date
+                )
+                decision=getattr(getattr(result,"decision",None),"value","")
+                if decision=="complete":
+                    return 0
+
+                now=self.now_provider()
+                if now.tzinfo is None:
+                    raise ValueError("now_provider must return timezone-aware datetime.")
+                local=now.astimezone(TOKYO)
+                local_time=local.time().replace(tzinfo=None)
+                if local.date()!=self.trading_date or local_time>=stop_at:
+                    return 1
+                self.session_service.record_heartbeat()
+                self.sleeper(self.cycle_interval_seconds)
         finally:
             try:
                 self.market_service.stop()
