@@ -1,11 +1,12 @@
-"""日足データから新高値ブレイク候補を抽出・保存する。"""
+"""High Breakout候補の抽出・保存を統括するサービス。"""
 
 from __future__ import annotations
 
 import csv
 from collections import defaultdict
 from collections.abc import Iterable
-from datetime import datetime
+from dataclasses import replace
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -18,12 +19,8 @@ from app.market.bar_repository import MarketBarRepository
 from app.strategy.high_breakout_candidate_repository import (
     HighBreakoutCandidateRepository,
 )
-from app.strategy.high_breakout_models import (
-    HighBreakoutCandidate,
-)
-from app.strategy.high_breakout_screener import (
-    HighBreakoutScreener,
-)
+from app.strategy.high_breakout_models import HighBreakoutCandidate
+from app.strategy.high_breakout_screener import HighBreakoutScreener
 
 
 JST = ZoneInfo("Asia/Tokyo")
@@ -31,7 +28,7 @@ DAILY_INTERVAL_MINUTES = 1440
 
 
 class HighBreakoutScreeningInputError(ValueError):
-    """新高値スクリーニング入力が不正であることを表す。"""
+    """High Breakoutスクリーニング入力が不正であることを表す。"""
 
 
 class HighBreakoutScreeningService:
@@ -51,6 +48,7 @@ class HighBreakoutScreeningService:
         *,
         market_bar_repository: MarketBarRepository,
         codes: Iterable[str],
+        target_trading_date: date | None = None,
     ) -> tuple[HighBreakoutCandidate, ...]:
         """SQLiteの1440分足を読み込み候補を保存する。"""
 
@@ -70,9 +68,7 @@ class HighBreakoutScreeningService:
                 HistoricalBar(
                     code=price.code,
                     timeframe=MarketTimeframe.DAY_1,
-                    opened_at=self._normalize_datetime(
-                        price.datetime
-                    ),
+                    opened_at=self._normalize_datetime(price.datetime),
                     open_price=price.open,
                     high_price=price.high,
                     low_price=price.low,
@@ -90,12 +86,15 @@ class HighBreakoutScreeningService:
             )
 
         return self._screen_and_save(
-            series_collection
+            series_collection,
+            target_trading_date=target_trading_date,
         )
 
     def run_from_csv(
         self,
         csv_path: Path,
+        *,
+        target_trading_date: date | None = None,
     ) -> tuple[HighBreakoutCandidate, ...]:
         """CSVの日足データを読み込み候補を保存する。"""
 
@@ -103,7 +102,7 @@ class HighBreakoutScreeningService:
 
         if not path.exists():
             raise HighBreakoutScreeningInputError(
-                "CSVファイルが存在しません。 "
+                "CSVファイルが存在しません。"
                 f"path={path}"
             )
 
@@ -134,22 +133,15 @@ class HighBreakoutScreeningService:
 
             if missing:
                 raise HighBreakoutScreeningInputError(
-                    "CSV必須列が不足しています。 "
+                    "CSV必須列が不足しています。"
                     f"columns={','.join(sorted(missing))}"
                 )
 
-            for row_number, row in enumerate(
-                reader,
-                start=2,
-            ):
+            for row_number, row in enumerate(reader, start=2):
                 try:
-                    code = self._normalize_code(
-                        row["code"]
-                    )
+                    code = self._normalize_code(row["code"])
                     opened_at = self._normalize_datetime(
-                        datetime.fromisoformat(
-                            row["traded_at"]
-                        )
+                        datetime.fromisoformat(row["traded_at"])
                     )
                     bar = HistoricalBar(
                         code=code,
@@ -167,7 +159,7 @@ class HighBreakoutScreeningService:
                     ValueError,
                 ) as error:
                     raise HighBreakoutScreeningInputError(
-                        "CSV行を日足へ変換できません。 "
+                        "CSV行を日足へ変換できません。"
                         f"line={row_number}"
                     ) from error
 
@@ -188,27 +180,32 @@ class HighBreakoutScreeningService:
         )
 
         return self._screen_and_save(
-            series_collection
+            series_collection,
+            target_trading_date=target_trading_date,
         )
 
     def _screen_and_save(
         self,
-        series_collection: Iterable[
-            HistoricalBarSeries
-        ],
+        series_collection: Iterable[HistoricalBarSeries],
+        *,
+        target_trading_date: date | None = None,
     ) -> tuple[HighBreakoutCandidate, ...]:
-        candidates = self.screener.screen_many(
-            series_collection
-        )
-        self.candidate_repository.save_all(
-            candidates
-        )
+        candidates = self.screener.screen_many(series_collection)
+
+        if target_trading_date is not None:
+            candidates = tuple(
+                replace(
+                    candidate,
+                    trading_date=target_trading_date,
+                )
+                for candidate in candidates
+            )
+
+        self.candidate_repository.save_all(candidates)
         return candidates
 
     @staticmethod
-    def _normalize_code(
-        code: str,
-    ) -> str:
+    def _normalize_code(code: str) -> str:
         normalized = code.strip()
 
         if not normalized:
@@ -229,9 +226,7 @@ class HighBreakoutScreeningService:
         return normalized
 
     @staticmethod
-    def _normalize_datetime(
-        value: datetime,
-    ) -> datetime:
+    def _normalize_datetime(value: datetime) -> datetime:
         if value.tzinfo is None:
             return value.replace(tzinfo=JST)
 

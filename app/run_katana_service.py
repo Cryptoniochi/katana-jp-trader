@@ -47,6 +47,7 @@ from app.runtime.katana_service_manager import (
     build_daily_report_scheduler_command,
     build_dynamic_watchlist_scheduler_command,
     build_universe_daily_scheduler_command,
+    build_high_breakout_scheduler_command,
     build_morning_preflight_scheduler_command,
 )
 from app.runtime.katana_service_models import (
@@ -110,6 +111,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "営業日15:36の候補ユニバース日足自動収集を"
+            "有効化します。"
+        ),
+    )
+    parser.add_argument(
+        "--enable-high-breakout-schedule",
+        action="store_true",
+        help=(
+            "営業日15:38のHigh Breakout候補生成を"
             "有効化します。"
         ),
     )
@@ -406,6 +415,20 @@ def run(
                 database_path=parsed.database_path,
                 enabled=(
                     parsed.enable_universe_daily_schedule
+                ),
+            ),
+            enabled=True,
+            restart_on_failure=True,
+            restart_delay_seconds=30.0,
+            maximum_restarts=20,
+        ),
+        ManagedProcessDefinition(
+            name=ManagedComponentName.HIGH_BREAKOUT_SCHEDULER,
+            command=build_high_breakout_scheduler_command(
+                database_path=parsed.database_path,
+                watchlist_path=parsed.watchlist_path,
+                enabled=(
+                    parsed.enable_high_breakout_schedule
                 ),
             ),
             enabled=True,

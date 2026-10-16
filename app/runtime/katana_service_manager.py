@@ -936,6 +936,30 @@ def build_dynamic_watchlist_scheduler_command(
 
     return tuple(command)
 
+def build_high_breakout_scheduler_command(
+    *,
+    database_path: Path,
+    watchlist_path: Path,
+    enabled: bool,
+) -> tuple[str, ...]:
+    """High Breakout候補生成スケジューラ起動コマンド。"""
+
+    command = [
+        sys.executable,
+        "-m",
+        "app.run_high_breakout_scheduler",
+        "--database-path",
+        str(database_path),
+        "--watchlist-path",
+        str(watchlist_path),
+    ]
+
+    if enabled:
+        command.append("--enable")
+
+    return tuple(command)
+
+
 def build_universe_daily_scheduler_command(
     *,
     database_path: Path,

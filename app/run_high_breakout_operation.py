@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from app.run_build_daily_bars import run as run_build_daily_bars
@@ -30,8 +31,6 @@ class HighBreakoutOperationResult:
 
     @property
     def successful(self) -> bool:
-        """全処理が正常終了したか返す。"""
-
         return (
             self.daily_bar_exit_code == 0
             and self.screening_exit_code == 0
@@ -81,6 +80,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=100_000_000.0,
     )
     parser.add_argument(
+        "--target-trading-date",
+        type=date.fromisoformat,
+        default=None,
+    )
+    parser.add_argument(
         "--start-paper-trading",
         action="store_true",
     )
@@ -95,44 +99,27 @@ def build_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run(
-    arguments: list[str] | None = None,
-) -> int:
+def run(arguments: list[str] | None = None) -> int:
     parsed = build_argument_parser().parse_args(arguments)
 
     result = execute_operation(
         database_path=parsed.database_path,
         watchlist_path=parsed.watchlist_path,
         output_directory=parsed.output_directory,
-        source_interval_minutes=(
-            parsed.source_interval_minutes
-        ),
+        source_interval_minutes=parsed.source_interval_minutes,
         codes=tuple(parsed.code),
-        minimum_volume_ratio=(
-            parsed.minimum_volume_ratio
-        ),
+        minimum_volume_ratio=parsed.minimum_volume_ratio,
         minimum_turnover=parsed.minimum_turnover,
+        target_trading_date=parsed.target_trading_date,
         start_paper_trading=parsed.start_paper_trading,
-        paper_trading_dry_run=(
-            parsed.paper_trading_dry_run
-        ),
+        paper_trading_dry_run=parsed.paper_trading_dry_run,
     )
 
     print("High Breakout operation completed.")
-    print(
-        "daily_bar_exit_code="
-        f"{result.daily_bar_exit_code}"
-    )
-    print(
-        "screening_exit_code="
-        f"{result.screening_exit_code}"
-    )
-    print(
-        f"daily_bar_count={result.daily_bar_count}"
-    )
-    print(
-        f"candidate_count={result.candidate_count}"
-    )
+    print(f"daily_bar_exit_code={result.daily_bar_exit_code}")
+    print(f"screening_exit_code={result.screening_exit_code}")
+    print(f"daily_bar_count={result.daily_bar_count}")
+    print(f"candidate_count={result.candidate_count}")
     print(
         "paper_trading_started="
         f"{result.paper_trading_started}"
@@ -150,6 +137,7 @@ def execute_operation(
     codes: tuple[str, ...],
     minimum_volume_ratio: float,
     minimum_turnover: float,
+    target_trading_date: date | None = None,
     start_paper_trading: bool,
     paper_trading_dry_run: bool,
 ) -> HighBreakoutOperationResult:
@@ -170,12 +158,7 @@ def execute_operation(
     ]
 
     for code in codes:
-        build_arguments.extend(
-            [
-                "--code",
-                code,
-            ]
-        )
+        build_arguments.extend(["--code", code])
 
     daily_bar_exit_code = run_build_daily_bars(
         build_arguments
@@ -194,18 +177,19 @@ def execute_operation(
         str(minimum_turnover),
     ]
 
-    for code in codes:
+    if target_trading_date is not None:
         screening_arguments.extend(
             [
-                "--code",
-                code,
+                "--target-trading-date",
+                target_trading_date.isoformat(),
             ]
         )
 
-    screening_exit_code = (
-        run_high_breakout_screening(
-            screening_arguments
-        )
+    for code in codes:
+        screening_arguments.extend(["--code", code])
+
+    screening_exit_code = run_high_breakout_screening(
+        screening_arguments
     )
 
     daily_bar_count = _count_rows(
@@ -217,14 +201,26 @@ def execute_operation(
         """,
         (DAILY_INTERVAL_MINUTES,),
     )
-    candidate_count = _count_rows(
-        database_path,
-        """
-        SELECT COUNT(*)
-        FROM high_breakout_candidates
-        """,
-        (),
-    )
+
+    if target_trading_date is None:
+        candidate_count = _count_rows(
+            database_path,
+            """
+            SELECT COUNT(*)
+            FROM high_breakout_candidates
+            """,
+            (),
+        )
+    else:
+        candidate_count = _count_rows(
+            database_path,
+            """
+            SELECT COUNT(*)
+            FROM high_breakout_candidates
+            WHERE trading_date = ?
+            """,
+            (target_trading_date.isoformat(),),
+        )
 
     paper_trading_started = False
 
@@ -237,14 +233,8 @@ def execute_operation(
             "high-breakout",
         ]
 
-        if codes:
-            for code in codes:
-                command.extend(
-                    [
-                        "--code",
-                        code,
-                    ]
-                )
+        for code in codes:
+            command.extend(["--code", code])
 
         if paper_trading_dry_run:
             print(
@@ -257,10 +247,7 @@ def execute_operation(
                 "Paper Tradingは起動しません。"
             )
         else:
-            subprocess.Popen(
-                command,
-                cwd=Path.cwd(),
-            )
+            subprocess.Popen(command)
             paper_trading_started = True
 
     return HighBreakoutOperationResult(
@@ -277,14 +264,7 @@ def _count_rows(
     sql: str,
     parameters: tuple[object, ...],
 ) -> int:
-    """SQLiteの件数を返す。"""
-
-    if not database_path.exists():
-        return 0
-
-    with sqlite3.connect(
-        database_path
-    ) as connection:
+    with sqlite3.connect(database_path) as connection:
         row = connection.execute(
             sql,
             parameters,

@@ -3,24 +3,17 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date
 from pathlib import Path
 
 from app.database import initialize_database
-from app.market.bar_repository import (
-    MarketBarRepository,
-)
+from app.market.bar_repository import MarketBarRepository
 from app.strategy.high_breakout_candidate_repository import (
     HighBreakoutCandidateRepository,
 )
-from app.strategy.high_breakout_models import (
-    HighBreakoutScreenerSettings,
-)
-from app.strategy.high_breakout_reporter import (
-    HighBreakoutReporter,
-)
-from app.strategy.high_breakout_screener import (
-    HighBreakoutScreener,
-)
+from app.strategy.high_breakout_models import HighBreakoutScreenerSettings
+from app.strategy.high_breakout_reporter import HighBreakoutReporter
+from app.strategy.high_breakout_screener import HighBreakoutScreener
 from app.strategy.high_breakout_screening_service import (
     HighBreakoutScreeningService,
 )
@@ -78,44 +71,42 @@ def build_argument_parser() -> argparse.ArgumentParser:
         type=float,
         default=20_000.0,
     )
+    parser.add_argument(
+        "--target-trading-date",
+        type=date.fromisoformat,
+        default=None,
+        help=(
+            "候補を有効化する取引日 YYYY-MM-DD。"
+            "未指定時はScreenerが判定した日付をそのまま使用します。"
+        ),
+    )
     return parser
 
 
-def run(
-    arguments: list[str] | None = None,
-) -> int:
-    parsed = build_argument_parser().parse_args(
-        arguments
-    )
+def run(arguments: list[str] | None = None) -> int:
+    parsed = build_argument_parser().parse_args(arguments)
 
-    initialize_database(
-        parsed.database_path
-    )
+    initialize_database(parsed.database_path)
 
     screener = HighBreakoutScreener(
         settings=HighBreakoutScreenerSettings(
-            minimum_volume_ratio=(
-                parsed.minimum_volume_ratio
-            ),
-            minimum_turnover=(
-                parsed.minimum_turnover
-            ),
+            minimum_volume_ratio=parsed.minimum_volume_ratio,
+            minimum_turnover=parsed.minimum_turnover,
             minimum_price=parsed.minimum_price,
             maximum_price=parsed.maximum_price,
         )
     )
     service = HighBreakoutScreeningService(
         screener=screener,
-        candidate_repository=(
-            HighBreakoutCandidateRepository(
-                parsed.database_path
-            )
+        candidate_repository=HighBreakoutCandidateRepository(
+            parsed.database_path
         ),
     )
 
     if parsed.csv_path is not None:
         candidates = service.run_from_csv(
-            parsed.csv_path
+            parsed.csv_path,
+            target_trading_date=parsed.target_trading_date,
         )
     else:
         codes = _resolve_codes(
@@ -127,6 +118,7 @@ def run(
                 parsed.database_path
             ),
             codes=codes,
+            target_trading_date=parsed.target_trading_date,
         )
 
     paths = HighBreakoutReporter(
@@ -135,7 +127,11 @@ def run(
 
     print("High Breakout screening completed.")
     print(f"Candidates: {len(candidates)}")
-
+    if parsed.target_trading_date is not None:
+        print(
+            "Target trading date: "
+            f"{parsed.target_trading_date.isoformat()}"
+        )
     for path in paths:
         print(path)
 
@@ -148,16 +144,15 @@ def _resolve_codes(
     watchlist_path: Path,
 ) -> tuple[str, ...]:
     if direct_codes:
-        codes = direct_codes
+        values = direct_codes
     else:
         if not watchlist_path.exists():
             raise ValueError(
-                "監視銘柄が指定されておらず、"
-                "Watchlistも存在しません。 "
+                "Watchlistが存在しません。"
                 f"path={watchlist_path}"
             )
 
-        codes = tuple(
+        values = tuple(
             line.strip()
             for line in watchlist_path.read_text(
                 encoding="utf-8"
@@ -170,15 +165,15 @@ def _resolve_codes(
 
     normalized = tuple(
         dict.fromkeys(
-            code.strip()
-            for code in codes
-            if code.strip()
+            value.strip()
+            for value in values
+            if value.strip()
         )
     )
 
     if not normalized:
         raise ValueError(
-            "監視銘柄を1件以上指定してください。"
+            "銘柄コードを1件以上指定してください。"
         )
 
     return normalized

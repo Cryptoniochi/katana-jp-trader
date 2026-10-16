@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
 from app.market.bar_repository import MarketBarRepository
@@ -27,7 +27,7 @@ class DailyBarBuildResult:
     def __post_init__(self) -> None:
         for name, value in {
             "銘柄数": self.code_count,
-            "元時間足数": self.source_bar_count,
+            "分足数": self.source_bar_count,
             "日足数": self.daily_bar_count,
             "保存数": self.saved_bar_count,
         }.items():
@@ -49,7 +49,7 @@ class IntradayDailyBarBuilder:
     ) -> None:
         if source_interval_minutes <= 0:
             raise ValueError(
-                "元時間足の間隔は0より大きい必要があります。"
+                "分足の間隔は0より大きい必要があります。"
             )
 
         normalized_source = data_source.strip()
@@ -61,7 +61,7 @@ class IntradayDailyBarBuilder:
 
         if source_interval_minutes == DAILY_INTERVAL_MINUTES:
             raise ValueError(
-                "元時間足に日足を指定できません。"
+                "分足に日足を指定できません。"
             )
 
         self.repository = repository
@@ -166,10 +166,13 @@ class IntradayDailyBarBuilder:
             daily.append(
                 StockPrice(
                     code=code,
+                    # 日足の timestamp は「取引日」を表すキーとして扱う。
+                    # JST 00:00 をUTC変換すると前日15:00になるため、
+                    # 取引日そのものを維持した UTC 00:00 で保存する。
                     datetime=datetime.combine(
                         trading_date,
                         time.min,
-                        tzinfo=JST,
+                        tzinfo=timezone.utc,
                     ),
                     open=ordered[0].open,
                     high=max(

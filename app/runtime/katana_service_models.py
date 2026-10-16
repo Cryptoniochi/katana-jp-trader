@@ -18,6 +18,7 @@ class ManagedComponentName(StrEnum):
     DYNAMIC_WATCHLIST_SCHEDULER = "dynamic_watchlist_scheduler"
     UNIVERSE_DAILY_SCHEDULER = "universe_daily_scheduler"
     MORNING_PREFLIGHT_SCHEDULER = "morning_preflight_scheduler"
+    HIGH_BREAKOUT_SCHEDULER = "high_breakout_scheduler"
 
 
 class ManagedComponentState(StrEnum):
