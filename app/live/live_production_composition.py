@@ -157,6 +157,8 @@ class ConcreteLiveProductionFactory:
     @staticmethod
     def create(*,production_settings:PaperTradingProductionSettings,
                execution_settings,trading_date,environment,
+               production_activation_enabled:bool=False,
+               runtime_armed:bool=False,
                now_provider=None,sleeper=None):
         now=now_provider or (lambda: datetime.now(timezone.utc))
         db=Path(production_settings.database_path)
@@ -270,7 +272,8 @@ class ConcreteLiveProductionFactory:
             live_equity_peak_path=production_settings.live_read_only_report_path.with_name("live_equity_peak.json"),
             risk_manager=risk,safety_snapshot_provider=safety,
             kill_switch_snapshot_provider=kill,market_price_provider=prices.price,
-            activation_enabled=True,runtime_armed=True,now_provider=now,
+            activation_enabled=production_activation_enabled,
+            runtime_armed=runtime_armed,now_provider=now,
         )
 
         # Refresh real account before PUSH registration so held symbols remain
