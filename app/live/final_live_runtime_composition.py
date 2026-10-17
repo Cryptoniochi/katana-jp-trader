@@ -214,6 +214,7 @@ class FinalLiveRuntimeFactory:
             exit_service=protective_exit_service,
             conflict_resolver=conflict_resolver,
             execution_flow=protective_exit_execution_flow,
+            ownership_repository=protective_stop_repository,
         )
 
         return FinalLiveRuntimeBundle(

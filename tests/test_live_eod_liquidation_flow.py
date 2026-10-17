@@ -53,6 +53,24 @@ class Broker:
                 row["LeavesQty"]=0
         return {"Result":0,"OrderId":oid}
 
+@dataclass(frozen=True)
+class OwnershipRecord:
+    code: str
+    quantity: int
+
+
+class Ownership:
+    def __init__(self, positions):
+        self.positions = dict(positions)
+
+    def list_current(self):
+        return tuple(
+            OwnershipRecord(code, quantity)
+            for code, quantity in self.positions.items()
+            if quantity
+        )
+
+
 class Tracking:
     def __init__(self, account):
         self.account=account
@@ -66,6 +84,7 @@ class Tracking:
         return object()
 
 def build(tmp_path, account, broker):
+    ownership=Ownership(account.positions)
     service=LiveProtectiveExitService(
         account_state_provider=account,
         market_price_provider=lambda code:190,
@@ -89,6 +108,7 @@ def build(tmp_path, account, broker):
         exit_service=service,
         conflict_resolver=resolver,
         execution_flow=execution,
+        ownership_repository=ownership,
     ),tracking
 
 def test_eod_no_conflict_uses_actual_position_quantity(tmp_path):
@@ -153,3 +173,4 @@ def test_eod_mixed_buy_and_sell_conflicts_fail_closed_without_cancellation(tmp_p
     assert result.decision is LiveEodExecutionDecision.BLOCKED
     assert broker.cancel_calls==[]
     assert tracking.calls==[]
+
