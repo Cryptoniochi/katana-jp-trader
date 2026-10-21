@@ -1,664 +1,202 @@
 # Project KATANA
 
-AI-assisted Japanese equity research, backtesting, paper-trading,
-risk-control, operations, monitoring, and multi-strategy development
-platform.
+Automated Japanese equity trading platform for market-data collection, strategy execution, risk control, Paper Trading, monitoring, reporting, and fail-closed Live Trading.
 
-> **Current status:** Sprint122 / Version 1.0 RC+ full-market universe,
-> reconciled reporting, history-maturity-aware Dynamic Watchlist, and
-> verified cold-start recovery. The 2026-09-24 recovery baseline is
-> committed through `bc18e0e`; the repository-wide suite passes with
-> 2,465 tests and two dependency deprecation warnings.
-> The production paper-trading runtime uses the kabuステーションAPI for
-> realtime market data. J-Quants is no longer required by the active
-> runtime. Live brokerage execution is not implemented.
+## Current Status ? 2026-10-21
 
-### 2026-10-15 ORB paper-trading adjustment
+- Git baseline: `24c47aa` ? `Protect unmanaged live positions from EOD liquidation`
+- Repository tests: **3,513 passed, 2 warnings**
+- Current mode: **Paper Trading**
+- Trading capital: **JPY 1,000,000**
+- Market universe: approximately **3,700** domestic common stocks
+- Realtime watchlist: maximum **50** symbols
+- Market data: kabu Station REST / WebSocket and 5-minute bars
+- J-Quants is not required by the active runtime
+- Live Trading implementation and brokerage commissioning are complete
+- **Live production activation remains OFF**
 
-- Paper-trading review identified weak realtime ORB entry quality as the first strategy-adjustment target.
-- Production realtime ORB now requires breakout-bar volume to be at least **0.8x** the average opening-range 5-minute-bar volume.
-- Pullback Breakout, High Breakout, stop-loss, take-profit, and Risk Gate settings are unchanged.
-- A dedicated regression test locks the production default at `breakout_volume_ratio=0.8`.
-- Focused regression after the change: **57 passed**.
-- Repository-wide validation must be run with the project-standard **Python 3.14** environment before Git commit/push.
+The current priority is strategy validation. Live Trading will remain disabled until Paper Trading performance is satisfactory.
 
-------------------------------------------------------------------------
+## Strategies
 
-## Current capabilities
+- Opening Range Breakout v2 (ORB)
+- Pullback Breakout
+- High Breakout
 
-### Market data and persistence
+Current ORB production filter:
 
--   kabuステーション REST and WebSocket integration
--   Realtime market monitoring
--   Five-minute bar persistence in SQLite
--   Intraday-to-daily bar aggregation
--   Tokyo-market calendar and market-session gating
--   High Breakout daily-candidate screening and persistence
--   Full-market universe management for 3,700 active domestic common
-    stocks (current imported master)
--   Universe primary screening from approximately 4,000 symbols to a
-    maximum of 300 candidates
--   Dynamic Watchlist secondary ranking from a maximum of 300 candidates
-    to a maximum of 50 symbols
--   Production realtime watchlist limited to 50 symbols
+```text
+breakout-bar volume >= 0.8 x average opening-range bar volume
+```
 
-### Full-market universe and Dynamic Watchlist
+Protective stop-loss: **1%**
 
-``` text
-3,700 active domestic common stocks (2026-09-24 imported master)
-    |
-    v
+## Recent Paper Trading Performance
+
+| Date | Trades | W-L-Flat | Net P/L | Profit Factor |
+| --- | ---: | ---: | ---: | ---: |
+| 2026-10-19 | 9 | 4-3-2 | +10,700 JPY | 4.45 |
+| 2026-10-20 | 8 | 4-4-0 | +5,450 JPY | 2.14 |
+| 2026-10-21 | 8 | 1-7-0 | -5,950 JPY | 0.14 |
+| **Total** | **25** | **9-14-2** | **+10,200 JPY** | **1.69** |
+
+The current configuration will remain unchanged through the observation week. Strategy changes will be made only when supported by accumulated trading data.
+
+## Risk Controls
+
+- Maximum positions: **20**
+- Maximum daily entries: **20**
+- Maximum daily loss: **JPY 20,000**
+- Maximum value per symbol: **JPY 1,000,000**
+- Maximum total exposure: **JPY 5,000,000**
+- Minimum cash: **JPY 500,000**
+- Protective stop-loss: **1%**
+
+Risk, reconciliation, position-ownership, and EOD controls fail closed.
+
+## Universe and Dynamic Watchlist
+
+```text
+~3,700 domestic common stocks
+        |
+        v
 Universe Primary Screening
-    |
-    +-- common-stock and market filters
-    +-- 100-share purchase amount <= 950,000 JPY
-    +-- price, volume, turnover, and data-age filters
-    |
-    v
-Maximum 300 primary candidates
-    |
-    v
-Dynamic Watchlist Feature Engine
-    |
-    +-- liquidity
-    +-- relative volume
-    +-- ATR / volatility
-    +-- gap and VWAP distance
-    +-- ORB / Pullback / High Breakout fitness
-    +-- Strategy Learning feedback
-    |
-    v
+        |
+        v
+Maximum 300 candidates
+        |
+        v
+Dynamic Watchlist
+        |
+        v
 Maximum 50 realtime symbols
 ```
 
-Current universe files and tables:
+Dynamic Watchlist considers liquidity, relative volume, volatility, gap/VWAP distance, strategy fitness, history maturity, and strategy-learning feedback.
 
-``` text
-listed_symbols
-market_bars (1440-minute daily bars)
-data/universe_candidates.txt
-reports/universe/primary_screening_latest.json
-reports/watchlist/latest.json
-watchlist.txt
-```
+## Autonomous Operation
 
-### Trading strategies
+KATANA runs as a resident Windows task.
 
-``` text
-ORB
-Pullback Breakout
-High Breakout
-```
-
-The Strategy Registry resolves same-bar duplication and contradictory
-signals before forwarding them to the trading and risk layers.
-
-Dynamic Watchlist assigns a preferred strategy per symbol. The realtime
-signal engine applies the routed strategy when available and safely
-falls back to the globally enabled strategy set when no valid route
-exists.
-
-Dynamic Watchlist now also accounts for history maturity:
-
-``` text
-1–9 days    legacy fallback handling
-10–19 days  developing tier with history-maturity score adjustment
-20+ days    strict / full-strength history evaluation
-```
-
-This allows promising full-market symbols to enter ranking before a
-complete 20-business-day history has accumulated, while applying a
-confidence penalty until their history matures.
-
-On a repaired or newly initialized PC, daily history may not yet be
-deep enough for normal ranking. When fewer than five current watchlist
-symbols have at least three daily bars, the scheduler uses a guarded
-cold-start fallback: it retains the existing validated watchlist and
-records a completed state instead of blocking Paper Trading. Normal
-selection resumes automatically after history matures; genuine failures
-are not hidden once the minimum history threshold is reached.
-
-### Paper trading and risk
-
--   Recoverable Paper Broker
--   Production Paper Trading runtime
--   Pre-trade Risk Gate
--   Position-count, position-value, exposure, cash, daily-loss, and
-    entry limits
--   Dynamic Watchlist route → Signal → Risk → Broker JSONL trace
--   Runtime health, heartbeat, recovery, and safe-stop handling
--   Discord and LINE operational notifications
--   Production Readiness check
--   Autonomous Operation Validator
--   Scheduler Guard before Paper Trading startup
--   Cold-start recovery without disabling the Scheduler Guard
-
-### Autonomous operation
-
-Project KATANA runs as a resident Windows task through KATANA Service.
-The task has no execution time limit (`ExecutionTimeLimit=PT0S`).
-
-``` text
-Windows logon
-    |
-    v
-Project KATANA Service
-    |
-    +-- Dashboard
-    +-- Dynamic Watchlist Scheduler
-    +-- Universe Daily Scheduler
-    +-- Morning Pre-Flight Scheduler
-    +-- Paper Trading Scheduler
-    +-- Daily Report Scheduler
-    +-- Recovery / health monitoring
-```
-
-Standard schedule:
-
-``` text
-08:40  Morning Pre-Flight validation and notification
-08:45  Paper Trading Scheduler start window
-09:00  Morning market session
+```text
+08:40  Morning Pre-Flight
+08:45  Runtime start
+09:00  Morning session
 11:30  Lunch break
-12:30  Afternoon market session
-15:30  Market close
-15:35  Paper Trading stop
-15:40  Daily Report generation and LINE / Discord notification
+12:30  Afternoon session
+15:30  Market close / EOD processing
+15:35  Runtime stop
+15:40  Daily Report
 ```
 
-Expected Service topology:
+KATANA Service manages:
 
-``` text
-dashboard                    enabled / running
-dynamic_watchlist_scheduler  enabled / running
-universe_daily_scheduler     enabled / running
-morning_preflight_scheduler  enabled / running
-daily_report_scheduler       enabled / running
-paper_trading_scheduler      enabled / running
-paper_trading                disabled
+- Dashboard
+- Dynamic Watchlist Scheduler
+- Universe Daily Scheduler
+- Morning Pre-Flight Scheduler
+- Trading Scheduler
+- Daily Report Scheduler
+- Recovery and health monitoring
+
+## Live Trading
+
+The complete Live execution path has been implemented and commissioned against the real brokerage account, including a confirmed BUY and SELL round trip.
+
+Production activation remains deliberately disabled.
+
+Historical Live locks remain sealed:
+
+```text
+LOCKED_LIVE_RUNTIME_INTEGRATION_ENABLED = False
+LIVE_BROKER_TRANSPORT_ENABLED = False
+LIVE_ORDER_TRANSMISSION_ENABLED = False
 ```
 
-The direct `paper_trading` component remains disabled to prevent
-duplicate runtime startup.
+Live production uses a separate activation gate and daily arming mechanism.
 
-### Strategy learning
+Implemented Live safeguards include:
 
-Completed trades in `trade_journal` are aggregated by symbol and
-strategy into:
+- Authoritative brokerage account and position reads
+- Durable order and reconciliation state
+- No automatic retry after ambiguous order transmission
+- Durable daily entry limits
+- Protective-stop persistence and restart recovery
+- EOD liquidation with position-ownership verification
+- Protection of manual and unmanaged brokerage positions
+- PAPER / SHADOW / LIVE runtime isolation
+- No PaperBroker fallback from LIVE
 
-``` text
-strategy_learning_summary
+KATANA never liquidates a live position unless KATANA ownership can be proven. Ownership or quantity ambiguity blocks execution.
+
+Verified account mapping:
+
+```text
+KATANA_LIVE_EXCHANGE=27
+KATANA_LIVE_ACCOUNT_TYPE=4
+KATANA_LIVE_CASH_BUY_FUND_TYPE=02
 ```
 
-Learning metrics include:
+During the current Paper Trading period, Live activation variables remain unset.
 
-``` text
-Trade count
-Win rate
-Profit Factor
-Expectancy
-Average return
-Average holding time
-Sample confidence
-Historical score
-```
+Never commit `.env`, API passwords, tokens, or other secrets.
 
-Historical feedback is applied only after the configured minimum trade
-count is reached. With insufficient history, the Dynamic Watchlist
-continues using only technical scores.
+## Key Commands
 
-### Dashboard and reporting
+Run project Python directly from the virtual environment. Activating `Activate.ps1` is not required.
 
--   Desktop and mobile FastAPI Dashboard
--   Service component status and PID monitoring
--   Recovery History
--   Today's Paper Trading schedule
--   Morning Check panel
--   Operational Readiness panel
--   Daily Report panel
--   Dynamic Watchlist ranking, Tier, preferred strategy, and 100-share
-    amount
--   Security code and company name display using the local JPX
-    `listed_symbols` master, with the kabuステーションAPI as fallback
--   Strategy and symbol ranking
--   Error and recovery counts
-
-Dashboard URLs:
-
-``` text
-Desktop on KATANA PC:
-http://127.0.0.1:8000/
-
-Mobile through Tailscale:
-http://100.124.165.26:8000/mobile
-```
-
-The Dashboard is exposed through the private Tailscale network, not
-through public router port forwarding.
-
-### Morning Pre-Flight
-
-Checks:
-
-``` text
-KATANA Service
-Service component topology
-Paper Trading Scheduler
-Daily Report Scheduler
-Dynamic Watchlist
-Watchlist
-Database
-Production Readiness
-```
-
-Files:
-
-``` text
-reports/service/autonomous_operation_report.json
-reports/service/morning_preflight_schedule.json
-reports/service/morning_preflight/YYYY-MM-DD.sent.json
-```
-
-### Daily Report
-
-Daily Reports include:
-
-``` text
-Report date
-Net P/L
-Trade count
-Win rate
-Profit Factor
-Maximum drawdown
-Strategy ranking
-Symbol ranking
-Errors
-Recoveries
-Notes
-```
-
-The report summary is reconciled against actual trade executions so that
-trade count and realized P/L reflect executed paper trades rather than
-stale or synthetic dashboard state.
-
-Files:
-
-``` text
-reports/daily/YYYY-MM-DD.json
-reports/daily/notifications/YYYY-MM-DD.sent.json
-```
-
-------------------------------------------------------------------------
-
-## Current milestone
-
-### Completed through Sprint122
-
--   Sprint95: Desktop and Mobile Dashboard baseline
--   Sprint96-99: operations, recovery, and service-readiness foundations
--   Sprint100: KATANA Service Windows-task migration
--   Sprint101: Paper Trading schedule and readiness integration
--   Sprint102: Daily Report generation, API, Dashboard, notifications,
-    and scheduled delivery
--   Sprint103: Paper Trading Scheduler integration and Production
-    Readiness
--   Sprint104:
-    -   Autonomous Operation Validator
-    -   Morning Pre-Flight notification
-    -   Scheduler Guard
-    -   Automated Morning Pre-Flight Scheduler
-    -   Morning Check Dashboard
--   Sprint105-106:
-    -   Dynamic Watchlist service and resident scheduler
-    -   1,000,000 JPY capital constraint
-    -   KATANA Service integration
--   Sprint107:
-    -   Dynamic Watchlist Feature Engine
-    -   A+ / A / B / C rating Tier
-    -   ORB / Pullback / High Breakout fitness scoring
-    -   Desktop and Mobile Dashboard integration
--   Sprint108:
-    -   Symbol Strategy Routing
-    -   Realtime Signal Engine integration
-    -   Strategy-routing audit trace
--   Sprint109:
-    -   Strategy Learning Core
-    -   Historical Score and sample-confidence control
-    -   Learning feedback into Dynamic Watchlist and Strategy Routing
--   Sprint110:
-    -   Listed-symbol universe management
-    -   Full-market daily-bar import
-    -   Universe Primary Screener
-    -   Approximately 4,000 → maximum 300 → maximum 50 pipeline
-    -   Full-market integration tests
--   Sprint111-118:
-    -   Paper-trading readiness and kabuステーション monitoring
-        stabilization
-    -   End-of-day forced-liquidation pipeline
-    -   Portfolio and execution/P&L reconciliation
-    -   Service Manager duplicate-startup protection and
-        resident-operation hardening
--   Sprint119E:
-    -   JPX listed-symbol master import
-    -   3,700 active domestic common stocks loaded into `listed_symbols`
-    -   Full-market Universe Bootstrap using kabuステーション Board data
-    -   Alphanumeric security-code support
-    -   Batch registration split/retry and terminal-skip handling
--   Sprint120:
-    -   Daily Report reconciled against actual `trade_executions`
-    -   Trade count and realized P/L reporting corrected
--   Sprint121:
-    -   Dynamic Watchlist diagnostics expanded for score-component
-        inspection
-    -   Large-cap selection behavior investigated
--   Sprint122:
-    -   History-maturity-aware Dynamic Watchlist
-    -   Existing short-history fallback behavior preserved
-    -   10--19 day histories treated as `developing`
-    -   History maturity multiplier added to total-score ranking
-    -   Focused regression suite: 20 passed
--   2026-09-24 recovery hardening:
-    -   Added `openpyxl` as an explicit runtime dependency for JPX
-        `.xlsx` import
-    -   Rebuilt the JPX master with 3,700 listed symbols
-    -   Added guarded Dynamic Watchlist cold-start fallback
-    -   Added database-first security-name resolution on the Dashboard
-    -   Removed the Windows task execution time limit
-    -   Verified desktop/mobile closed-day handling and operational
-        readiness
-    -   Repository-wide regression suite: 2,465 passed, 2 warnings
-
-Recent focused test results:
-
-``` text
-Sprint107-1: 8 passed
-Sprint108-1: 4 passed
-Sprint108-2: 32 passed
-Sprint108-3: 29 passed
-Sprint109-1: 4 passed
-Sprint109-2: 10 passed
-Sprint110-3: 7 passed
-Sprint120 Daily Report reconciliation: 11 passed
-Sprint122 history-maturity regression: 20 passed
-2026-09-24 repository-wide regression: 2465 passed, 2 warnings
-```
-
-Focused suites may overlap and must not be added together as a unique
-repository-wide test total.
-
-------------------------------------------------------------------------
-
-## Technology stack
-
--   Python 3.14
--   FastAPI and Uvicorn
--   SQLite
--   openpyxl 3.1+
--   pytest
--   kabuステーションAPI
--   Discord Webhooks
--   LINE Messaging API
--   Tailscale
--   Visual Studio Code
--   Git and GitHub
--   Windows Task Scheduler
--   Windows
-
-J-Quants is no longer part of the production runtime.
-
-------------------------------------------------------------------------
-
-## Important commands
-
-### Activate the environment
-
-``` powershell
+```powershell
 cd C:\projects\katana
-.\.venv\Scripts\Activate.ps1
+
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m app.run_paper_trading --check
+.\.venv\Scripts\python.exe -m app.run_autonomous_operation_validation
 ```
 
-### Production Readiness
+KATANA Service:
 
-``` powershell
-python -m app.run_paper_trading --check
-```
-
-Expected:
-
-``` text
-Overall
-READY
-```
-
-### Autonomous-operation validation
-
-``` powershell
-python -m app.run_autonomous_operation_validation
-```
-
-Expected:
-
-``` text
-Overall: READY
-Ready for next business day: True
-```
-
-### Morning Pre-Flight
-
-``` powershell
-python -m app.run_morning_preflight --dry-run
-python -m app.run_morning_preflight
-```
-
-### KATANA Service Dry Run
-
-``` powershell
-python -m app.run_katana_service --dry-run
-```
-
-Expected topology:
-
-``` text
-dashboard: enabled=True
-morning_preflight_scheduler: enabled=True
-daily_report_scheduler: enabled=True
-paper_trading_scheduler: enabled=True
-paper_trading: enabled=False
-```
-
-### Start and stop KATANA Service
-
-``` powershell
+```powershell
 schtasks /Run /TN "Project KATANA Service"
 schtasks /End /TN "Project KATANA Service"
 ```
 
-Resident task command:
+## Technology
 
-``` text
-scripts\run_katana_service_task.cmd
-```
+- Python 3.14
+- FastAPI / Uvicorn
+- SQLite
+- pytest
+- kabu Station API
+- Discord
+- LINE
+- Tailscale
+- Git / GitHub
+- Windows Task Scheduler
 
-It must include:
+## Next Steps
 
-``` text
---enable-morning-preflight-schedule
---enable-daily-report-schedule
---enable-paper-trading-schedule
-```
+1. Continue unchanged Paper Trading through the observation week.
+2. Evaluate weekly P/L, win rate, Profit Factor, average win/loss, and drawdown.
+3. Compare winning and losing ORB trades by volume ratio, breakout width, entry time, and price range.
+4. Investigate why Pullback signals are not appearing as completed trades in the Daily Report.
+5. Review High Breakout candidate and execution frequency.
+6. Adjust strategy filters only when supported by accumulated data.
+7. Keep Live production activation OFF until performance is satisfactory.
 
-### Inspect status
+## Git Workflow
 
-``` powershell
-Get-Content reports\service\katana_service_status.json
-Get-Content reports\service\morning_preflight_schedule.json
-Get-Content reports\service\paper_trading_schedule.json
-Get-Content reports\service\daily_report_schedule.json
-```
-
-### Dashboard checks
-
-``` powershell
-netstat -ano | findstr :8000
-Invoke-RestMethod http://100.124.165.26:8000/api/dashboard/morning-preflight
-```
-
-### Manual Paper Trading
-
-``` powershell
-python -m app.run_paper_trading `
-  --strategy orb `
-  --strategy pullback `
-  --strategy high-breakout
-```
-
-### Full-market universe
-
-Download and import the latest JPX listed-symbol master:
-
-``` powershell
-python -m app.run_jpx_listed_symbol_import
-```
-
-Import daily bars:
-
-``` powershell
-python -m app.run_universe_daily_import `
-  data\universe_daily_bars.csv
-```
-
-Run primary screening:
-
-``` powershell
-python -m app.run_universe_primary_screening
-```
-
-Run the complete 4,000 → 300 → 50 pipeline:
-
-``` powershell
-python -m app.run_full_market_watchlist
-```
-
-Apply the resulting final watchlist:
-
-``` powershell
-python -m app.run_full_market_watchlist --apply
-```
-
-Run Dynamic Watchlist only:
-
-``` powershell
-python -m app.run_dynamic_watchlist `
-  --require-candidate-universe
-```
-
-Ignore the primary-candidate file and evaluate every symbol already
-present in `market_bars`:
-
-``` powershell
-python -m app.run_dynamic_watchlist `
-  --ignore-candidate-universe
-```
-
-### Strategy learning
-
-``` powershell
-python -m app.run_strategy_learning
-python -m app.run_dynamic_watchlist
-python -m app.run_strategy_routing
-```
-
-### Daily Report
-
-``` powershell
-python -m app.run_daily_report --report-date 2026-08-01
-
-python -m app.run_daily_report_notification `
-  --report-date 2026-08-01 `
-  --dry-run
-
-python -m app.run_daily_report_notification `
-  --report-date 2026-08-01
-```
-
-------------------------------------------------------------------------
-
-## Environment variables
-
-``` env
-KATANA_ENVIRONMENT=paper
-KABU_STATION_API_PASSWORD=...
-KATANA_MARKET_DATA_MODE=kabu-station-realtime
-KATANA_ENABLED_STRATEGIES=orb,pullback,high-breakout
-KATANA_DISCORD_WEBHOOK_URL=...
-KATANA_LINE_CHANNEL_ACCESS_TOKEN=...
-KATANA_LINE_DESTINATION_ID=U...
-```
-
-Never commit `.env` or any real secret.
-
-------------------------------------------------------------------------
-
-## Git workflow
-
-``` powershell
+```powershell
 git status
-python -m pytest -q
 git diff --check
-git add <verified-files>
-git diff --cached --name-only
-git commit -m "Describe the verified change"
+git add README.md
+git commit -m "Update README to current KATANA status"
 git push origin main
 ```
 
-Avoid `git add .` so that local databases, reports, generated metadata,
-and extracted ZIP instructions are not staged accidentally.
+Avoid `git add .`.
 
-Before committing, verify that `.gitignore` covers:
+Do not commit secrets, databases, logs, generated reports, or local backup artifacts.
 
-``` gitignore
-.env
-.venv/
-__pycache__/
-*.pyc
-.pytest_cache/
-reports/
-data/
-logs/
-katana_sprint*.zip
-```
+## Disclaimer
 
-Do not commit secrets, local databases, logs, generated reports, or
-Sprint ZIP archives.
-
-------------------------------------------------------------------------
-
-## Current next steps
-
-1.  Keep the resident Universe Daily Scheduler collecting full-market
-    daily bars.
-2.  Keep the KATANA PC awake and kabuステーション running while the
-    initial full-market history is being collected.
-3.  Monitor history coverage as newly added symbols mature toward 10 and
-    20 business days.
-4.  Re-run Dynamic Watchlist diagnostics and verify that stronger
-    candidates can displace slower large-cap names on merit.
-5.  Add Dashboard visibility for universe-history coverage, developing
-    candidates, and strict candidates.
-6.  Continue multi-business-day Paper Trading and Strategy Learning
-    validation.
-7.  Reconcile Daily Report, executions, positions, and notifications
-    after each validation day.
-8.  Review routing, risk, and completed-trade traces before any capital
-    change.
-
-------------------------------------------------------------------------
-
-## Safety notice
-
-Project KATANA remains a research and paper-trading system.
-
-Live brokerage execution, live-account order reconciliation, and
-production live-trading safeguards are not implemented. Backtest and
-paper-trading results do not guarantee future performance, and trading
-involves the risk of loss.
+Backtest and Paper Trading results do not guarantee future performance. Live Trading is technically available but remains intentionally disabled while strategy performance is being validated.
