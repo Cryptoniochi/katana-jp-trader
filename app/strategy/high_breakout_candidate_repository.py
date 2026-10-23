@@ -362,21 +362,25 @@ class HighBreakoutCandidateRepository:
     def _normalize_code(
         code: str,
     ) -> str:
-        normalized = code.strip()
+        normalized = code.strip().upper()
 
         if not normalized:
             raise ValueError(
                 "銘柄コードを指定してください。"
             )
 
-        if not normalized.isdigit():
+        if (
+            not normalized.isascii()
+            or not normalized.isalnum()
+            or not any(character.isdigit() for character in normalized)
+        ):
             raise ValueError(
-                "銘柄コードは数字で指定してください。"
+                "銘柄コードは数字を含む半角英数字で指定してください。"
             )
 
         if len(normalized) not in {4, 5}:
             raise ValueError(
-                "銘柄コードは4桁または5桁で指定してください。"
+                "銘柄コードは4文字または5文字で指定してください。"
             )
 
         return normalized

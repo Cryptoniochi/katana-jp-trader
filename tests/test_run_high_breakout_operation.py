@@ -19,6 +19,7 @@ def create_database(
         connection.execute(
             """
             CREATE TABLE market_bars (
+                code TEXT NOT NULL,
                 interval_minutes INTEGER NOT NULL
             )
             """
@@ -33,14 +34,15 @@ def create_database(
         connection.executemany(
             """
             INSERT INTO market_bars (
+                code,
                 interval_minutes
             )
-            VALUES (?)
+            VALUES (?, ?)
             """,
             [
-                (1440,),
-                (1440,),
-                (5,),
+                ("7203", 1440),
+                ("6758", 1440),
+                ("7203", 5),
             ],
         )
         connection.execute(

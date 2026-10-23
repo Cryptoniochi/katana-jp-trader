@@ -206,21 +206,26 @@ class HighBreakoutScreeningService:
 
     @staticmethod
     def _normalize_code(code: str) -> str:
-        normalized = code.strip()
+        normalized = code.strip().upper()
 
         if not normalized:
             raise HighBreakoutScreeningInputError(
-                "銘柄コードを指定してください。"
-            )
-
-        if not normalized.isdigit():
-            raise HighBreakoutScreeningInputError(
-                "銘柄コードは数字で指定してください。"
+                "???????????????"
             )
 
         if len(normalized) not in {4, 5}:
             raise HighBreakoutScreeningInputError(
-                "銘柄コードは4桁または5桁で指定してください。"
+                "??????4?????5????????????"
+            )
+
+        if not normalized.isascii() or not normalized.isalnum():
+            raise HighBreakoutScreeningInputError(
+                "?????????????????????"
+            )
+
+        if not any(character.isdigit() for character in normalized):
+            raise HighBreakoutScreeningInputError(
+                "??????????????????"
             )
 
         return normalized

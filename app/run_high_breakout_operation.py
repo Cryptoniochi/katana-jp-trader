@@ -185,7 +185,11 @@ def execute_operation(
             ]
         )
 
-    for code in codes:
+    screening_codes = _load_daily_market_codes(
+        database_path
+    )
+
+    for code in screening_codes:
         screening_arguments.extend(["--code", code])
 
     screening_exit_code = run_high_breakout_screening(
@@ -256,6 +260,30 @@ def execute_operation(
         daily_bar_count=daily_bar_count,
         candidate_count=candidate_count,
         paper_trading_started=paper_trading_started,
+    )
+
+
+def _load_daily_market_codes(
+    database_path: Path,
+) -> tuple[str, ...]:
+    """DB???????????High Breakout???????????"""
+
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT code
+            FROM market_bars
+            WHERE interval_minutes = ?
+              AND TRIM(code) <> ''
+            ORDER BY code
+            """,
+            (DAILY_INTERVAL_MINUTES,),
+        ).fetchall()
+
+    return tuple(
+        str(row[0]).strip()
+        for row in rows
+        if row[0] is not None and str(row[0]).strip()
     )
 
 
