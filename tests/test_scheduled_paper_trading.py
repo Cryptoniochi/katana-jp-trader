@@ -247,3 +247,90 @@ def test_new_business_day_can_start_again(
 
     assert running.state is ScheduledTradingState.RUNNING
     assert len(started) == 1
+
+
+def test_process_events_record_start_and_unexpected_exit(
+    tmp_path: Path,
+) -> None:
+    process = FakeProcess()
+    clock = MutableClock(
+        datetime(
+            2026, 10, 23, 0, 0,
+            tzinfo=timezone.utc,
+        )
+    )
+    event_log = tmp_path / "process_events.jsonl"
+
+    controller = ScheduledPaperTradingController(
+        enabled=True,
+        calendar=TokyoMarketCalendar.with_custom_holidays([]),
+        status_path=tmp_path / "status.json",
+        process_event_log_path=event_log,
+        now_provider=clock,
+        popen_factory=lambda *_args, **_kwargs: process,
+        readiness_check_enabled=False,
+        autonomous_guard_enabled=False,
+    )
+
+    first = controller.run_once()
+    assert first.state is ScheduledTradingState.RUNNING
+
+    process.returncode = 17
+    clock.value = datetime(
+        2026, 10, 23, 0, 1,
+        tzinfo=timezone.utc,
+    )
+
+    controller._refresh_process_state()
+
+    events = [
+        __import__("json").loads(line)
+        for line in event_log.read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+
+    assert events[0]["event_type"] == "process_started"
+    assert events[0]["pid"] == 4321
+    assert events[0]["exit_code"] is None
+
+    assert events[1]["event_type"] == "process_exited"
+    assert events[1]["pid"] == 4321
+    assert events[1]["exit_code"] == 17
+    assert controller.process is None
+    assert controller.last_exit_code == 17
+
+
+def test_process_event_records_scheduler_stop(
+    tmp_path: Path,
+) -> None:
+    process = FakeProcess()
+    event_log = tmp_path / "process_events.jsonl"
+
+    controller = ScheduledPaperTradingController(
+        enabled=True,
+        calendar=TokyoMarketCalendar.with_custom_holidays([]),
+        status_path=tmp_path / "status.json",
+        process_event_log_path=event_log,
+        now_provider=lambda: datetime(
+            2026, 10, 23, 0, 0,
+            tzinfo=timezone.utc,
+        ),
+        popen_factory=lambda *_args, **_kwargs: process,
+        readiness_check_enabled=False,
+        autonomous_guard_enabled=False,
+    )
+
+    controller.run_once()
+    controller._stop_process()
+
+    events = [
+        __import__("json").loads(line)
+        for line in event_log.read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+
+    assert events[-1]["event_type"] == "process_stopped"
+    assert events[-1]["pid"] == 4321
+    assert events[-1]["exit_code"] is None

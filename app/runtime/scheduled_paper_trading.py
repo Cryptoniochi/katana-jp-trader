@@ -26,6 +26,9 @@ TOKYO = ZoneInfo("Asia/Tokyo")
 DEFAULT_STATUS_PATH = Path(
     "reports/service/paper_trading_schedule.json"
 )
+DEFAULT_PROCESS_EVENT_LOG_PATH = Path(
+    "reports/service/paper_trading_process_events.jsonl"
+)
 
 
 class ScheduledPaperTradingController:
@@ -38,6 +41,7 @@ class ScheduledPaperTradingController:
         settings: TradingScheduleSettings | None = None,
         calendar: TokyoMarketCalendar | None = None,
         status_path: Path = DEFAULT_STATUS_PATH,
+        process_event_log_path: Path = DEFAULT_PROCESS_EVENT_LOG_PATH,
         paper_arguments: Sequence[str] = (),
         readiness_check_enabled: bool = True,
         readiness_timeout_seconds: float = 30.0,
@@ -66,6 +70,7 @@ class ScheduledPaperTradingController:
             else TokyoMarketCalendar()
         )
         self.status_path = Path(status_path)
+        self.process_event_log_path = Path(process_event_log_path)
         self.paper_arguments = tuple(
             paper_arguments
         )
@@ -373,6 +378,11 @@ class ScheduledPaperTradingController:
             command,
             cwd=Path.cwd(),
         )
+        self._record_process_event(
+            event_type="process_started",
+            pid=self.process.pid,
+            exit_code=None,
+        )
 
     def _refresh_process_state(self) -> None:
         if self.process is None:
@@ -383,7 +393,13 @@ class ScheduledPaperTradingController:
         if exit_code is None:
             return
 
+        pid = self.process.pid
         self.last_exit_code = int(exit_code)
+        self._record_process_event(
+            event_type="process_exited",
+            pid=pid,
+            exit_code=self.last_exit_code,
+        )
         self.process = None
 
     def _stop_process(self) -> None:
@@ -396,10 +412,46 @@ class ScheduledPaperTradingController:
                 timeout_seconds=15.0,
             )
 
+        pid = self.process.pid
         self.last_exit_code = (
             self.process.returncode
         )
+        self._record_process_event(
+            event_type="process_stopped",
+            pid=pid,
+            exit_code=self.last_exit_code,
+        )
         self.process = None
+
+    def _record_process_event(
+        self,
+        *,
+        event_type: str,
+        pid: int,
+        exit_code: int | None,
+    ) -> None:
+        event = {
+            "occurred_at": self._current_time().isoformat(),
+            "event_type": event_type,
+            "pid": int(pid),
+            "exit_code": exit_code,
+        }
+        self.process_event_log_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        with self.process_event_log_path.open(
+            "a",
+            encoding="utf-8",
+        ) as handle:
+            handle.write(
+                json.dumps(
+                    event,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
 
     def _publish(
         self,
