@@ -463,3 +463,65 @@ def test_full_day_validation_accepts_restart_scoped_pnl_reconciliation(
     assert reconciliation.passed is True
     assert "not applicable" in reconciliation.message.lower()
     assert result.passed is True
+
+
+def test_full_day_validation_accepts_legacy_restart_status_when_day_pnl_reconciles(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+
+    runtime = json.loads(
+        service.runtime_status_path.read_text(
+            encoding="utf-8"
+        )
+    )
+    runtime["session_equity_change"] = 1550.0
+    runtime["realized_profit_loss"] = 5000.0
+    runtime["pnl_reconciliation_difference"] = 4900.0
+    runtime["pnl_consistent"] = False
+    runtime["pnl_reconciliation_scope"] = None
+    runtime["external_execution_count"] = 1
+    _write(service.runtime_status_path, runtime)
+
+    result = service.validate(trading_date=DAY)
+
+    reconciliation = next(
+        check
+        for check in result.checks
+        if check.key == "runtime_pnl_reconciliation"
+    )
+
+    assert reconciliation.passed is True
+    assert "legacy" in reconciliation.message.lower()
+    assert result.passed is True
+
+
+def test_full_day_validation_rejects_pnl_mismatch_without_external_execution(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+
+    runtime = json.loads(
+        service.runtime_status_path.read_text(
+            encoding="utf-8"
+        )
+    )
+    runtime["session_equity_change"] = 1550.0
+    runtime["realized_profit_loss"] = 5000.0
+    runtime["pnl_reconciliation_difference"] = 4900.0
+    runtime["pnl_consistent"] = False
+    runtime["pnl_reconciliation_scope"] = None
+    runtime["external_execution_count"] = 0
+    _write(service.runtime_status_path, runtime)
+
+    result = service.validate(trading_date=DAY)
+
+    reconciliation = next(
+        check
+        for check in result.checks
+        if check.key == "runtime_pnl_reconciliation"
+    )
+
+    assert reconciliation.passed is False
+    assert "mismatch" in reconciliation.message.lower()
+    assert result.passed is False

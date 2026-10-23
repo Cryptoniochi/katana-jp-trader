@@ -258,6 +258,28 @@ class FullDayValidationService:
             )
         )
 
+        runtime_pnl = self._preferred_runtime_pnl(
+            runtime
+        )
+        daily_summary_pnl = (
+            None
+            if daily_record is None
+            else self._float_or_none(
+                daily_record.net_profit_loss
+            )
+        )
+        report_summary = daily_report.get("summary")
+        if not isinstance(report_summary, dict):
+            report_summary = {}
+        daily_report_pnl = self._float_or_none(
+            report_summary.get("net_profit_loss")
+        )
+        pnl_sources_ok = self._numbers_match(
+            runtime_pnl,
+            daily_summary_pnl,
+            daily_report_pnl,
+        )
+
         pnl_consistent = runtime.get(
             "pnl_consistent"
         )
@@ -271,8 +293,17 @@ class FullDayValidationService:
             reconciliation_scope
             == "unavailable_due_to_prior_execution"
         )
+        legacy_restart_reconciliation = (
+            not reconciliation_scope
+            and pnl_consistent is False
+            and self._integer(
+                runtime.get("external_execution_count")
+            ) > 0
+            and pnl_sources_ok
+        )
         runtime_pnl_ok = (
             reconciliation_not_applicable
+            or legacy_restart_reconciliation
             or (
                 pnl_consistent is not False
                 and (
@@ -295,11 +326,19 @@ class FullDayValidationService:
                     )
                     if reconciliation_not_applicable
                     else (
-                        "Runtime P/L reconciliation is consistent."
-                        if runtime_pnl_ok
+                        (
+                            "Legacy runtime restart status detected: "
+                            "external executions exist and day-wide P/L "
+                            "reconciles across authoritative sources."
+                        )
+                        if legacy_restart_reconciliation
                         else (
-                            "Runtime P/L reconciliation mismatch. "
-                            f"difference={reconciliation_difference}"
+                            "Runtime P/L reconciliation is consistent."
+                        if runtime_pnl_ok
+                            else (
+                                "Runtime P/L reconciliation mismatch. "
+                                f"difference={reconciliation_difference}"
+                            )
                         )
                     )
                 ),
@@ -449,28 +488,6 @@ class FullDayValidationService:
             )
         )
 
-        runtime_pnl = self._preferred_runtime_pnl(
-            runtime
-        )
-        daily_summary_pnl = (
-            None
-            if daily_record is None
-            else self._float_or_none(
-                daily_record.net_profit_loss
-            )
-        )
-        report_summary = daily_report.get("summary")
-        if not isinstance(report_summary, dict):
-            report_summary = {}
-        daily_report_pnl = self._float_or_none(
-            report_summary.get("net_profit_loss")
-        )
-
-        pnl_sources_ok = self._numbers_match(
-            runtime_pnl,
-            daily_summary_pnl,
-            daily_report_pnl,
-        )
         checks.append(
             FullDayValidationCheck(
                 key="pnl_source_reconciliation",
