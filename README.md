@@ -2,10 +2,10 @@
 
 Automated Japanese equity trading platform for market-data collection, strategy execution, risk control, Paper Trading, monitoring, reporting, and fail-closed Live Trading.
 
-## Current Status ? 2026-10-21
+## Current Status — 2026-10-23
 
-- Git baseline: `24c47aa` ? `Protect unmanaged live positions from EOD liquidation`
-- Repository tests: **3,513 passed, 2 warnings**
+- Git baseline: use `git log -1 --oneline` for the current committed revision
+- Repository test suite: **3,500+ tests**; run the full suite before each production-relevant commit
 - Current mode: **Paper Trading**
 - Trading capital: **JPY 1,000,000**
 - Market universe: approximately **3,700** domestic common stocks
@@ -23,24 +23,72 @@ The current priority is strategy validation. Live Trading will remain disabled u
 - Pullback Breakout
 - High Breakout
 
-Current ORB production filter:
+Current ORB Paper/production strategy filter:
 
 ```text
 breakout-bar volume >= 0.8 x average opening-range bar volume
+minimum breakout width >= 0.5%
 ```
 
+The 0.5% breakout-width filter was selected after robustness testing across the available 5-minute-bar history. It materially improved net P/L and drawdown versus the previous volume-only baseline and remained positive after excluding the strongest day.
+
 Protective stop-loss: **1%**
+Take-profit: **2%**
 
 ## Recent Paper Trading Performance
+
+Observation period: **2026-10-19 through 2026-10-23**
 
 | Date | Trades | W-L-Flat | Net P/L | Profit Factor |
 | --- | ---: | ---: | ---: | ---: |
 | 2026-10-19 | 9 | 4-3-2 | +10,700 JPY | 4.45 |
 | 2026-10-20 | 8 | 4-4-0 | +5,450 JPY | 2.14 |
 | 2026-10-21 | 8 | 1-7-0 | -5,950 JPY | 0.14 |
-| **Total** | **25** | **9-14-2** | **+10,200 JPY** | **1.69** |
+| 2026-10-22 | 3 | 0-3-0 | -4,450 JPY | 0.00 |
+| 2026-10-23 | 7 | 1-6-0 | -4,200 JPY | 0.22 |
+| **Total** | **35** | **10-23-2** | **+1,550 JPY** | **1.06** |
 
-The current configuration will remain unchanged through the observation week. Strategy changes will be made only when supported by accumulated trading data.
+Five-day aggregate:
+
+- Gross profit: **+26,250 JPY**
+- Gross loss: **-24,700 JPY**
+- Average win: **+2,625 JPY**
+- Average loss: **-1,074 JPY**
+- Payoff ratio: **2.44**
+- Expectancy: **+44 JPY/trade**
+- Peak-to-trough trade-level drawdown: approximately **-15,800 JPY**
+- ORB: **32 trades / +5,400 JPY**
+- Pullback: **3 trades / -3,850 JPY**
+- High Breakout: **0 completed trades before the 2026-10-23 screening-path repair**
+
+The first two days produced +16,150 JPY, while the final three days lost 14,600 JPY. The week therefore remained slightly profitable but was not strong enough to justify enabling Live Trading.
+
+### ORB robustness work
+
+The previous ORB filter used only a 0.8x opening-range volume requirement. Analysis showed that simply increasing the volume threshold was insufficient. A minimum breakout width was more effective.
+
+The selected Paper Trading configuration for the next observation period is:
+
+```text
+volume ratio >= 0.8
+minimum breakout width >= 0.5%
+stop loss = 1%
+take profit = 2%
+```
+
+Across 19 eligible historical sessions, the selected configuration produced **+469,003 JPY**, PF **2.81**, and materially lower drawdown than the previous 0.8x volume-only baseline. Excluding the strongest day, it still produced **+216,323 JPY** with PF **1.83**.
+
+This remains a Paper Trading validation candidate, not evidence that future returns are guaranteed.
+
+### High Breakout repair
+
+High Breakout had been screening only the 50-symbol realtime Dynamic Watchlist. The screening path was repaired so that High Breakout can evaluate the full daily-market universe while realtime registration remains capped at 50 symbols.
+
+The repaired production-path screening for the 2026-10-26 trading date produced **26 candidates** without loosening the strategy thresholds.
+
+### Paper Trading state repair
+
+A Paper Trading state bug was also repaired: when a BUY signal was rejected before an actual fill, the strategy could incorrectly retain `position_open=True` and later emit an invalid SELL. The strategy position state is now closed after an unfilled BUY while same-day re-entry protection is retained.
 
 ## Risk Controls
 
@@ -103,9 +151,11 @@ KATANA Service manages:
 
 The complete Live execution path has been implemented and commissioned against the real brokerage account, including a confirmed BUY and SELL round trip.
 
-Production activation remains deliberately disabled.
+A concrete Paper-free production composition now exists. It connects realtime market data, the strategy engine, authoritative brokerage account state, Live risk controls, durable execution/reconciliation, protective exits, and EOD liquidation.
 
-Historical Live locks remain sealed:
+**Live production activation remains deliberately OFF.**
+
+Historical Live locks remain sealed and must not be changed:
 
 ```text
 LOCKED_LIVE_RUNTIME_INTEGRATION_ENABLED = False
@@ -113,7 +163,13 @@ LIVE_BROKER_TRANSPORT_ENABLED = False
 LIVE_ORDER_TRANSMISSION_ENABLED = False
 ```
 
-Live production uses a separate activation gate and daily arming mechanism.
+Concrete Live production uses a separate activation interlock:
+
+```text
+KATANA_LIVE_PRODUCTION_ENABLED=YES
+```
+
+Daily Live operation additionally requires explicit daily arming and date-specific confirmation. These activation variables remain unset during the current Paper Trading period.
 
 Implemented Live safeguards include:
 
@@ -126,6 +182,7 @@ Implemented Live safeguards include:
 - Protection of manual and unmanaged brokerage positions
 - PAPER / SHADOW / LIVE runtime isolation
 - No PaperBroker fallback from LIVE
+- Fail-closed production activation interlock
 
 KATANA never liquidates a live position unless KATANA ownership can be proven. Ownership or quantity ambiguity blocks execution.
 
@@ -136,8 +193,6 @@ KATANA_LIVE_EXCHANGE=27
 KATANA_LIVE_ACCOUNT_TYPE=4
 KATANA_LIVE_CASH_BUY_FUND_TYPE=02
 ```
-
-During the current Paper Trading period, Live activation variables remain unset.
 
 Never commit `.env`, API passwords, tokens, or other secrets.
 
@@ -175,13 +230,13 @@ schtasks /End /TN "Project KATANA Service"
 
 ## Next Steps
 
-1. Continue unchanged Paper Trading through the observation week.
-2. Evaluate weekly P/L, win rate, Profit Factor, average win/loss, and drawdown.
-3. Compare winning and losing ORB trades by volume ratio, breakout width, entry time, and price range.
-4. Investigate why Pullback signals are not appearing as completed trades in the Daily Report.
-5. Review High Breakout candidate and execution frequency.
-6. Adjust strategy filters only when supported by accumulated data.
-7. Keep Live production activation OFF until performance is satisfactory.
+1. Run Paper Trading on **2026-10-26** with the new ORB `0.8x volume + 0.5% breakout width` filter.
+2. Verify that the repaired High Breakout candidate path produces actual strategy/Risk Gate/PaperBroker activity from the 26 screened candidates.
+3. Confirm that alphanumeric JPX codes such as `277A` / `549A` remain valid through the complete Paper Trading path.
+4. Continue collecting Pullback trades after the unfilled-BUY state repair before changing Pullback parameters.
+5. Compare the new ORB Paper results with the 2026-10-19 through 2026-10-23 baseline.
+6. Change strategy parameters only when supported by accumulated out-of-sample Paper Trading evidence.
+7. Keep Live production activation OFF until Paper Trading performance is satisfactory.
 
 ## Git Workflow
 
