@@ -792,3 +792,45 @@ def test_service_traces_dynamic_strategy_route_before_signal() -> None:
         "B",
     )
     assert trace.events[1][0] == "signal_generated"
+
+def test_service_closes_strategy_position_when_risk_blocks_buy() -> None:
+    """Risk GateでBUY未約定なら戦略上の保有状態を残さない。"""
+
+    risk_result = FakeRiskResult(
+        allows_new_entries=False,
+        is_blocked=True,
+    )
+    gate = FakeRiskAwareExecutionService(
+        blocked=True,
+    )
+
+    (
+        service,
+        queue,
+        _execution,
+        _portfolio,
+        _prices,
+        _clocks,
+    ) = create_service(
+        risk_aware_execution_service=gate,
+        risk_result_provider=lambda: risk_result,
+    )
+
+    first = service.process(bars())
+
+    assert first.signal_count == 1
+    assert queue.signals[0].action is SignalAction.BUY
+    assert first.execution_count == 0
+    assert first.was_risk_blocked
+
+    exit_bar = price(
+        25,
+        high=1000.0,
+        low=970.0,
+        close=975.0,
+    )
+
+    second = service.process((exit_bar,))
+
+    assert second.signal_count == 0
+    assert len(queue.signals) == 1

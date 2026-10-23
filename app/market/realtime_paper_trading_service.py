@@ -44,7 +44,10 @@ from app.risk.risk_aware_queue_execution_service import (
     RiskAwareQueueExecutionService,
 )
 from app.trading.order_models import OrderType
-from app.trading.signal_models import TradeSignal
+from app.trading.signal_models import (
+    SignalAction,
+    TradeSignal,
+)
 from app.risk.paper_trading_pretrade_risk import (
     PaperTradingRiskDecision,
 )
@@ -490,6 +493,7 @@ class RealtimePaperTradingService:
                     )
 
                     if queue_result.is_failed:
+                        self._close_unfilled_buy_state(signal)
                         if continue_on_error:
                             continue
 
@@ -544,6 +548,7 @@ class RealtimePaperTradingService:
                     )
 
                     if not records:
+                        self._close_unfilled_buy_state(signal)
                         continue
 
                     portfolio_result = (
@@ -707,6 +712,15 @@ class RealtimePaperTradingService:
                 raise
             return False
 
+
+    def _close_unfilled_buy_state(
+        self,
+        signal: TradeSignal,
+    ) -> None:
+        """???BUY?????????????????"""
+
+        if signal.action is SignalAction.BUY:
+            self.signal_engine.mark_position_closed(signal.code)
 
     def _resolve_trace_route(
         self,
