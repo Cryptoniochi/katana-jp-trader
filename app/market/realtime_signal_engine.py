@@ -480,7 +480,8 @@ class RealtimeSignalEngine:
                 "orb": (
                     lambda _code: OrbSignalStrategy(
                         settings=OrbSignalStrategySettings(
-                            breakout_volume_ratio=0.8
+                            breakout_volume_ratio=0.8,
+                            minimum_breakout_rate=0.005,
                         )
                     )
                 ),

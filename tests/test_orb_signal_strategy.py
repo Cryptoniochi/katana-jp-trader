@@ -321,6 +321,43 @@ def test_orb_enters_at_most_once_per_day() -> None:
     ]
 
 
+
+def test_orb_applies_minimum_breakout_rate() -> None:
+    _strategy, result = run_strategy(
+        (
+            bar(9, 0, high_price=1000.0, volume=1000.0),
+            bar(9, 5, high_price=1000.0, volume=1000.0),
+            bar(9, 10, high_price=1000.0, volume=1000.0),
+            bar(9, 15, high_price=1000.0, volume=1000.0),
+            bar(9, 20, high_price=1004.9, close_price=1003.0, volume=2000.0),
+        ),
+        settings=OrbSignalStrategySettings(minimum_breakout_rate=0.005),
+    )
+    assert result.signal_count == 0
+
+
+def test_orb_accepts_minimum_breakout_rate_boundary() -> None:
+    _strategy, result = run_strategy(
+        (
+            bar(9, 0, high_price=1000.0, volume=1000.0),
+            bar(9, 5, high_price=1000.0, volume=1000.0),
+            bar(9, 10, high_price=1000.0, volume=1000.0),
+            bar(9, 15, high_price=1000.0, volume=1000.0),
+            bar(9, 20, high_price=1005.0, close_price=1004.0, volume=2000.0),
+        ),
+        settings=OrbSignalStrategySettings(minimum_breakout_rate=0.005),
+    )
+    assert result.signal_count == 1
+    signal = result.signals[0]
+    assert signal.action is SignalAction.BUY
+    assert signal.metadata["breakout_rate"] == pytest.approx(0.005)
+
+
+def test_orb_rejects_non_positive_minimum_breakout_rate() -> None:
+    with pytest.raises(ValueError, match="最低ブレイク率"):
+        OrbSignalStrategySettings(minimum_breakout_rate=0.0)
+
+
 def test_orb_applies_volume_filter() -> None:
     """出来高倍率不足ならブレイクを見送る。"""
 

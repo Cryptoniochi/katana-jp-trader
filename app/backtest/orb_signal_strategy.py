@@ -68,6 +68,7 @@ class OrbSignalStrategySettings:
     min_opening_range_volume: float | None = None
     min_breakout_volume: float | None = None
     breakout_volume_ratio: float | None = None
+    minimum_breakout_rate: float | None = None
     min_price: float | None = None
     max_price: float | None = None
     min_opening_range_turnover: float | None = None
@@ -91,6 +92,7 @@ class OrbSignalStrategySettings:
             "損切り率": self.stop_loss_rate,
             "利確率": self.take_profit_rate,
             "出来高倍率": self.breakout_volume_ratio,
+            "最低ブレイク率": self.minimum_breakout_rate,
             "最低株価": self.min_price,
             "最高株価": self.max_price,
         }
@@ -323,6 +325,15 @@ class OrbSignalStrategy:
             self._record_diagnostic(OrbEntryDecision.NO_PRICE_BREAKOUT)
             return None
 
+        if (
+            self.settings.minimum_breakout_rate is not None
+            and bar.high_price
+            < state.opening_high
+            * (1.0 + self.settings.minimum_breakout_rate)
+        ):
+            self._record_diagnostic(OrbEntryDecision.NO_PRICE_BREAKOUT)
+            return None
+
         average_opening_volume = (
             state.opening_volume / state.opening_bar_count
         )
@@ -372,6 +383,9 @@ class OrbSignalStrategy:
             metadata={
                 "opening_range_high": state.opening_high,
                 "breakout_high": bar.high_price,
+                "breakout_rate": (
+                    bar.high_price / state.opening_high - 1.0
+                ),
                 "average_opening_volume": average_opening_volume,
             },
         )
