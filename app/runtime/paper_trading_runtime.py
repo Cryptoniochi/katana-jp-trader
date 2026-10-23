@@ -533,11 +533,21 @@ class PaperTradingRuntime:
             if realized_profit_loss is None
             else realized_profit_loss + unrealized_profit_loss
         )
+        prior_day_execution_exists = (
+            metrics is not None
+            and self._has_execution_before_runtime_start()
+        )
+        pnl_reconciliation_scope = (
+            "unavailable_due_to_prior_execution"
+            if prior_day_execution_exists
+            else "runtime_session"
+        )
         pnl_reconciliation_difference = (
             None
             if (
                 session_equity_change is None
                 or realized_profit_loss is None
+                or prior_day_execution_exists
             )
             else (
                 session_equity_change
@@ -661,6 +671,7 @@ class PaperTradingRuntime:
                 pnl_reconciliation_difference
             ),
             "pnl_consistent": pnl_consistent,
+            "pnl_reconciliation_scope": pnl_reconciliation_scope,
             "risk_evaluated_cycle_count": sum(
                 1
                 for record in self._records
@@ -828,6 +839,47 @@ class PaperTradingRuntime:
                 if quantity != 0
             )
         )
+
+    def _has_execution_before_runtime_start(self) -> bool:
+        """Return whether today's ledger predates this runtime session."""
+
+        if (
+            self.database_path is None
+            or not self.database_path.exists()
+            or self._started_at is None
+        ):
+            return False
+
+        trading_date = self._started_at.astimezone(
+            ZoneInfo("Asia/Tokyo")
+        ).date()
+        tokyo = ZoneInfo("Asia/Tokyo")
+
+        try:
+            with sqlite3.connect(
+                self.database_path,
+                timeout=5.0,
+            ) as connection:
+                rows = connection.execute(
+                    "SELECT executed_at FROM trade_executions"
+                ).fetchall()
+        except (OSError, sqlite3.Error):
+            return False
+
+        for row in rows:
+            try:
+                executed_at = self._parse_timestamp(row[0])
+            except (TypeError, ValueError):
+                continue
+
+            if (
+                executed_at.astimezone(tokyo).date()
+                == trading_date
+                and executed_at < self._started_at
+            ):
+                return True
+
+        return False
 
     @staticmethod
     def _parse_timestamp(value: object) -> datetime:

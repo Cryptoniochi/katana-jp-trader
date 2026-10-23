@@ -264,12 +264,22 @@ class FullDayValidationService:
         reconciliation_difference = self._float_or_none(
             runtime.get("pnl_reconciliation_difference")
         )
+        reconciliation_scope = str(
+            runtime.get("pnl_reconciliation_scope") or ""
+        )
+        reconciliation_not_applicable = (
+            reconciliation_scope
+            == "unavailable_due_to_prior_execution"
+        )
         runtime_pnl_ok = (
-            pnl_consistent is not False
-            and (
-                reconciliation_difference is None
-                or abs(reconciliation_difference)
-                <= self.pnl_tolerance
+            reconciliation_not_applicable
+            or (
+                pnl_consistent is not False
+                and (
+                    reconciliation_difference is None
+                    or abs(reconciliation_difference)
+                    <= self.pnl_tolerance
+                )
             )
         )
         checks.append(
@@ -278,11 +288,19 @@ class FullDayValidationService:
                 label="Runtime P/L reconciliation",
                 passed=runtime_pnl_ok,
                 message=(
-                    "Runtime P/L reconciliation is consistent."
-                    if runtime_pnl_ok
+                    (
+                        "Runtime P/L reconciliation is not applicable "
+                        "because executions predate the current runtime "
+                        "session; day-wide P/L is validated separately."
+                    )
+                    if reconciliation_not_applicable
                     else (
-                        "Runtime P/L reconciliation mismatch. "
-                        f"difference={reconciliation_difference}"
+                        "Runtime P/L reconciliation is consistent."
+                        if runtime_pnl_ok
+                        else (
+                            "Runtime P/L reconciliation mismatch. "
+                            f"difference={reconciliation_difference}"
+                        )
                     )
                 ),
             )
@@ -617,6 +635,7 @@ class FullDayValidationService:
             "session_equity_change",
             "pnl_reconciliation_difference",
             "pnl_consistent",
+            "pnl_reconciliation_scope",
             "risk_evaluated_cycle_count",
             "risk_blocked_cycle_count",
             "error_message",

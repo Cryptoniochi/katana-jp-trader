@@ -433,3 +433,33 @@ def test_missing_date_scoped_integrity_rejects_other_latest_day(
         and not check.passed
         for check in result.checks
     )
+
+
+def test_full_day_validation_accepts_restart_scoped_pnl_reconciliation(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    payload = json.loads(
+        service.runtime_status_path.read_text(
+            encoding="utf-8"
+        )
+    )
+    payload["session_equity_change"] = 1550.0
+    payload["realized_profit_loss"] = 5000.0
+    payload["pnl_reconciliation_difference"] = None
+    payload["pnl_consistent"] = None
+    payload["pnl_reconciliation_scope"] = (
+        "unavailable_due_to_prior_execution"
+    )
+    _write(service.runtime_status_path, payload)
+
+    result = service.validate(trading_date=DAY)
+
+    reconciliation = next(
+        check
+        for check in result.checks
+        if check.key == "runtime_pnl_reconciliation"
+    )
+    assert reconciliation.passed is True
+    assert "not applicable" in reconciliation.message.lower()
+    assert result.passed is True
