@@ -81,6 +81,42 @@ def test_market_buy_payload_matches_cash_order_contract():
     }
 
 
+
+def test_sor_exchange_9_is_supported_and_used_in_payload():
+    calls = []
+
+    def transport(method, url, headers, body, timeout):
+        calls.append((method, url, headers, body, timeout))
+        if url.endswith("/token"):
+            return 200, b'{"ResultCode":0,"Token":"token"}'
+        if url.endswith("/sendorder"):
+            return 200, b'{"Result":0,"OrderId":"broker-sor-123"}'
+        raise AssertionError(url)
+
+    client = KabuStationClient(
+        settings=KabuStationClientSettings(api_password="pw"),
+        transport=transport,
+    )
+    sender = KabuStationCashOrderSender(
+        client=client,
+        settings=KabuStationCashOrderSettings(
+            exchange=9,
+            account_type=4,
+            cash_buy_fund_type="02",
+        ),
+    )
+
+    payload = sender.build_payload(_order())
+
+    assert payload["Exchange"] == 9
+
+    result = sender.send_once(_order())
+
+    assert result == "broker-sor-123"
+    send_calls = [item for item in calls if item[1].endswith("/sendorder")]
+    assert len(send_calls) == 1
+    assert json.loads(send_calls[0][3].decode("utf-8"))["Exchange"] == 9
+
 def test_limit_sell_payload_uses_sell_specific_fields():
     sender, _ = _sender()
     payload = sender.build_payload(
