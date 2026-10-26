@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, time as datetime_time, timezone
+from threading import Event
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -54,11 +55,29 @@ class LiveProductionCompositionError(RuntimeError):
 
 
 class _LatestPriceBuffer:
+    """Latest PUSH prices plus a startup-ready signal.
+
+    A Live cycle must not run before at least one valid kabu Station PUSH tick
+    has reached this process.  Per-symbol price lookup remains fail-closed:
+    receiving one symbol never makes another symbol's price available.
+    """
+
     def __init__(self):
-        self._prices: dict[str,float]={}
-    def accept(self,tick):
-        self._prices[str(tick.code).strip()]=float(tick.price)
-    def price(self,code:str)->float:
+        self._prices: dict[str, float] = {}
+        self._first_price_received = Event()
+
+    def accept(self, tick):
+        code = str(tick.code).strip()
+        price = float(tick.price)
+        if not code or price <= 0:
+            return
+        self._prices[code] = price
+        self._first_price_received.set()
+
+    def has_received_price(self) -> bool:
+        return self._first_price_received.is_set()
+
+    def price(self, code: str) -> float:
         try:
             return self._prices[code.strip()]
         except KeyError as error:
@@ -73,6 +92,7 @@ class ConcreteLiveProductionApplication:
     def __init__(self,*,application,market_service,session_service,
                  trading_date,cycle_interval_seconds,eod_liquidation_flow,
                  registration_codes,
+                 realtime_price_ready_provider=None,
                  now_provider=None,sleeper=None):
         self.application=application
         self.market_service=market_service
@@ -81,6 +101,11 @@ class ConcreteLiveProductionApplication:
         self.cycle_interval_seconds=float(cycle_interval_seconds)
         self.eod_liquidation_flow=eod_liquidation_flow
         self.registration_codes=tuple(registration_codes)
+        self.realtime_price_ready_provider=(
+            realtime_price_ready_provider
+            if realtime_price_ready_provider is not None
+            else lambda: True
+        )
         self.now_provider=now_provider or (lambda: datetime.now(timezone.utc))
         self.sleeper=sleeper or time.sleep
 
@@ -114,6 +139,18 @@ class ConcreteLiveProductionApplication:
                 # Lunch: keep heartbeat alive, but do not generate/submit entries.
                 if lunch_start <= local_time < lunch_end:
                     self.sleeper(self.cycle_interval_seconds)
+                    continue
+
+                # Do not evaluate strategies until this Live process has actually
+                # received at least one valid realtime PUSH price.  start() only
+                # starts the WebSocket thread; it does not guarantee that the first
+                # PUSH message has arrived before this loop begins.
+                #
+                # Keep heartbeat alive while warming up.  Per-symbol lookup remains
+                # fail-closed later at the final order boundary, so one received
+                # symbol can never be used as another symbol's price.
+                if not self.realtime_price_ready_provider():
+                    self.sleeper(min(self.cycle_interval_seconds, 1.0))
                     continue
 
                 # Prime runtime health before the first eligible Live cycle and
@@ -405,4 +442,5 @@ class ConcreteLiveProductionFactory:
             cycle_interval_seconds=production_settings.cycle_interval_seconds,
             eod_liquidation_flow=final.eod_liquidation_flow,
             registration_codes=codes,
+            realtime_price_ready_provider=prices.has_received_price,
             now_provider=now,sleeper=sleeper)
