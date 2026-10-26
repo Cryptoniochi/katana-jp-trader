@@ -116,6 +116,28 @@ class ConcreteLiveProductionApplication:
                     self.sleeper(self.cycle_interval_seconds)
                     continue
 
+                # Prime runtime health before the first eligible Live cycle and
+                # after an intentional no-cycle interval (pre-open/lunch).
+                #
+                # The Kill Switch evaluates runtime health inside run_cycle().
+                # RuntimeHealthMonitorService requires both a fresh heartbeat
+                # and a fresh cycle.  Without this bootstrap record, the first
+                # real cycle can never pass its own precondition; after lunch,
+                # the deliberately old last_cycle_at creates the same deadlock.
+                #
+                # This records runtime liveness only.  It does not evaluate a
+                # strategy, create an execution, or transmit an order.
+                session_snapshot=self.session_service.snapshot()
+                last_cycle_at=session_snapshot.last_cycle_at
+                cycle_stale=(
+                    last_cycle_at is None
+                    or (now.astimezone(timezone.utc)
+                        - last_cycle_at.astimezone(timezone.utc)).total_seconds()
+                    >= 180.0
+                )
+                if cycle_stale:
+                    self.session_service.record_cycle(successful=True)
+
                 result=self.application.run_cycle(trading_date=self.trading_date)
                 self.session_service.record_cycle(
                     successful=(getattr(result.decision,"value","")!="blocked")
