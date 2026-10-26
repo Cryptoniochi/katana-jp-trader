@@ -525,3 +525,48 @@ def test_full_day_validation_rejects_pnl_mismatch_without_external_execution(
     assert reconciliation.passed is False
     assert "mismatch" in reconciliation.message.lower()
     assert result.passed is False
+
+
+def test_full_day_validation_accepts_stale_running_runtime_when_daily_summary_completed(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    runtime = json.loads(
+        service.runtime_status_path.read_text(encoding="utf-8")
+    )
+    runtime["state"] = "running"
+    runtime["generated_at"] = "2026-08-12T06:00:00+00:00"
+    _write(service.runtime_status_path, runtime)
+
+    result = service.validate(trading_date=DAY)
+
+    completion = next(
+        check
+        for check in result.checks
+        if check.key == "runtime_completed"
+    )
+    assert completion.passed is True
+    assert "stale running" in completion.message.lower()
+    assert result.passed is True
+
+
+def test_full_day_validation_rejects_fresh_running_runtime(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    runtime = json.loads(
+        service.runtime_status_path.read_text(encoding="utf-8")
+    )
+    runtime["state"] = "running"
+    runtime["generated_at"] = "2026-08-12T06:44:00+00:00"
+    _write(service.runtime_status_path, runtime)
+
+    result = service.validate(trading_date=DAY)
+
+    completion = next(
+        check
+        for check in result.checks
+        if check.key == "runtime_completed"
+    )
+    assert completion.passed is False
+    assert result.passed is False

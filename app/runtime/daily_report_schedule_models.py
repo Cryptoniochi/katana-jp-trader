@@ -30,14 +30,9 @@ class DailyReportScheduleSettings:
 
     def __post_init__(self) -> None:
         if self.retry_interval_seconds <= 0:
-            raise ValueError(
-                "再試行間隔は0より大きい必要があります。"
-            )
-
+            raise ValueError("再試行間隔は0より大きい必要があります。")
         if self.command_timeout_seconds <= 0:
-            raise ValueError(
-                "コマンドタイムアウトは0より大きい必要があります。"
-            )
+            raise ValueError("コマンドタイムアウトは0より大きい必要があります。")
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,20 +47,15 @@ class DailyReportScheduleStatus:
     next_action_at: datetime | None
     last_attempt_at: datetime | None
     report_exit_code: int | None
+    validation_exit_code: int | None
     notification_exit_code: int | None
     message: str
     settings: DailyReportScheduleSettings
 
     def __post_init__(self) -> None:
-        for value in (
-            self.generated_at,
-            self.next_action_at,
-            self.last_attempt_at,
-        ):
+        for value in (self.generated_at, self.next_action_at, self.last_attempt_at):
             if value is not None and value.tzinfo is None:
-                raise ValueError(
-                    "日時にはタイムゾーンが必要です。"
-                )
+                raise ValueError("日時にはタイムゾーンが必要です。")
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -83,14 +73,8 @@ class DailyReportScheduleStatus:
             else None
         )
         payload["settings"] = {
-            "run_at": self.settings.run_at.isoformat(
-                timespec="minutes"
-            ),
-            "retry_interval_seconds": (
-                self.settings.retry_interval_seconds
-            ),
-            "command_timeout_seconds": (
-                self.settings.command_timeout_seconds
-            ),
+            "run_at": self.settings.run_at.isoformat(timespec="minutes"),
+            "retry_interval_seconds": self.settings.retry_interval_seconds,
+            "command_timeout_seconds": self.settings.command_timeout_seconds,
         }
         return payload

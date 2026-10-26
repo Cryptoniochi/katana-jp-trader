@@ -169,21 +169,40 @@ class FullDayValidationService:
             expected=trading_date,
         )
 
-        runtime_completed = (
-            str(runtime.get("state") or "").lower()
+        runtime_state = str(runtime.get("state") or "").lower()
+        runtime_completed = runtime_state == "completed"
+        stale_running_runtime = (
+            runtime_state == "running"
+            and self._runtime_status_is_stale(runtime)
+            and daily_record is not None
+            and str(
+                getattr(
+                    daily_record.status,
+                    "value",
+                    daily_record.status,
+                )
+            ).lower()
             == "completed"
+        )
+        runtime_completion_ok = (
+            runtime_completed or stale_running_runtime
         )
         checks.append(
             FullDayValidationCheck(
                 key="runtime_completed",
                 label="Runtime completed",
-                passed=runtime_completed,
+                passed=runtime_completion_ok,
                 message=(
                     "Runtime completed normally."
                     if runtime_completed
                     else (
-                        "Runtime state is not completed. "
-                        f"state={runtime.get('state')}"
+                        "Stale running runtime status accepted because "
+                        "the authoritative daily summary is completed."
+                        if stale_running_runtime
+                        else (
+                            "Runtime state is not completed. "
+                            f"state={runtime.get('state')}"
+                        )
                     )
                 ),
             )
@@ -703,6 +722,36 @@ class FullDayValidationService:
                 "recovery_count"
             ),
         }
+
+    def _runtime_status_is_stale(
+        self,
+        runtime: dict[str, object],
+        *,
+        stale_seconds: float = 180.0,
+    ) -> bool:
+        generated_at = runtime.get("generated_at")
+        if not isinstance(generated_at, str) or not generated_at.strip():
+            return False
+
+        try:
+            timestamp = datetime.fromisoformat(
+                generated_at.replace("Z", "+00:00")
+            )
+        except ValueError:
+            return False
+
+        if timestamp.tzinfo is None:
+            return False
+
+        now = self.now_provider()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+
+        age_seconds = (
+            now.astimezone(timezone.utc)
+            - timestamp.astimezone(timezone.utc)
+        ).total_seconds()
+        return age_seconds >= stale_seconds
 
     @staticmethod
     def _daily_record_payload(
