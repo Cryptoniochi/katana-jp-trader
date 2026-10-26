@@ -109,3 +109,60 @@ def test_position_provider_returns_real_positions_only():
     assert len(positions) == 1
     assert positions[0].code == "7203"
     assert positions[0].quantity == 100
+
+
+def test_risk_portfolio_persists_new_equity_peak():
+    service = _AccountStateService(_state())
+    observed = []
+
+    provider = KabuStationLiveRiskPortfolioProvider(
+        account_state_service=service,
+        daily_profit_loss_provider=lambda: -1_000.0,
+        consecutive_loss_count_provider=lambda: 1,
+        peak_equity_provider=lambda: 850_000.0,
+        peak_equity_observer=lambda equity: observed.append(equity) or equity,
+        now_provider=lambda: NOW,
+    )
+
+    snapshot = provider()
+
+    assert observed == [910_000.0]
+    assert snapshot.peak_equity == 910_000.0
+
+
+def test_risk_portfolio_does_not_rewrite_peak_when_current_equity_is_lower():
+    service = _AccountStateService(_state())
+    observed = []
+
+    provider = KabuStationLiveRiskPortfolioProvider(
+        account_state_service=service,
+        daily_profit_loss_provider=lambda: -1_000.0,
+        consecutive_loss_count_provider=lambda: 1,
+        peak_equity_provider=lambda: 1_000_000.0,
+        peak_equity_observer=lambda equity: observed.append(equity) or equity,
+        now_provider=lambda: NOW,
+    )
+
+    snapshot = provider()
+
+    assert observed == []
+    assert snapshot.peak_equity == 1_000_000.0
+
+
+def test_risk_portfolio_fails_closed_when_peak_persistence_fails():
+    service = _AccountStateService(_state())
+
+    def fail_observe(equity):
+        raise RuntimeError("peak persistence failed")
+
+    provider = KabuStationLiveRiskPortfolioProvider(
+        account_state_service=service,
+        daily_profit_loss_provider=lambda: -1_000.0,
+        consecutive_loss_count_provider=lambda: 1,
+        peak_equity_provider=lambda: 850_000.0,
+        peak_equity_observer=fail_observe,
+        now_provider=lambda: NOW,
+    )
+
+    with pytest.raises(RuntimeError, match="peak persistence failed"):
+        provider()

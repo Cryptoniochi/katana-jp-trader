@@ -21,6 +21,7 @@ from app.live.risk_models import RiskPortfolioSnapshot
 
 TOKYO = ZoneInfo("Asia/Tokyo")
 FloatProvider = Callable[[], float]
+PeakEquityObserver = Callable[[float], float]
 IntProvider = Callable[[], int]
 NowProvider = Callable[[], datetime]
 
@@ -35,20 +36,27 @@ class KabuStationLiveRiskPortfolioProvider:
         daily_profit_loss_provider: FloatProvider,
         consecutive_loss_count_provider: IntProvider,
         peak_equity_provider: FloatProvider,
+        peak_equity_observer: PeakEquityObserver | None = None,
         now_provider: NowProvider,
     ) -> None:
         self.account_state_service = account_state_service
         self.daily_profit_loss_provider = daily_profit_loss_provider
         self.consecutive_loss_count_provider = consecutive_loss_count_provider
         self.peak_equity_provider = peak_equity_provider
+        self.peak_equity_observer = peak_equity_observer
         self.now_provider = now_provider
 
     def __call__(self) -> RiskPortfolioSnapshot:
         state = self.account_state_service.refresh()
         current_equity = state.cash_balance + state.total_exposure
-        peak_equity = self._finite_non_negative(
+        saved_peak_equity = self._finite_non_negative(
             self.peak_equity_provider(), "peak equity"
         )
+        peak_equity = max(saved_peak_equity, current_equity)
+        if self.peak_equity_observer is not None and current_equity > saved_peak_equity:
+            peak_equity = self._finite_non_negative(
+                self.peak_equity_observer(current_equity), "observed peak equity"
+            )
         daily_profit_loss = self._finite(
             self.daily_profit_loss_provider(), "daily realized profit/loss"
         )
@@ -71,8 +79,7 @@ class KabuStationLiveRiskPortfolioProvider:
             cash_balance=state.cash_balance,
             total_exposure=state.total_exposure,
             current_equity=current_equity,
-            # A saved peak can legitimately lag a newly-observed account high.
-            peak_equity=max(peak_equity, current_equity),
+            peak_equity=peak_equity,
             daily_realized_profit_loss=daily_profit_loss,
             consecutive_losses=consecutive_losses,
             open_position_codes=state.position_codes,

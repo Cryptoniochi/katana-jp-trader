@@ -89,6 +89,7 @@ class LiveAccountRuntimeProviderFactory:
                 daily_loss_state.consecutive_loss_count
             ),
             peak_equity_provider=peak_store.peak_equity,
+            peak_equity_observer=lambda equity: peak_store.observe(equity).peak_equity,
             now_provider=effective_now_provider,
         )
         position_provider = KabuStationLivePositionProvider(
