@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import date
 from threading import Lock
 
@@ -21,32 +22,52 @@ class KabuStationCompletedBarProvider:
     def accept(self, bar: RealtimeBar) -> None:
         """完成RealtimeBarを既存StockPrice形式で保持する。"""
 
-        stock_price = StockPrice(
-            code=bar.code,
-            datetime=bar.started_at,
-            open=bar.open_price,
-            high=bar.high_price,
-            low=bar.low_price,
-            close=bar.close_price,
-            volume=max(0, int(round(bar.volume))),
+        self.accept_stock_price(
+            StockPrice(
+                code=bar.code,
+                datetime=bar.started_at,
+                open=bar.open_price,
+                high=bar.high_price,
+                low=bar.low_price,
+                close=bar.close_price,
+                volume=max(0, int(round(bar.volume))),
+            )
+        )
+
+    def seed(self, prices: Iterable[StockPrice]) -> None:
+        """永続化済みバーを起動時バッファへ復元する。"""
+
+        for price in prices:
+            self.accept_stock_price(price)
+
+    def accept_stock_price(self, stock_price: StockPrice) -> None:
+        """StockPriceを重複排除しながら保持する。"""
+
+        normalized_code = stock_price.code.strip()
+        if not normalized_code:
+            raise ValueError("code must not be empty.")
+
+        normalized = StockPrice(
+            code=normalized_code,
+            datetime=stock_price.datetime,
+            open=stock_price.open,
+            high=stock_price.high,
+            low=stock_price.low,
+            close=stock_price.close,
+            volume=stock_price.volume,
         )
 
         with self._lock:
-            code_bars = self._bars.setdefault(
-                stock_price.code,
-                [],
-            )
+            code_bars = self._bars.setdefault(normalized_code, [])
 
             for index, existing in enumerate(code_bars):
-                if existing.datetime == stock_price.datetime:
-                    code_bars[index] = stock_price
+                if existing.datetime == normalized.datetime:
+                    code_bars[index] = normalized
                     break
             else:
-                code_bars.append(stock_price)
+                code_bars.append(normalized)
 
-            code_bars.sort(
-                key=lambda item: item.datetime
-            )
+            code_bars.sort(key=lambda item: item.datetime)
 
     def __call__(
         self,

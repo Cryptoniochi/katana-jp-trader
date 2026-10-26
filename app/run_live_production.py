@@ -23,7 +23,11 @@ def run_live_production(
     error_output,
 ):
     """Run concrete Live only after explicit production activation."""
-    environment = load_runtime_environment(environ)
+    environment = (
+        load_runtime_environment()
+        if environ is None
+        else dict(environ)
+    )
 
     try:
         activation_state = LiveProductionActivationInterlock.require_released(

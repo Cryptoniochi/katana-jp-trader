@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime, time as datetime_time, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+from app.market.bar_repository import MarketBarRepository
 from app.market.high_breakout_candidate_provider import (
     RepositoryHighBreakoutCandidateProvider,
 )
@@ -25,7 +27,7 @@ from app.live.live_runtime_kill_switch_composition import (
 from app.live.live_runtime_read_only_composition import (
     LiveRuntimeReadOnlyProviderFactory,
 )
-from app.live.live_runtime_safety_state import LiveRuntimeSafetyStateProvider
+from app.live.live_order_safety import LiveOrderSafetySnapshot, safety_snapshot_from_states
 from app.live.live_signal_execution_bridge import LiveRealtimeSignalIntentProvider
 from app.live.risk_manager import LiveRiskManager
 from app.live.risk_models import RiskLimits
@@ -34,6 +36,7 @@ from app.market.kabu_station_completed_bar_provider import KabuStationCompletedB
 from app.market.kabu_station_realtime_provider import KabuStationRealtimeProvider
 from app.market.kabu_station_realtime_service import KabuStationRealtimeService
 from app.market.kabu_station_websocket import KabuStationWebSocketClient
+from app.market.models import StockPrice
 from app.market.realtime_signal_engine import RealtimeSignalEngine
 from app.dynamic_watchlist.strategy_routing_repository import (
     DynamicWatchlistStrategyRoutingError,
@@ -172,12 +175,46 @@ class ConcreteLiveProductionFactory:
         ))
         provider=KabuStationRealtimeProvider(client=client)
         bars=KabuStationCompletedBarProvider()
+        bar_repository=MarketBarRepository(db)
+        day_start=datetime.combine(
+            trading_date, datetime_time.min, tzinfo=TOKYO
+        )
+        day_end=datetime.combine(
+            trading_date, datetime_time.max, tzinfo=TOKYO
+        )
+        for code in production_settings.codes:
+            bars.seed(
+                bar_repository.read(
+                    code,
+                    interval_minutes=5,
+                    start_at=day_start,
+                    end_at=day_end,
+                )
+            )
+
+        def accept_completed_bar(bar) -> None:
+            stock_price=StockPrice(
+                code=bar.code,
+                datetime=bar.started_at,
+                open=bar.open_price,
+                high=bar.high_price,
+                low=bar.low_price,
+                close=bar.close_price,
+                volume=max(0, int(round(bar.volume))),
+            )
+            bars.accept_stock_price(stock_price)
+            bar_repository.save_all(
+                [stock_price],
+                interval_minutes=5,
+                data_source="kabu_station_realtime",
+            )
+
         prices=_LatestPriceBuffer()
         market_service=KabuStationRealtimeService(
             provider=provider,
             websocket_client_factory=lambda **kwargs: KabuStationWebSocketClient(
                 url=production_settings.kabu_station_websocket_url, **kwargs),
-            on_completed_bar=bars.accept,
+            on_completed_bar=accept_completed_bar,
             on_tick=prices.accept,
             interval_minutes=5,
         )
@@ -222,11 +259,51 @@ class ConcreteLiveProductionFactory:
             manual_kill_switch_state_path=production_settings.manual_kill_switch_state_path,
             now_provider=now,
         )
-        safety=LiveRuntimeSafetyStateProvider(
-            reconciliation_report_provider=readonly.reconciliation_report_provider,
-            fault_tolerance_attempt_provider=readonly.fault_tolerance_attempt_provider,
-            now_provider=now,
-        )
+        # Production Live safety must be based on a fresh authoritative broker
+        # read, not the legacy Phase 5B Paper/Shadow/flat-account reconciliation.
+        # The account service is owned by FinalLiveRuntimeFactory, so the closure
+        # is bound immediately after that graph is constructed.  Any call before
+        # binding, broker-read failure, or fault-tolerance read failure fails closed.
+        safety_account_service = {"value": None}
+
+        def safety() -> LiveOrderSafetySnapshot:
+            evaluated_at=now()
+            if evaluated_at.tzinfo is None:
+                raise ValueError("now_provider must return timezone-aware datetime.")
+            evaluated_at=evaluated_at.astimezone(timezone.utc)
+            service=safety_account_service["value"]
+            if service is None:
+                return LiveOrderSafetySnapshot(
+                    safe_stop_active=True,
+                    reconciliation_consistent=False,
+                    reconciliation_state="broker_safety_unbound",
+                    evaluated_at=evaluated_at,
+                )
+            try:
+                service.refresh()
+            except Exception:
+                return LiveOrderSafetySnapshot(
+                    safe_stop_active=True,
+                    reconciliation_consistent=False,
+                    reconciliation_state="broker_state_unavailable",
+                    evaluated_at=evaluated_at,
+                )
+            try:
+                attempt=readonly.fault_tolerance_attempt_provider()
+                return safety_snapshot_from_states(
+                    reconciliation_report=SimpleNamespace(
+                        consistent=True,
+                        state="broker_state_fresh",
+                    ),
+                    fault_tolerance_attempt=attempt,
+                )
+            except Exception:
+                return LiveOrderSafetySnapshot(
+                    safe_stop_active=True,
+                    reconciliation_consistent=False,
+                    reconciliation_state="fault_tolerance_unavailable",
+                    evaluated_at=evaluated_at,
+                )
         kill=LiveRuntimeKillSwitchComposition(
             daily_profit_loss_provider=readonly.daily_profit_loss_provider,
             consecutive_loss_count_provider=readonly.consecutive_loss_count_provider,
@@ -275,6 +352,7 @@ class ConcreteLiveProductionFactory:
             activation_enabled=production_activation_enabled,
             runtime_armed=runtime_armed,now_provider=now,
         )
+        safety_account_service["value"]=final.account.account_state_service
 
         # Refresh real account before PUSH registration so held symbols remain
         # protected even when today's watchlist changed.

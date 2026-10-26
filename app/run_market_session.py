@@ -24,6 +24,7 @@ from app.run_paper_trading import (
     RuntimeNotificationGatewayFactory,
     _send_runtime_notification,
     create_runtime_notification_gateway,
+    load_runtime_environment,
     run as run_paper_trading,
 )
 from app.run_live_production import run_live_production
@@ -183,7 +184,11 @@ def run(
     arguments, paper_arguments = (
         parser.parse_known_args(argv)
     )
-    environment = environ if environ is not None else {}
+    environment = (
+        load_runtime_environment()
+        if environ is None
+        else dict(environ)
+    )
     try:
         execution_settings = ExecutionModeSettings.from_environment(
             environment

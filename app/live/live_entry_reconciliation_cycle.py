@@ -45,9 +45,19 @@ class LiveEntryReconciliationCycle:
         rows=self.registry.list_pending()
         for row in rows:
             journal_record=self.journal.get(row.execution_key)
-            # PREPARED/CLAIMED means submission has not durably reached SUBMITTED.
-            # Keep it pending and block new risk; never guess/retry here.
-            if journal_record is None or journal_record.state is not LiveExecutionState.SUBMITTED:
+            # The registry reservation is intentionally created before boundary
+            # preparation.  If no journal record exists, execution never reached
+            # PREPARED and therefore cannot have reached CLAIMED/SUBMITTED or the
+            # broker transport.  Completing only this exact crash/block window is
+            # safe and prevents a rejected pre-submit intent from blocking all
+            # later Live cycles.
+            if journal_record is None:
+                self.registry.complete(row.execution_key)
+                completed+=1
+                continue
+            # PREPARED/CLAIMED or any other non-SUBMITTED durable state remains
+            # fail-closed.  Never guess, retry, or auto-complete it here.
+            if journal_record.state is not LiveExecutionState.SUBMITTED:
                 blocked+=1
                 continue
             try:

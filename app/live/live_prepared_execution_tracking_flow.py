@@ -58,8 +58,12 @@ class LivePreparedExecutionTrackingFlow:
         )
         prepared = self.preparation_service.prepare(intent)
         if not prepared.is_prepared:
+            boundary = prepared.boundary_result
+            reason = getattr(boundary.reason, "value", str(boundary.reason))
+            message = boundary.message
             raise RuntimeError(
-                "Live execution preparation was blocked; submission is prohibited."
+                "Live execution preparation was blocked; submission is prohibited. "
+                f"reason={reason} message={message}"
             )
         claim = self.claim_gate.claim(execution_key)
         if claim.decision is not LiveExecutionClaimDecision.CLAIMED:
