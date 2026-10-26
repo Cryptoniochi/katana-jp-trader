@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from app.live.kabu_station_read_only import (
@@ -80,15 +80,40 @@ class KabuStationLiveAccountStateService:
         *,
         read_only_service: KabuStationReadOnlyService,
         report_writer: KabuStationReadOnlyReportWriter | None = None,
+        cache_ttl_seconds: float = 5.0,
+        now_provider: Callable[[], datetime] | None = None,
     ) -> None:
+        if cache_ttl_seconds < 0:
+            raise ValueError("cache_ttl_seconds must be non-negative.")
         self.read_only_service = read_only_service
         self.report_writer = report_writer
+        self.cache_ttl = timedelta(seconds=cache_ttl_seconds)
+        self.now_provider = now_provider or (lambda: datetime.now(timezone.utc))
+        self._cached_state: LiveAccountState | None = None
 
-    def refresh(self) -> LiveAccountState:
+    def refresh(self, *, force: bool = False) -> LiveAccountState:
+        now = self.now_provider()
+        if now.tzinfo is None:
+            raise LiveAccountStateUnavailableError(
+                "Account-state now_provider must return timezone-aware datetime."
+            )
+        now = now.astimezone(timezone.utc)
+
+        cached = self._cached_state
+        if (
+            not force
+            and cached is not None
+            and now >= cached.generated_at
+            and now - cached.generated_at <= self.cache_ttl
+        ):
+            return cached
+
         snapshot = self.read_only_service.collect()
         if self.report_writer is not None:
             self.report_writer.write(snapshot)
-        return self.from_snapshot(snapshot)
+        state = self.from_snapshot(snapshot)
+        self._cached_state = state
+        return state
 
     @staticmethod
     def from_snapshot(snapshot: KabuStationReadOnlySnapshot) -> LiveAccountState:
@@ -103,7 +128,11 @@ class KabuStationLiveAccountStateService:
             or snapshot.errors
         ):
             raise LiveAccountStateUnavailableError(
-                "Complete kabu Station account state is required for Live execution."
+                "Complete kabu Station account state is required for Live execution. "
+                f"state={snapshot.state!r} "
+                f"connected={snapshot.connected!r} "
+                f"token_issued={snapshot.token_issued!r} "
+                f"errors={snapshot.errors!r}"
             )
         if snapshot.cash_wallet is None:
             raise LiveAccountStateUnavailableError(

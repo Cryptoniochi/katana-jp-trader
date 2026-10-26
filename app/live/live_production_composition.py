@@ -280,11 +280,14 @@ class ConcreteLiveProductionFactory:
                 )
             try:
                 service.refresh()
-            except Exception:
+            except Exception as error:
                 return LiveOrderSafetySnapshot(
                     safe_stop_active=True,
                     reconciliation_consistent=False,
-                    reconciliation_state="broker_state_unavailable",
+                    reconciliation_state=(
+                        "broker_state_unavailable:"
+                        f"{type(error).__name__}:{error}"
+                    ),
                     evaluated_at=evaluated_at,
                 )
             try:

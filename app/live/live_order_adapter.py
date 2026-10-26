@@ -229,7 +229,7 @@ class LockedLiveOrderAdapter:
                     risk_assessment=None,
                     kill_switch_evaluation=None,
                     safety_snapshot=safety_snapshot,
-                    message="Live order blocked because Safe Stop is active.",
+                    message=("Live order blocked because Safe Stop is active. "f"state={safety_snapshot.reconciliation_state}"),
                 )
 
             if not safety_snapshot.reconciliation_consistent:
@@ -293,7 +293,7 @@ class LockedLiveOrderAdapter:
                 signal,
                 portfolio=portfolio,
             )
-        except Exception:
+        except Exception as error:
             return LiveOrderBoundaryResult(
                 intent=intent,
                 decision=LiveOrderDecision.BLOCKED,
@@ -304,7 +304,8 @@ class LockedLiveOrderAdapter:
                 safety_snapshot=safety_snapshot,
                 message=(
                     "Live order blocked because final risk state could not "
-                    "be obtained or evaluated."
+                    "be obtained or evaluated. "
+                    f"error={type(error).__name__}: {error}"
                 ),
             )
 
