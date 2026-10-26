@@ -109,6 +109,10 @@ def _set_unlimited_execution_time(
         "-ErrorAction Stop; "
         "$settings = $task.Settings; "
         "$settings.ExecutionTimeLimit = 'PT0S'; "
+        "$settings.RestartCount = 3; "
+        "$settings.RestartInterval = 'PT1M'; "
+        "$settings.DisallowStartIfOnBatteries = $false; "
+        "$settings.StopIfGoingOnBatteries = $false; "
         "Set-ScheduledTask "
         f"-TaskName '{escaped_task_name}' "
         "-Settings $settings "
@@ -250,7 +254,7 @@ def write_task_command(
         "    echo ERROR: Operational log maintenance failed.\r\n"
         "    exit /b 1\r\n"
         ")\r\n"
-        f'"{python_path}" -m app.run_katana_service '
+        f'"{python_path}" -m app.run_katana_service_resilient '
         f'--database-path "{resolved_database}" '
         f'--dashboard-port {resolved_port} '
         "--tailscale-wait-attempts 60 "
