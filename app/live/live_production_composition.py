@@ -4,7 +4,6 @@ from __future__ import annotations
 import time
 from datetime import datetime, time as datetime_time, timezone
 from pathlib import Path
-from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from app.market.bar_repository import MarketBarRepository
@@ -27,7 +26,7 @@ from app.live.live_runtime_kill_switch_composition import (
 from app.live.live_runtime_read_only_composition import (
     LiveRuntimeReadOnlyProviderFactory,
 )
-from app.live.live_order_safety import LiveOrderSafetySnapshot, safety_snapshot_from_states
+from app.live.live_order_safety import LiveOrderSafetySnapshot
 from app.live.live_signal_execution_bridge import LiveRealtimeSignalIntentProvider
 from app.live.risk_manager import LiveRiskManager
 from app.live.risk_models import RiskLimits
@@ -290,13 +289,6 @@ class ConcreteLiveProductionFactory:
                 )
             try:
                 attempt=readonly.fault_tolerance_attempt_provider()
-                return safety_snapshot_from_states(
-                    reconciliation_report=SimpleNamespace(
-                        consistent=True,
-                        state="broker_state_fresh",
-                    ),
-                    fault_tolerance_attempt=attempt,
-                )
             except Exception:
                 return LiveOrderSafetySnapshot(
                     safe_stop_active=True,
@@ -304,6 +296,21 @@ class ConcreteLiveProductionFactory:
                     reconciliation_state="fault_tolerance_unavailable",
                     evaluated_at=evaluated_at,
                 )
+
+            # A successful refresh above is the authoritative Production Live
+            # reconciliation result. Do not pass it through the legacy Phase 5B
+            # Paper/Shadow reconciliation state vocabulary.
+            safe_stop_active = (
+                attempt is not None
+                and getattr(getattr(attempt, "decision", None), "value", None)
+                == "safe_stop"
+            )
+            return LiveOrderSafetySnapshot(
+                safe_stop_active=safe_stop_active,
+                reconciliation_consistent=True,
+                reconciliation_state="broker_state_fresh",
+                evaluated_at=evaluated_at,
+            )
         kill=LiveRuntimeKillSwitchComposition(
             daily_profit_loss_provider=readonly.daily_profit_loss_provider,
             consecutive_loss_count_provider=readonly.consecutive_loss_count_provider,
