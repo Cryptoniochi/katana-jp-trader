@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+if os.name == "nt":
+    import msvcrt
 
 from app.market.kabu_station_models import (
     KabuStationConnectionError,
@@ -80,6 +86,21 @@ class KabuStationClient:
         self.settings = settings
         self.transport = transport or _urllib_transport
         self._token: str | None = None
+
+        # Production processes share one kabu Station API token.
+        # Injected transports stay isolated unless tests explicitly
+        # configure these attributes.
+        self._shared_token_path: Path | None = (
+            Path("reports/service/kabu_station_api_token.json")
+            if transport is None
+            else None
+        )
+        self._shared_token_lock_path: Path | None = (
+            Path("reports/service/kabu_station_api_token.lock")
+            if self._shared_token_path is not None
+            else None
+        )
+
         self._registered_symbols: tuple[
             KabuStationSymbol, ...
         ] = ()
@@ -101,6 +122,21 @@ class KabuStationClient:
     def issue_token(self) -> str:
         """APIパスワードから当日用トークンを取得する。"""
 
+        if self._shared_token_path is None:
+            return self._issue_new_token()
+
+        with self._shared_token_lock():
+            shared = self._read_shared_token()
+
+            if shared:
+                self._token = shared
+                return shared
+
+            return self._issue_new_token_and_share()
+
+    def _issue_new_token(self) -> str:
+        """Issue a new token directly from kabu Station."""
+
         response = self._request(
             "POST",
             "/token",
@@ -113,11 +149,68 @@ class KabuStationClient:
 
         if not token:
             raise KabuStationResponseError(
-                "トークン応答にTokenがありません。"
+                "kabu Station token response did not contain Token."
             )
 
         self._token = token
         return token
+
+    def _issue_new_token_and_share(self) -> str:
+        token = self._issue_new_token()
+        self._write_shared_token(token)
+        return token
+
+    def _read_shared_token(self) -> str | None:
+        path = self._shared_token_path
+
+        if path is None or not path.exists():
+            return None
+
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+
+        token = str(payload.get("token") or "").strip()
+        return token or None
+
+    def _write_shared_token(self, token: str) -> None:
+        path = self._shared_token_path
+
+        if path is None:
+            return
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+        temporary.write_text(
+            json.dumps({"token": token}),
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+
+    def _shared_token_lock(self):
+        return _SharedTokenLock(
+            self._shared_token_lock_path,
+            timeout_seconds=self.settings.timeout_seconds,
+        )
+
+    def _recover_get_token_after_401(
+        self,
+        failed_token: str,
+    ) -> str:
+        if self._shared_token_path is None:
+            return self._issue_new_token()
+
+        with self._shared_token_lock():
+            shared = self._read_shared_token()
+
+            # Another process already refreshed the token.
+            if shared and shared != failed_token:
+                self._token = shared
+                return shared
+
+            # We are the first process to recover this invalid token.
+            return self._issue_new_token_and_share()
 
     def register_symbols(
         self,
@@ -364,6 +457,33 @@ class KabuStationClient:
                 f"url={url} error={error}"
             ) from error
 
+        if (
+            authenticated
+            and method.upper() == "GET"
+            and status == 401
+        ):
+            failed_token = headers["X-API-KEY"]
+            recovered_token = self._recover_get_token_after_401(
+                failed_token
+            )
+            retry_headers = dict(headers)
+            retry_headers["X-API-KEY"] = recovered_token
+            try:
+                status, response_body = self.transport(
+                    method,
+                    url,
+                    retry_headers,
+                    body,
+                    resolved_timeout_seconds,
+                )
+            except KabuStationConnectionError:
+                raise
+            except Exception as error:
+                raise KabuStationConnectionError(
+                    "kabu Station API retry connection failed. "
+                    f"url={url} error={error}"
+                ) from error
+
         response = self._validate_response(
             status,
             response_body,
@@ -429,6 +549,33 @@ class KabuStationClient:
                 "失敗しました。 "
                 f"url={url} error={error}"
             ) from error
+
+        if (
+            authenticated
+            and method.upper() == "GET"
+            and status == 401
+        ):
+            failed_token = headers["X-API-KEY"]
+            recovered_token = self._recover_get_token_after_401(
+                failed_token
+            )
+            retry_headers = dict(headers)
+            retry_headers["X-API-KEY"] = recovered_token
+            try:
+                status, response_body = self.transport(
+                    method,
+                    url,
+                    retry_headers,
+                    body,
+                    resolved_timeout_seconds,
+                )
+            except KabuStationConnectionError:
+                raise
+            except Exception as error:
+                raise KabuStationConnectionError(
+                    "kabu Station API retry connection failed. "
+                    f"url={url} error={error}"
+                ) from error
 
         return self._validate_response(status, response_body)
 
@@ -496,6 +643,77 @@ def _decode_json_value(body: bytes) -> JsonValue:
         "Object配列である必要があります。"
     )
 
+
+
+class _SharedTokenLock:
+    """Small Windows cross-process file lock for token rotation."""
+
+    def __init__(
+        self,
+        path: Path | None,
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        self.path = path
+        self.timeout_seconds = timeout_seconds
+        self._handle = None
+
+    def __enter__(self):
+        if self.path is None:
+            return self
+
+        if os.name != "nt":
+            raise RuntimeError(
+                "Shared kabu Station token locking requires Windows."
+            )
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+b")
+        handle.seek(0, os.SEEK_END)
+
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+
+        deadline = time.monotonic() + self.timeout_seconds
+
+        while True:
+            try:
+                handle.seek(0)
+                msvcrt.locking(
+                    handle.fileno(),
+                    msvcrt.LK_NBLCK,
+                    1,
+                )
+                self._handle = handle
+                return self
+            except OSError:
+                if time.monotonic() >= deadline:
+                    handle.close()
+                    raise KabuStationConnectionError(
+                        "Timed out waiting for shared "
+                        "kabu Station token lock."
+                    )
+                time.sleep(0.05)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        handle = self._handle
+
+        if handle is None:
+            return False
+
+        try:
+            handle.seek(0)
+            msvcrt.locking(
+                handle.fileno(),
+                msvcrt.LK_UNLCK,
+                1,
+            )
+        finally:
+            handle.close()
+            self._handle = None
+
+        return False
 
 def _urllib_transport(
     method: str,
