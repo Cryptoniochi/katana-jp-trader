@@ -21,6 +21,9 @@ if errorlevel 1 (
 "C:\projects\katana\.venv\Scripts\python.exe" -m app.run_katana_service_resilient ^
     --database-path "data\katana.db" ^
     --dashboard-port 8000 ^
+    --enable-dynamic-watchlist-schedule ^
+    --enable-universe-daily-schedule ^
+    --enable-high-breakout-schedule ^
     --enable-morning-preflight-schedule ^
     --enable-daily-report-schedule ^
     --enable-paper-trading-schedule ^
