@@ -162,3 +162,85 @@ def test_coordinator_ambiguous_transport_failure_freezes_unknown(tmp_path):
     assert result.decision is ActivatedLiveSubmissionDecision.UNKNOWN
     assert result.journal_record.state is LiveExecutionState.UNKNOWN
     assert sender.calls == 1
+
+
+def test_coordinator_explicit_http_4xx_rejection_closes_aborted(tmp_path):
+    from app.market.kabu_station_models import KabuStationResponseError
+
+    class RejectingSender:
+        def __init__(self):
+            self.calls = 0
+
+        def send_once(self, order):
+            self.calls += 1
+            raise KabuStationResponseError(
+                "kabuステーションAPIがエラーを返しました。 "
+                "status=400 code=100031 message=預り区分をご確認ください"
+            )
+
+    journal, order = _claimed(tmp_path)
+    sender = RejectingSender()
+    transport = ActivatedKabuStationLiveTransport(
+        sender=sender,
+        execution_settings=_settings(),
+        activation_enabled=True,
+        runtime_armed=True,
+        now_provider=lambda: NOW,
+    )
+    coordinator = ActivatedLiveSubmissionCoordinator(
+        journal=journal,
+        submission_boundary=LockedLiveSubmissionBoundary(
+            journal=journal, now_provider=lambda: NOW
+        ),
+        transport=transport,
+        now_provider=lambda: NOW,
+    )
+
+    result = coordinator.submit(
+        execution_key="exec-1",
+        order=order,
+        trading_date=DAY,
+    )
+
+    assert result.decision is ActivatedLiveSubmissionDecision.BROKER_REJECTED
+    assert result.journal_record.state is LiveExecutionState.ABORTED
+    assert result.journal_record.broker_order_id is None
+    assert "100031" in (result.journal_record.detail or "")
+    assert sender.calls == 1
+
+
+def test_coordinator_server_error_remains_unknown(tmp_path):
+    from app.market.kabu_station_models import KabuStationResponseError
+
+    class FailingSender:
+        def send_once(self, order):
+            raise KabuStationResponseError(
+                "kabuステーションAPIがエラーを返しました。 "
+                "status=500 code=500000 message=internal"
+            )
+
+    journal, order = _claimed(tmp_path)
+    transport = ActivatedKabuStationLiveTransport(
+        sender=FailingSender(),
+        execution_settings=_settings(),
+        activation_enabled=True,
+        runtime_armed=True,
+        now_provider=lambda: NOW,
+    )
+    coordinator = ActivatedLiveSubmissionCoordinator(
+        journal=journal,
+        submission_boundary=LockedLiveSubmissionBoundary(
+            journal=journal, now_provider=lambda: NOW
+        ),
+        transport=transport,
+        now_provider=lambda: NOW,
+    )
+
+    result = coordinator.submit(
+        execution_key="exec-1",
+        order=order,
+        trading_date=DAY,
+    )
+
+    assert result.decision is ActivatedLiveSubmissionDecision.UNKNOWN
+    assert result.journal_record.state is LiveExecutionState.UNKNOWN

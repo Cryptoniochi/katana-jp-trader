@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from enum import StrEnum
+import re
 
 from app.live.activated_live_broker_transport import (
     ActivatedKabuStationLiveTransport,
@@ -27,6 +28,7 @@ from app.live.live_execution_journal_repository import (
     SQLiteLiveExecutionJournal,
 )
 from app.live.live_order_adapter import LockedLiveOrderAdapter
+from app.market.kabu_station_models import KabuStationResponseError
 from app.live.live_submission_boundary import LockedLiveSubmissionBoundary
 from app.live.live_submission_boundary_models import LiveSubmissionBoundaryResult
 from app.trading.order_models import TradeOrder
@@ -39,6 +41,7 @@ class ActivatedLiveSubmissionDecision(StrEnum):
     TRANSPORT_BLOCKED = "transport_blocked"
     SUBMITTED = "submitted"
     UNKNOWN = "unknown"
+    BROKER_REJECTED = "broker_rejected"
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,24 +125,40 @@ class ActivatedLiveSubmissionCoordinator:
         # transport; if blocked, no network request occurred.
         try:
             result = self.transport.submit(request, trading_date=trading_date)
-        except Exception as error:
-            unknown = self.journal.mark_unknown(
-                execution_key,
-                detail=(
-                    "Live broker submission outcome is ambiguous; automatic retry "
-                    f"is prohibited. error={type(error).__name__}: {error}"
-                ),
+        except KabuStationResponseError as error:
+            # A syntactically valid HTTP 4xx response with a kabu Station error
+            # code proves that the broker/API rejected this request.  It is not
+            # an ambiguous network outcome and must not poison later Live cycles.
+            # Keep 5xx and malformed/2xx response failures fail-closed as UNKNOWN.
+            if self._is_explicit_broker_rejection(error):
+                rejected = self.journal.mark_broker_rejected(
+                    execution_key,
+                    detail=(
+                        "kabu Station explicitly rejected the Live order; automatic "
+                        f"retry is prohibited. error={type(error).__name__}: {error}"
+                    ),
+                )
+                return ActivatedLiveSubmissionResult(
+                    decision=ActivatedLiveSubmissionDecision.BROKER_REJECTED,
+                    evaluated_at=self._current_time(),
+                    journal_record=rejected,
+                    submission_boundary_result=boundary_result,
+                    transport_result=None,
+                    message=(
+                        "Live broker explicitly rejected the order; execution "
+                        "closed without automatic retry."
+                    ),
+                )
+            return self._freeze_unknown(
+                execution_key=execution_key,
+                boundary_result=boundary_result,
+                error=error,
             )
-            return ActivatedLiveSubmissionResult(
-                decision=ActivatedLiveSubmissionDecision.UNKNOWN,
-                evaluated_at=self._current_time(),
-                journal_record=unknown,
-                submission_boundary_result=boundary_result,
-                transport_result=None,
-                message=(
-                    "Live broker submission raised after SUBMISSION_PENDING; "
-                    "execution frozen as UNKNOWN."
-                ),
+        except Exception as error:
+            return self._freeze_unknown(
+                execution_key=execution_key,
+                boundary_result=boundary_result,
+                error=error,
             )
 
         if result.decision is ActivatedLiveTransportDecision.BLOCKED:
@@ -164,6 +183,42 @@ class ActivatedLiveSubmissionCoordinator:
             submission_boundary_result=boundary_result,
             transport_result=result,
             message="Live execution is durably SUBMITTED.",
+        )
+
+    @staticmethod
+    def _is_explicit_broker_rejection(error: KabuStationResponseError) -> bool:
+        message = str(error)
+        match = re.search(r"status=(\d+)\s+code=([^\s]+)", message)
+        if match is None:
+            return False
+        status = int(match.group(1))
+        code = match.group(2).strip()
+        return 400 <= status < 500 and code not in {"None", "null", ""}
+
+    def _freeze_unknown(
+        self,
+        *,
+        execution_key: str,
+        boundary_result: LiveSubmissionBoundaryResult,
+        error: Exception,
+    ) -> ActivatedLiveSubmissionResult:
+        unknown = self.journal.mark_unknown(
+            execution_key,
+            detail=(
+                "Live broker submission outcome is ambiguous; automatic retry "
+                f"is prohibited. error={type(error).__name__}: {error}"
+            ),
+        )
+        return ActivatedLiveSubmissionResult(
+            decision=ActivatedLiveSubmissionDecision.UNKNOWN,
+            evaluated_at=self._current_time(),
+            journal_record=unknown,
+            submission_boundary_result=boundary_result,
+            transport_result=None,
+            message=(
+                "Live broker submission raised after SUBMISSION_PENDING; "
+                "execution frozen as UNKNOWN."
+            ),
         )
 
     def _current_time(self) -> datetime:

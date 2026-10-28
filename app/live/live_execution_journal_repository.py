@@ -54,11 +54,12 @@ class SQLiteLiveExecutionJournal:
         },
         LiveExecutionState.SUBMISSION_PENDING: {
             LiveExecutionState.SUBMITTED,
+            LiveExecutionState.ABORTED,
             LiveExecutionState.UNKNOWN,
         },
         LiveExecutionState.SUBMITTED: set(),
         LiveExecutionState.ABORTED: set(),
-        LiveExecutionState.UNKNOWN: set(),
+        LiveExecutionState.UNKNOWN: {LiveExecutionState.ABORTED},
     }
 
     def __init__(
@@ -284,6 +285,65 @@ class SQLiteLiveExecutionJournal:
             target=LiveExecutionState.ABORTED,
             timestamp_column="aborted_at",
             detail=detail,
+        )
+
+    def mark_broker_rejected(
+        self,
+        execution_key: str,
+        *,
+        detail: str,
+    ) -> LiveExecutionJournalRecord:
+        """Close a submission that the broker/API explicitly rejected.
+
+        ABORTED is reused deliberately to avoid a schema migration: no broker
+        OrderId exists, the attempt is terminal, and automatic retry remains
+        prohibited.  This transition is allowed only from SUBMISSION_PENDING.
+        """
+
+        normalized_detail = self._required(detail, "detail")
+        return self._transition(
+            execution_key,
+            expected=LiveExecutionState.SUBMISSION_PENDING,
+            target=LiveExecutionState.ABORTED,
+            timestamp_column="aborted_at",
+            detail=normalized_detail,
+        )
+
+    def recover_unknown_broker_rejection(
+        self,
+        execution_key: str,
+        *,
+        evidence: str,
+    ) -> LiveExecutionJournalRecord:
+        """Resolve an old UNKNOWN only when its stored detail proves rejection.
+
+        The caller must supply an exact evidence fragment already persisted in
+        the UNKNOWN detail (for example ``code=100031``).  This cannot convert a
+        timeout/connection UNKNOWN merely because the broker is currently empty.
+        """
+
+        key = self._required(execution_key, "execution_key")
+        proof = self._required(evidence, "evidence")
+        record = self.get_required(key)
+        if record.state is not LiveExecutionState.UNKNOWN:
+            raise LiveExecutionTransitionError(
+                "Explicit broker-rejection recovery requires UNKNOWN: "
+                f"{record.state.value}"
+            )
+        if record.detail is None or proof not in record.detail:
+            raise LiveExecutionTransitionError(
+                "UNKNOWN detail does not contain the required broker-rejection "
+                f"evidence: {proof}"
+            )
+        return self._transition(
+            key,
+            expected=LiveExecutionState.UNKNOWN,
+            target=LiveExecutionState.ABORTED,
+            timestamp_column="aborted_at",
+            detail=(
+                f"Resolved historical UNKNOWN as explicit broker rejection; "
+                f"evidence={proof}. original={record.detail}"
+            ),
         )
 
     def mark_unknown(

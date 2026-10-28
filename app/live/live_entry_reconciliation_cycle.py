@@ -55,8 +55,15 @@ class LiveEntryReconciliationCycle:
                 self.registry.complete(row.execution_key)
                 completed+=1
                 continue
-            # PREPARED/CLAIMED or any other non-SUBMITTED durable state remains
-            # fail-closed.  Never guess, retry, or auto-complete it here.
+            # A broker-explicit rejection is persisted as ABORTED: no broker
+            # OrderId exists and automatic retry is prohibited.  Its registry
+            # reservation is therefore safe to complete.  UNKNOWN remains
+            # fail-closed because its broker outcome is genuinely ambiguous.
+            if journal_record.state is LiveExecutionState.ABORTED:
+                self.registry.complete(row.execution_key)
+                completed+=1
+                continue
+            # PREPARED/CLAIMED/SUBMISSION_PENDING/UNKNOWN remain fail-closed.
             if journal_record.state is not LiveExecutionState.SUBMITTED:
                 blocked+=1
                 continue

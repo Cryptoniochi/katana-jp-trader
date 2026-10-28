@@ -207,3 +207,68 @@ def test_journal_has_no_broker_or_send_api(tmp_path):
         "execute_live_order",
     }
     assert forbidden.isdisjoint(dir(journal))
+
+
+def test_explicit_broker_rejection_closes_pending_without_retry(tmp_path):
+    clock = Clock()
+    journal = _journal(tmp_path, clock)
+    _prepare(journal)
+    clock.advance()
+    journal.claim("exec-key-1")
+    clock.advance()
+    journal.mark_submission_pending("exec-key-1")
+    clock.advance()
+
+    rejected = journal.mark_broker_rejected(
+        "exec-key-1",
+        detail="status=400 code=100031 explicit broker rejection",
+    )
+
+    assert rejected.state is LiveExecutionState.ABORTED
+    assert rejected.aborted_at == clock.value
+    assert rejected.broker_order_id is None
+    assert rejected.state.is_terminal
+    assert rejected.state.blocks_reclaim
+
+    with pytest.raises(LiveExecutionAlreadyClaimedError):
+        journal.claim("exec-key-1")
+
+
+def test_historical_unknown_requires_persisted_rejection_evidence(tmp_path):
+    clock = Clock()
+    journal = _journal(tmp_path, clock)
+    _prepare(journal)
+    journal.claim("exec-key-1")
+    journal.mark_submission_pending("exec-key-1")
+    journal.mark_unknown(
+        "exec-key-1",
+        detail="KabuStationResponseError: status=400 code=100031 message=rejected",
+    )
+
+    with pytest.raises(LiveExecutionTransitionError):
+        journal.recover_unknown_broker_rejection(
+            "exec-key-1",
+            evidence="code=999999",
+        )
+
+    recovered = journal.recover_unknown_broker_rejection(
+        "exec-key-1",
+        evidence="code=100031",
+    )
+    assert recovered.state is LiveExecutionState.ABORTED
+    assert "code=100031" in (recovered.detail or "")
+
+
+def test_timeout_unknown_cannot_be_recovered_as_broker_rejection(tmp_path):
+    clock = Clock()
+    journal = _journal(tmp_path, clock)
+    _prepare(journal)
+    journal.claim("exec-key-1")
+    journal.mark_submission_pending("exec-key-1")
+    journal.mark_unknown("exec-key-1", detail="TimeoutError: ambiguous timeout")
+
+    with pytest.raises(LiveExecutionTransitionError):
+        journal.recover_unknown_broker_rejection(
+            "exec-key-1",
+            evidence="code=100031",
+        )
