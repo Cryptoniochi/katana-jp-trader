@@ -81,13 +81,14 @@ def test_no_signal_returns_no_live_entry_intent():
 
 
 @pytest.mark.parametrize("action", [SignalAction.SELL, SignalAction.EXIT])
-def test_sell_or_exit_signal_fails_closed_in_entry_bridge(action):
+def test_sell_or_exit_signal_is_split_from_entry_bridge(action):
+    signal = _signal(action=action)
     provider = LiveRealtimeSignalIntentProvider(
-        signal_engine=Engine(_result(_signal(action=action))),
+        signal_engine=Engine(_result(signal)),
         price_provider=lambda: (),
     )
-    with pytest.raises(LiveSignalBridgeError, match="protective-exit"):
-        provider()
+    assert provider() == ()
+    assert provider.last_exit_signals == (signal,)
 
 
 def test_duplicate_execution_key_in_one_cycle_fails_closed():

@@ -1,8 +1,8 @@
 """Bridge realtime strategy signals into the final Live execution flow.
 
-The bridge is deliberately broker-independent on the signal side and contains
-no PaperBroker dependency.  New entries are BUY-only; position exits remain the
-responsibility of the authoritative Live protective-exit path.
+The realtime engine is evaluated exactly once per Live cycle. BUY signals are
+returned as Live entry intents. SELL/EXIT signals are retained for the
+authoritative strategy-exit cycle; they are never submitted as entries.
 """
 from __future__ import annotations
 
@@ -39,10 +39,11 @@ class PreparedTrackingFlowLike(Protocol):
 
 
 class LiveRealtimeSignalIntentProvider:
-    """Convert RealtimeSignalEngine BUY signals into Live entry intents.
+    """Evaluate realtime strategies once and split BUY from SELL/EXIT safely.
 
-    SELL/EXIT signals are intentionally rejected rather than silently routed as
-    entries.  Live exits must use the authoritative protective-exit lifecycle.
+    BUY signals become LiveEntryIntent objects. SELL/EXIT signals are retained
+    in last_exit_signals for the strategy-exit cycle. Unknown actions fail
+    closed. The provider never submits an order itself.
     """
 
     def __init__(
@@ -54,28 +55,34 @@ class LiveRealtimeSignalIntentProvider:
         self.signal_engine = signal_engine
         self.price_provider = price_provider
         self.last_result: RealtimeSignalProcessResult | None = None
+        self.last_exit_signals: tuple[TradeSignal, ...] = tuple()
 
     def __call__(self) -> tuple[LiveEntryIntent, ...]:
         result = self.signal_engine.process(tuple(self.price_provider()))
         self.last_result = result
         intents: list[LiveEntryIntent] = []
+        exits: list[TradeSignal] = []
         seen_execution_keys: set[str] = set()
 
         for signal in result.signals:
-            if signal.action is not SignalAction.BUY:
-                raise LiveSignalBridgeError(
-                    "Realtime Live entry bridge received a non-BUY signal; "
-                    "SELL/EXIT must use the Live protective-exit path. "
-                    f"signal_id={signal.signal_id} action={signal.action.value}"
-                )
             if signal.signal_id in seen_execution_keys:
                 raise LiveSignalBridgeError(
                     "Duplicate execution key produced in one Live cycle. "
                     f"signal_id={signal.signal_id}"
                 )
             seen_execution_keys.add(signal.signal_id)
-            intents.append(_signal_to_entry_intent(signal))
 
+            if signal.action is SignalAction.BUY:
+                intents.append(_signal_to_entry_intent(signal))
+            elif signal.action in {SignalAction.SELL, SignalAction.EXIT}:
+                exits.append(signal)
+            else:
+                raise LiveSignalBridgeError(
+                    "Realtime Live signal bridge received an unsupported action. "
+                    f"signal_id={signal.signal_id} action={signal.action}"
+                )
+
+        self.last_exit_signals = tuple(exits)
         return tuple(intents)
 
 

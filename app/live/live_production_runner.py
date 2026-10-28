@@ -1,8 +1,8 @@
 """Live-only production cycle boundary for Project KATANA.
 
 This module deliberately contains no PaperBroker dependency and performs no
-broker action by itself.  It is the application boundary that a production
-market-session loop can drive once Live signal generation is attached.
+broker action by itself. It is the application boundary driven by the
+production market-session loop.
 """
 from __future__ import annotations
 
@@ -11,7 +11,11 @@ from datetime import date
 from enum import StrEnum
 from typing import Callable, Protocol, Sequence
 
-from app.live.execution_mode import ExecutionModeSettings, LiveArmingPolicy, TradingExecutionMode
+from app.live.execution_mode import (
+    ExecutionModeSettings,
+    LiveArmingPolicy,
+    TradingExecutionMode,
+)
 
 
 class LiveProductionRunnerError(RuntimeError):
@@ -51,7 +55,7 @@ class LiveEntrySubmitter(Protocol):
 
 class LiveProtectiveCycle(Protocol):
     def __call__(self, trading_date: date) -> object:
-        """Evaluate existing Live positions for protective exits."""
+        """Evaluate/reconcile Live protection state."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,12 +67,7 @@ class LiveProductionCycleResult:
 
 
 class LiveProductionRunner:
-    """Fail-closed Live application runner with no Paper/Shadow fallback.
-
-    Signal discovery remains injected.  Order transmission must be supplied by
-    a Live-only submitter backed by FinalLiveRuntime.  This class intentionally
-    cannot construct or call PaperBroker.
-    """
+    """Fail-closed Live application runner with no Paper/Shadow fallback."""
 
     def __init__(
         self,
@@ -79,6 +78,7 @@ class LiveProductionRunner:
         protective_cycle: LiveProtectiveCycle,
         reconciliation_cycle: LiveProtectiveCycle | None = None,
         position_protection_reconciliation: LiveProtectiveCycle | None = None,
+        strategy_exit_cycle: LiveProtectiveCycle | None = None,
         arming_policy: LiveArmingPolicy | None = None,
     ) -> None:
         self.execution_settings = execution_settings
@@ -87,16 +87,17 @@ class LiveProductionRunner:
         self.protective_cycle = protective_cycle
         self.reconciliation_cycle = reconciliation_cycle
         self.position_protection_reconciliation = position_protection_reconciliation
+        self.strategy_exit_cycle = strategy_exit_cycle
         self.arming_policy = arming_policy or LiveArmingPolicy()
 
     def run_cycle(self, *, trading_date: date) -> LiveProductionCycleResult:
-        """Run one Live-only cycle after daily authorization.
+        """Run one authorized Live cycle.
 
-        Protective exits are evaluated before new entries.  Any exception is
-        propagated so the outer production loop stops/fails closed rather than
-        silently falling back to Paper execution.
+        Prior submissions and protective state are reconciled first. The realtime
+        signal engine is then evaluated exactly once by entry_intent_provider.
+        Strategy exits from that same evaluation are processed before any new BUY.
+        Any unresolved exit blocks new risk for the cycle.
         """
-
         if self.execution_settings.mode is not TradingExecutionMode.LIVE:
             raise LiveProductionRunnerError(
                 "LiveProductionRunner requires KATANA execution mode LIVE."
@@ -106,8 +107,6 @@ class LiveProductionRunner:
             trading_date=trading_date,
         )
 
-        # Reconcile prior submissions first, then protect existing positions.
-        # Any unresolved/ambiguous Live state blocks new risk for this cycle.
         if self.reconciliation_cycle is not None:
             reconciliation = self.reconciliation_cycle(trading_date)
             if int(getattr(reconciliation, "blocked", 0) or 0) > 0:
@@ -134,7 +133,26 @@ class LiveProductionRunner:
                 message="Live protective-stop state is unresolved; new entries blocked.",
             )
 
+        # This call evaluates RealtimeSignalEngine exactly once.
         intents = tuple(self.entry_intent_provider())
+
+        # SELL/EXIT signals from the same engine evaluation are handled before BUY.
+        if self.strategy_exit_cycle is not None:
+            exits = self.strategy_exit_cycle(trading_date)
+            if int(getattr(exits, "blocked", 0) or 0) > 0:
+                return LiveProductionCycleResult(
+                    decision=LiveCycleDecision.BLOCKED,
+                    attempted_entries=len(intents),
+                    message="Live strategy exit is unresolved; new entries blocked.",
+                )
+            if int(getattr(exits, "submitted", 0) or 0) > 0:
+                # Do not open fresh risk in the same cycle that started a SELL.
+                return LiveProductionCycleResult(
+                    decision=LiveCycleDecision.SUBMISSION_STARTED,
+                    attempted_entries=len(intents),
+                    message="Live strategy exit submission started; new entries deferred.",
+                )
+
         if not intents:
             return LiveProductionCycleResult(
                 decision=LiveCycleDecision.NO_ACTION,
@@ -144,8 +162,6 @@ class LiveProductionRunner:
         started = 0
         for intent in intents:
             result = self.entry_submitter(intent, trading_date)
-            # The concrete FinalLiveRuntime adapter owns detailed decisions.
-            # A false/None result is never interpreted as success.
             if result is not None and result is not False:
                 started += 1
 

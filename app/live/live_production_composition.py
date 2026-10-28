@@ -433,6 +433,9 @@ class ConcreteLiveProductionFactory:
             raise LiveProductionCompositionError(
                 "Watchlist plus actual Live positions exceeds kabu Station 50-symbol limit."
             )
+        # The provider is stateful by design: one engine evaluation produces
+        # both BUY intents and last_exit_signals. The application consumes exits
+        # before permitting any new BUY in that same cycle.
         application=LiveProductionApplicationFactory.create(
             execution_settings=execution_settings,final_runtime=final,
             entry_intent_provider=intent_provider)

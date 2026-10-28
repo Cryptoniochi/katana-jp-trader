@@ -19,6 +19,7 @@ from app.live.live_production_runner import (
     LiveProductionRunner,
 )
 from app.live.live_signal_execution_bridge import FinalLiveEntrySubmitter
+from app.live.live_strategy_exit_flow import LiveStrategyExitCycle, LiveStrategyExitFlow
 
 
 class LiveProductionWiringError(RuntimeError):
@@ -49,6 +50,7 @@ class LiveProductionApplicationFactory:
         final_runtime: FinalLiveRuntimeBundle,
         entry_intent_provider: Callable[[], Sequence[LiveEntryIntent]],
         protective_cycle: ProtectiveCycle | None = None,
+        strategy_exit_cycle: ProtectiveCycle | None = None,
     ) -> LiveProductionApplication:
         if execution_settings.mode is not TradingExecutionMode.LIVE:
             raise LiveProductionWiringError(
@@ -83,6 +85,20 @@ class LiveProductionApplicationFactory:
             prepared_tracking_flow=final_runtime.prepared_tracking_flow,
             reconciliation_registry=reconciliation_registry,
         )
+
+        if strategy_exit_cycle is None and hasattr(
+            entry_intent_provider, "last_exit_signals"
+        ):
+            strategy_exit_flow = LiveStrategyExitFlow(
+                ownership_repository=final_runtime.protective_stop_repository,
+                conflict_resolver=final_runtime.conflict_resolver,
+                prepared_tracking_flow=final_runtime.prepared_tracking_flow,
+            )
+            strategy_exit_cycle = LiveStrategyExitCycle(
+                signal_source=entry_intent_provider,
+                flow=strategy_exit_flow,
+            )
+
         runner = LiveProductionRunner(
             execution_settings=execution_settings,
             entry_intent_provider=entry_intent_provider,
@@ -92,5 +108,6 @@ class LiveProductionApplicationFactory:
             position_protection_reconciliation=getattr(
                 final_runtime, "position_protection_reconciliation", None
             ),
+            strategy_exit_cycle=strategy_exit_cycle,
         )
         return LiveProductionApplication(runner=runner)
