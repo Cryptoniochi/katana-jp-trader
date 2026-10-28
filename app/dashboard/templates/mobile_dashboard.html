@@ -79,10 +79,6 @@
     <section><div class="mobile-section-title"><h2>Today's Executions</h2></div><div id="mobile-trades" class="mobile-card-list"></div></section>
     <section><div class="mobile-section-title"><h2>Open Positions</h2></div><div id="mobile-position-list" class="mobile-card-list"></div></section>
 
-    <section>
-      <div class="mobile-section-title"><h2>End-of-Day Check</h2><span id="mobile-full-day-state" class="status-pill">UNKNOWN</span></div>
-      <article class="mobile-detail-card"><p id="mobile-full-day-message" class="mobile-card-message">Full-Day Validation has not been loaded yet.</p></article>
-    </section>
   </main>
 
   <script>
@@ -115,12 +111,11 @@
     const empty=text=>`<article class="mobile-empty-card">${text}</article>`;
 
     async function refresh(){
-      const [summary,runtime,watchlist,strategies,fullDay,namesPayload,readiness,schedule,dailyReport]=await Promise.all([
+      const [summary,runtime,watchlist,strategies,namesPayload,readiness,schedule,dailyReport]=await Promise.all([
         getJson("/api/dashboard/summary"),
         getJson("/api/dashboard/paper-trading-runtime"),
         getJson("/api/dashboard/dynamic-watchlist"),
         getJson("/api/dashboard/strategies"),
-        getJson("/api/dashboard/full-day-validation"),
         getJson("/api/dashboard/symbol-names"),
         getJson("/api/dashboard/operational-readiness"),
         getJson("/api/dashboard/paper-trading-schedule"),
@@ -243,8 +238,6 @@
         return `<article class="mobile-detail-card"><div class="mobile-card-heading"><strong>${label}</strong><span>${p.side??"—"}</span></div><div class="mobile-detail-grid"><div><span>Qty</span><b>${p.quantity??"—"}</b></div><div><span>Market</span><b>${val(p.market_price,yen.format)}</b></div><div><span>Average</span><b>${val(p.average_cost,yen.format)}</b></div><div><span>Unrealized</span><b>${val(p.unrealized_profit_loss,yen.format)}</b></div></div></article>`;
       }).join(""):empty("No open positions.");
 
-      status(document.getElementById("mobile-full-day-state"),fullDay.state??"unknown");
-      document.getElementById("mobile-full-day-message").textContent=fullDay.message??"Full-Day Validation has not been loaded yet.";
     }
 
     refresh();

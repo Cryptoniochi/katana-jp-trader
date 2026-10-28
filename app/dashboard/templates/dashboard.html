@@ -80,7 +80,6 @@
 
     <section class="panel"><div class="panel-heading"><h2>Today's Executions</h2></div><div class="table-wrap"><table><thead><tr><th>Executed</th><th>Strategy</th><th>Code</th><th>Side</th><th>Qty</th><th>Price</th></tr></thead><tbody id="recent-trades-body"></tbody></table></div></section>
     <section class="panel"><div class="panel-heading"><h2>Open Positions</h2></div><div class="table-wrap"><table><thead><tr><th>Code</th><th>Side</th><th>Qty</th><th>Average</th><th>Market</th><th>Unrealized P/L</th></tr></thead><tbody id="positions-body"></tbody></table></div></section>
-    <section class="panel"><div class="panel-heading"><h2>End-of-Day Check</h2><span id="full-day-state" class="status-pill">UNKNOWN</span></div><p id="full-day-message" class="muted">Full-Day Validation has not been loaded yet.</p></section>
   </main>
 <script>
 const yen=new Intl.NumberFormat("ja-JP",{style:"currency",currency:"JPY",maximumFractionDigits:0});
@@ -95,13 +94,12 @@ function renderWatchlist(p,names){status(document.getElementById("watchlist-stat
 function renderTrades(trades,names){const body=document.getElementById("recent-trades-body");const rows=(trades??[]).filter(t=>{if(!t.executed_at)return false;const p=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Tokyo",year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(new Date(t.executed_at));const g=k=>p.find(x=>x.type===k)?.value??"";return `${g("year")}-${g("month")}-${g("day")}`===todayKey();});body.innerHTML=rows.length?rows.slice(0,20).map(t=>{const code=String(t.code??"—");const name=t.name??names[code]??"";const label=name?`${code} ${name}`:code;return `<tr><td>${formatJst(t.executed_at)}</td><td>${t.strategy_name??"—"}</td><td>${label}</td><td>${t.side??"—"}</td><td>${t.quantity??"—"}</td><td>${val(t.execution_price,yen.format)}</td></tr>`;}).join(""):'<tr><td colspan="6" class="muted">No executions today.</td></tr>';}
 function renderPositions(rows,names){const body=document.getElementById("positions-body");body.innerHTML=rows?.length?rows.map(p=>{const code=String(p.code??"—");const name=p.name??names[code]??"";const label=name?`${code} ${name}`:code;return `<tr><td>${label}</td><td>${p.side??"—"}</td><td>${p.quantity??"—"}</td><td>${val(p.average_cost,yen.format)}</td><td>${val(p.market_price,yen.format)}</td><td>${val(p.unrealized_profit_loss,yen.format)}</td></tr>`;}).join(""):'<tr><td colspan="6" class="muted">No open positions.</td></tr>';}
 async function refresh(){
-  const [summary,runtime,watchlist,strategies,service,fullDay,namesPayload,readiness,schedule,dailyReport]=await Promise.all([
+  const [summary,runtime,watchlist,strategies,service,namesPayload,readiness,schedule,dailyReport]=await Promise.all([
     getJson("/api/dashboard/summary"),
     getJson("/api/dashboard/paper-trading-runtime"),
     getJson("/api/dashboard/dynamic-watchlist"),
     getJson("/api/dashboard/strategies"),
     getJson("/api/dashboard/service-status"),
-    getJson("/api/dashboard/full-day-validation"),
     getJson("/api/dashboard/symbol-names"),
     getJson("/api/dashboard/operational-readiness"),
     getJson("/api/dashboard/paper-trading-schedule"),
@@ -180,8 +178,6 @@ async function refresh(){
   renderWatchlist(watchlist,names);
   renderTrades(strategies.recent_trades??[],names);
   renderPositions(currentPositions,names);
-  status(document.getElementById("full-day-state"),fullDay.state??"unknown");
-  document.getElementById("full-day-message").textContent=fullDay.message??"Full-Day Validation has not been loaded yet.";
 }
 refresh();window.setInterval(refresh,30000);
 </script>

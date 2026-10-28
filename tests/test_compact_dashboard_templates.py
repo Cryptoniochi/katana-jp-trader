@@ -22,13 +22,13 @@ def test_desktop_compact_dashboard_keeps_daily_operational_core() -> None:
     assert "Watchlist" in content
     assert "Today's Executions" in content
     assert "Open Positions" in content
-    assert "End-of-Day Check" in content
+    assert "End-of-Day Check" not in content
 
     assert "/api/dashboard/summary" in content
     assert "/api/dashboard/paper-trading-runtime" in content
     assert "/api/dashboard/dynamic-watchlist" in content
     assert "/api/dashboard/strategies" in content
-    assert "/api/dashboard/full-day-validation" in content
+    assert "/api/dashboard/full-day-validation" not in content
     assert "/api/dashboard/symbol-names" in content
     assert "/api/dashboard/daily-report" in content
     assert 'id="win-count"' in content
@@ -46,13 +46,13 @@ def test_mobile_compact_dashboard_keeps_daily_operational_core() -> None:
     assert "Watchlist" in content
     assert "Today's Executions" in content
     assert "Open Positions" in content
-    assert "End-of-Day Check" in content
+    assert "End-of-Day Check" not in content
 
     assert "/api/dashboard/summary" in content
     assert "/api/dashboard/paper-trading-runtime" in content
     assert "/api/dashboard/dynamic-watchlist" in content
     assert "/api/dashboard/strategies" in content
-    assert "/api/dashboard/full-day-validation" in content
+    assert "/api/dashboard/full-day-validation" not in content
     assert "/api/dashboard/symbol-names" in content
     assert "/api/dashboard/daily-report" in content
     assert 'id="mobile-win-loss"' in content
