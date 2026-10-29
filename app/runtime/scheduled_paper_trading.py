@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -374,9 +375,15 @@ class ScheduledPaperTradingController:
             "app.run_market_session",
             *self.paper_arguments,
         ]
+        now = self._current_time()
+        child_environment = dict(os.environ)
+        child_environment["KATANA_LIVE_TRADING_CONFIRMATION"] = (
+            f"KATANA-LIVE-{now.date().isoformat()}"
+        )
         self.process = self.popen_factory(
             command,
             cwd=Path.cwd(),
+            env=child_environment,
         )
         self._record_process_event(
             event_type="process_started",
