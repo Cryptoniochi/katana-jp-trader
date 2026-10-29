@@ -175,20 +175,20 @@ def test_fresh_cycle_does_not_add_bootstrap_cycle():
     assert obj.session_service.cycles == [True]
 
 
-def test_eod_retries_blocked_until_authoritative_complete_before_1535():
-    clock = Clock(datetime(2026, 10, 16, 15, 30, tzinfo=JST))
+def test_eod_retries_blocked_until_authoritative_complete_before_1530():
+    clock = Clock(datetime(2026, 10, 16, 15, 25, tzinfo=JST))
     eod = Eod(["blocked", "blocked", "complete"])
     obj, app = build(clock, eod=eod)
     assert obj.run() == 0
     assert app.calls == 0
     assert eod.calls == 3
-    assert clock.when < datetime(2026, 10, 16, 15, 35, tzinfo=JST)
+    assert clock.when < datetime(2026, 10, 16, 15, 30, tzinfo=JST)
 
 
-def test_eod_fails_closed_at_1535_if_not_flat():
-    clock = Clock(datetime(2026, 10, 16, 15, 34, 30, tzinfo=JST))
+def test_eod_fails_closed_at_1530_if_not_flat():
+    clock = Clock(datetime(2026, 10, 16, 15, 29, 30, tzinfo=JST))
     eod = Eod(["blocked", "blocked"])
     obj, app = build(clock, eod=eod)
     assert obj.run() == 1
     assert eod.calls == 2
-    assert clock.when >= datetime(2026, 10, 16, 15, 35, tzinfo=JST)
+    assert clock.when >= datetime(2026, 10, 16, 15, 30, tzinfo=JST)

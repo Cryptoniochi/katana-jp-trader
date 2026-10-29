@@ -113,8 +113,8 @@ class ConcreteLiveProductionApplication:
         market_open=datetime.strptime("09:00","%H:%M").time()
         lunch_start=datetime.strptime("11:30","%H:%M").time()
         lunch_end=datetime.strptime("12:30","%H:%M").time()
-        market_close=datetime.strptime("15:30","%H:%M").time()
-        stop_at=datetime.strptime("15:35","%H:%M").time()
+        market_close=datetime.strptime("15:25","%H:%M").time()
+        stop_at=datetime.strptime("15:30","%H:%M").time()
 
         self.session_service.start()
         try:
@@ -181,7 +181,7 @@ class ConcreteLiveProductionApplication:
                 )
                 self.sleeper(self.cycle_interval_seconds)
 
-            # From 15:30 through 15:35, repeatedly perform authoritative EOD
+            # From 15:25 through 15:30, repeatedly perform authoritative EOD
             # verification.  A still-working SELL is left untouched by the EOD
             # conflict resolver; retries therefore poll for flatness without
             # cancel/replace churn or duplicate submission.
