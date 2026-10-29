@@ -1,13 +1,13 @@
-"""Durable live execution tracking flow for Phase 4B.
+"""Durable live execution tracking flow for Production Live.
 
 The flow captures and persists the authoritative pre-submission real-position
-baseline before any activated submission can occur.  After a durable SUBMITTED
+baseline before any activated submission can occur. After a durable SUBMITTED
 journal record exists, broker execution reconciliation is followed by a fresh
 real-position consistency check.
 
-This module does not create a broker transport and never retries, cancels, or
-replaces an order.  A restart can resume tracking because the baseline is
-stored in SQLite before submission.
+Only broker fills whose real-position consistency is confirmed are written to
+the shared trade_executions ledger. Broker submission, cancellation and retry
+behaviour are not changed by this module.
 """
 from __future__ import annotations
 
@@ -32,6 +32,11 @@ from app.live.live_submitted_execution_lifecycle import (
     LiveSubmittedExecutionResult,
 )
 from app.trading.order_models import TradeOrder
+from app.trading.trade_execution_models import TradeExecution
+from app.trading.trade_execution_repository import (
+    DuplicateTradeExecutionError,
+    TradeExecutionRepository,
+)
 
 
 class LiveExecutionTrackingDecision(StrEnum):
@@ -92,6 +97,7 @@ class SQLiteLivePositionBaselineRepository:
         key = self._required(execution_key, "execution_key")
         if baseline.code != order.code:
             raise ValueError("baseline code does not match order code")
+
         try:
             with self._connect() as connection:
                 connection.execute(
@@ -100,7 +106,13 @@ class SQLiteLivePositionBaselineRepository:
                         (execution_key, order_id, signal_id, code, quantity)
                     VALUES (?, ?, ?, ?, ?)
                     """,
-                    (key, order.order_id, order.signal_id, order.code, baseline.quantity),
+                    (
+                        key,
+                        order.order_id,
+                        order.signal_id,
+                        order.code,
+                        baseline.quantity,
+                    ),
                 )
                 connection.commit()
                 row = connection.execute(
@@ -112,33 +124,75 @@ class SQLiteLivePositionBaselineRepository:
                     (key,),
                 ).fetchone()
         except sqlite3.Error as exc:
-            raise RuntimeError("Could not persist live position baseline.") from exc
+            raise RuntimeError(
+                "Could not persist live position baseline."
+            ) from exc
+
         if row is None:
-            raise RuntimeError("Persisted live position baseline disappeared.")
-        existing = (str(row[0]), str(row[1]), str(row[2]), int(row[3]))
-        candidate = (order.order_id, order.signal_id, order.code, baseline.quantity)
+            raise RuntimeError(
+                "Persisted live position baseline disappeared."
+            )
+
+        existing = (
+            str(row[0]),
+            str(row[1]),
+            str(row[2]),
+            int(row[3]),
+        )
+        candidate = (
+            order.order_id,
+            order.signal_id,
+            order.code,
+            baseline.quantity,
+        )
+
         if existing != candidate:
             raise LivePositionBaselineConflictError(
-                "execution_key is already bound to a different position baseline"
+                "execution_key is already bound to a different "
+                "position baseline"
             )
-        return LivePositionBaseline(code=existing[2], quantity=existing[3])
 
-    def get_required(self, execution_key: str) -> LivePositionBaseline:
+        return LivePositionBaseline(
+            code=existing[2],
+            quantity=existing[3],
+        )
+
+    def get_required(
+        self,
+        execution_key: str,
+    ) -> LivePositionBaseline:
         key = self._required(execution_key, "execution_key")
+
         try:
             with self._connect() as connection:
                 row = connection.execute(
-                    f"SELECT code, quantity FROM {self.TABLE_NAME} WHERE execution_key = ?",
+                    f"""
+                    SELECT code, quantity
+                    FROM {self.TABLE_NAME}
+                    WHERE execution_key = ?
+                    """,
                     (key,),
                 ).fetchone()
         except sqlite3.Error as exc:
-            raise RuntimeError("Could not read live position baseline.") from exc
+            raise RuntimeError(
+                "Could not read live position baseline."
+            ) from exc
+
         if row is None:
-            raise RuntimeError(f"Live position baseline does not exist: {key}")
-        return LivePositionBaseline(code=str(row[0]), quantity=int(row[1]))
+            raise RuntimeError(
+                f"Live position baseline does not exist: {key}"
+            )
+
+        return LivePositionBaseline(
+            code=str(row[0]),
+            quantity=int(row[1]),
+        )
 
     def _initialize(self) -> None:
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        self.database_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
         with self._connect() as connection:
             connection.execute(
                 f"""
@@ -154,12 +208,18 @@ class SQLiteLivePositionBaselineRepository:
             connection.commit()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=30.0)
+        connection = sqlite3.connect(
+            self.database_path,
+            timeout=30.0,
+        )
         connection.execute("PRAGMA busy_timeout = 30000")
         return connection
 
     @staticmethod
-    def _required(value: str, name: str) -> str:
+    def _required(
+        value: str,
+        name: str,
+    ) -> str:
         normalized = str(value or "").strip()
         if not normalized:
             raise ValueError(f"{name} is required")
@@ -167,11 +227,23 @@ class SQLiteLivePositionBaselineRepository:
 
 
 class _SubmissionCoordinator(Protocol):
-    def submit(self, *, execution_key: str, order: TradeOrder, trading_date): ...
+    def submit(
+        self,
+        *,
+        execution_key: str,
+        order: TradeOrder,
+        trading_date,
+    ): ...
+
+
+class _ExecutionRepository(Protocol):
+    def save(self, execution: TradeExecution): ...
+
+    def get(self, execution_id: str): ...
 
 
 class LiveExecutionTrackingFlow:
-    """Join durable baseline, activated submission, and read-only verification."""
+    """Join durable baseline, submission and authoritative fill recording."""
 
     def __init__(
         self,
@@ -180,11 +252,21 @@ class LiveExecutionTrackingFlow:
         position_consistency_service: LiveExecutionPositionConsistencyService,
         submission_coordinator: _SubmissionCoordinator,
         submitted_lifecycle: LiveSubmittedExecutionLifecycle,
+        execution_repository: _ExecutionRepository | None = None,
     ) -> None:
         self.baseline_repository = baseline_repository
-        self.position_consistency_service = position_consistency_service
+        self.position_consistency_service = (
+            position_consistency_service
+        )
         self.submission_coordinator = submission_coordinator
         self.submitted_lifecycle = submitted_lifecycle
+        self.execution_repository = (
+            execution_repository
+            if execution_repository is not None
+            else TradeExecutionRepository(
+                baseline_repository.database_path
+            )
+        )
 
     def submit(
         self,
@@ -194,60 +276,119 @@ class LiveExecutionTrackingFlow:
         trading_date,
         required_baseline_quantity: int | None = None,
     ) -> LiveExecutionTrackingResult:
-        # This read must complete before the coordinator can reach transport.
-        baseline = self.position_consistency_service.capture_baseline(order)
+        baseline = (
+            self.position_consistency_service.capture_baseline(
+                order
+            )
+        )
+
         if required_baseline_quantity is not None:
             if required_baseline_quantity < 0:
-                raise ValueError("required_baseline_quantity must be non-negative")
+                raise ValueError(
+                    "required_baseline_quantity must be non-negative"
+                )
             if baseline.quantity != required_baseline_quantity:
                 raise LivePositionBaselineConflictError(
-                    "fresh pre-submission live position changed after exit planning; "
-                    "submission is blocked and the exit must be replanned"
+                    "fresh pre-submission live position changed after "
+                    "exit planning; submission is blocked and the exit "
+                    "must be replanned"
                 )
+
         durable = self.baseline_repository.save_once(
-            execution_key, order=order, baseline=baseline
+            execution_key,
+            order=order,
+            baseline=baseline,
         )
+
         submission = self.submission_coordinator.submit(
             execution_key=execution_key,
             order=order,
             trading_date=trading_date,
         )
+
         mapping = {
-            ActivatedLiveSubmissionDecision.TRANSPORT_BLOCKED: LiveExecutionTrackingDecision.SUBMISSION_BLOCKED,
-            ActivatedLiveSubmissionDecision.SUBMITTED: LiveExecutionTrackingDecision.SUBMITTED,
-            ActivatedLiveSubmissionDecision.UNKNOWN: LiveExecutionTrackingDecision.SUBMISSION_UNKNOWN,
+            ActivatedLiveSubmissionDecision.TRANSPORT_BLOCKED:
+                LiveExecutionTrackingDecision.SUBMISSION_BLOCKED,
+            ActivatedLiveSubmissionDecision.SUBMITTED:
+                LiveExecutionTrackingDecision.SUBMITTED,
+            ActivatedLiveSubmissionDecision.UNKNOWN:
+                LiveExecutionTrackingDecision.SUBMISSION_UNKNOWN,
         }
+
         return LiveExecutionTrackingResult(
             execution_key=execution_key,
             decision=mapping[submission.decision],
             baseline=durable,
             submission=submission,
-            detail="pre-submission real-position baseline was durably captured before transport",
+            detail=(
+                "pre-submission real-position baseline was durably "
+                "captured before transport"
+            ),
         )
 
-    def reconcile(self, *, execution_key: str, order: TradeOrder) -> LiveExecutionTrackingResult:
-        baseline = self.baseline_repository.get_required(execution_key)
-        if baseline.code != order.code:
-            raise LivePositionBaselineConflictError("stored baseline does not match order code")
+    def reconcile(
+        self,
+        *,
+        execution_key: str,
+        order: TradeOrder,
+    ) -> LiveExecutionTrackingResult:
+        baseline = self.baseline_repository.get_required(
+            execution_key
+        )
 
-        lifecycle = self.submitted_lifecycle.reconcile(execution_key)
+        if baseline.code != order.code:
+            raise LivePositionBaselineConflictError(
+                "stored baseline does not match order code"
+            )
+
+        lifecycle = self.submitted_lifecycle.reconcile(
+            execution_key
+        )
+
         consistency = self.position_consistency_service.verify(
             order=order,
             baseline=baseline,
             reconciliation=lifecycle.reconciliation,
         )
-        if consistency.decision is LiveExecutionPositionConsistencyDecision.UNKNOWN:
+
+        if (
+            consistency.decision
+            is LiveExecutionPositionConsistencyDecision.UNKNOWN
+        ):
             decision = LiveExecutionTrackingDecision.UNKNOWN
-        elif consistency.decision is LiveExecutionPositionConsistencyDecision.MISMATCH:
-            decision = LiveExecutionTrackingDecision.POSITION_MISMATCH
+        elif (
+            consistency.decision
+            is LiveExecutionPositionConsistencyDecision.MISMATCH
+        ):
+            decision = (
+                LiveExecutionTrackingDecision.POSITION_MISMATCH
+            )
         elif lifecycle.decision.value == "working":
-            decision = LiveExecutionTrackingDecision.WORKING_CONSISTENT
+            decision = (
+                LiveExecutionTrackingDecision.WORKING_CONSISTENT
+            )
         elif lifecycle.decision.value == "partially_filled":
-            decision = LiveExecutionTrackingDecision.PARTIALLY_FILLED_CONSISTENT
+            decision = (
+                LiveExecutionTrackingDecision.PARTIALLY_FILLED_CONSISTENT
+            )
         elif lifecycle.decision.value == "filled":
-            decision = LiveExecutionTrackingDecision.FILLED_CONSISTENT
+            decision = (
+                LiveExecutionTrackingDecision.FILLED_CONSISTENT
+            )
         else:
-            decision = LiveExecutionTrackingDecision.TERMINATED_CONSISTENT
+            decision = (
+                LiveExecutionTrackingDecision.TERMINATED_CONSISTENT
+            )
+
+        if (
+            consistency.decision
+            is LiveExecutionPositionConsistencyDecision.CONSISTENT
+        ):
+            self._record_confirmed_fills(
+                execution_key=execution_key,
+                order=order,
+                lifecycle=lifecycle,
+            )
 
         return LiveExecutionTrackingResult(
             execution_key=execution_key,
@@ -256,7 +397,83 @@ class LiveExecutionTrackingFlow:
             lifecycle=lifecycle,
             consistency=consistency,
             detail=(
-                "broker execution and authoritative real position were reconciled "
-                "against the durable pre-submission baseline"
+                "broker execution and authoritative real position were "
+                "reconciled against the durable pre-submission baseline"
             ),
         )
+
+    def _record_confirmed_fills(
+        self,
+        *,
+        execution_key: str,
+        order: TradeOrder,
+        lifecycle: LiveSubmittedExecutionResult,
+    ) -> None:
+        reconciliation = lifecycle.reconciliation
+
+        for fill in reconciliation.fills:
+            execution_id = str(
+                fill.execution_id or ""
+            ).strip()
+
+            if not execution_id:
+                raise RuntimeError(
+                    "Broker fill has no ExecutionID; "
+                    "trade ledger recording is blocked."
+                )
+
+            if fill.executed_at is None:
+                raise RuntimeError(
+                    "Broker fill has no authoritative execution time; "
+                    "trade ledger recording is blocked."
+                )
+
+            rounded_quantity = round(fill.quantity)
+            if (
+                fill.quantity <= 0
+                or abs(fill.quantity - rounded_quantity) > 1e-9
+            ):
+                raise RuntimeError(
+                    "Broker fill quantity is not a positive integer."
+                )
+
+            if fill.price <= 0:
+                raise RuntimeError(
+                    "Broker fill price must be positive."
+                )
+
+            execution = TradeExecution(
+                execution_id=execution_id,
+                signal_id=order.signal_id,
+                order_id=order.order_id,
+                broker_order_id=(
+                    reconciliation.broker_order_id
+                ),
+                code=order.code,
+                side=order.side,
+                quantity=int(rounded_quantity),
+                execution_price=float(fill.price),
+                executed_at=fill.executed_at,
+                broker_name="kabu-station",
+                commission=0.0,
+                slippage=0.0,
+                metadata={
+                    "execution_key": execution_key,
+                    "reconciliation": "production_live",
+                    "broker_state": (
+                        reconciliation.state.value
+                    ),
+                },
+            )
+
+            try:
+                self.execution_repository.save(execution)
+            except DuplicateTradeExecutionError:
+                existing = self.execution_repository.get(
+                    execution_id
+                )
+                if existing.execution != execution:
+                    raise RuntimeError(
+                        "Broker ExecutionID is already bound to a "
+                        "different trade execution."
+                    )

@@ -1,13 +1,13 @@
 """Read-only reconciliation of submitted live orders against kabu Station.
 
-The service deliberately does not submit, cancel, or retry orders.  A successful
+The service deliberately does not submit, cancel, or retry orders. A successful
 ``/sendorder`` response only proves broker acceptance; execution is established
 from the broker's order list by matching the returned broker OrderId.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import Any, Protocol
 
@@ -26,6 +26,7 @@ class LiveExecutionFill:
     execution_id: str | None
     quantity: float
     price: float
+    executed_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,27 +75,50 @@ class LiveExecutionReconciliationService:
 
         try:
             orders = self.client.orders(product=self.product)
-        except Exception as exc:  # fail closed: never turn read failure into retry permission
-            return self._unknown(order_id, f"orders read failed: {type(exc).__name__}")
+        except Exception as exc:
+            return self._unknown(
+                order_id,
+                f"orders read failed: {type(exc).__name__}",
+            )
 
-        matches = [item for item in orders if str(item.get("ID") or "").strip() == order_id]
+        matches = [
+            item
+            for item in orders
+            if str(item.get("ID") or "").strip() == order_id
+        ]
         if len(matches) != 1:
-            reason = "broker order not found" if not matches else "duplicate broker OrderId"
+            reason = (
+                "broker order not found"
+                if not matches
+                else "duplicate broker OrderId"
+            )
             return self._unknown(order_id, reason)
 
         order = matches[0]
         order_qty = self._number(order.get("OrderQty"))
         cum_qty = self._number(order.get("CumQty"))
         order_state = self._integer(order.get("OrderState"))
-        if order_qty is None or order_qty <= 0 or cum_qty is None or cum_qty < 0:
+
+        if (
+            order_qty is None
+            or order_qty <= 0
+            or cum_qty is None
+            or cum_qty < 0
+        ):
             return self._unknown(order_id, "invalid broker quantities")
+
         if cum_qty > order_qty:
-            return self._unknown(order_id, "cumulative quantity exceeds order quantity")
+            return self._unknown(
+                order_id,
+                "cumulative quantity exceeds order quantity",
+            )
+
         if order_state is None:
             return self._unknown(order_id, "missing OrderState")
 
         fills = self._fills(order)
         remaining = order_qty - cum_qty
+
         if cum_qty == order_qty:
             state = LiveExecutionReconciliationState.FILLED
             detail = "broker reports full cumulative execution"
@@ -123,20 +147,57 @@ class LiveExecutionReconciliationService:
         )
 
     @staticmethod
-    def _fills(order: dict[str, Any]) -> tuple[LiveExecutionFill, ...]:
+    def _fills(
+        order: dict[str, Any],
+    ) -> tuple[LiveExecutionFill, ...]:
         result: list[LiveExecutionFill] = []
         details = order.get("Details")
+
         if not isinstance(details, list):
             return ()
+
         for item in details:
-            if not isinstance(item, dict) or LiveExecutionReconciliationService._integer(item.get("RecType")) != 8:
+            if (
+                not isinstance(item, dict)
+                or LiveExecutionReconciliationService._integer(
+                    item.get("RecType")
+                )
+                != 8
+            ):
                 continue
-            qty = LiveExecutionReconciliationService._number(item.get("Qty"))
-            price = LiveExecutionReconciliationService._number(item.get("Price"))
-            if qty is None or qty <= 0 or price is None or price < 0:
+
+            qty = LiveExecutionReconciliationService._number(
+                item.get("Qty")
+            )
+            price = LiveExecutionReconciliationService._number(
+                item.get("Price")
+            )
+
+            if (
+                qty is None
+                or qty <= 0
+                or price is None
+                or price <= 0
+            ):
                 continue
-            execution_id = str(item.get("ExecutionID") or "").strip() or None
-            result.append(LiveExecutionFill(execution_id=execution_id, quantity=qty, price=price))
+
+            execution_id = (
+                str(item.get("ExecutionID") or "").strip() or None
+            )
+            executed_at = LiveExecutionReconciliationService._datetime(
+                item.get("ExecutionDay")
+                or item.get("TransactTime")
+            )
+
+            result.append(
+                LiveExecutionFill(
+                    execution_id=execution_id,
+                    quantity=qty,
+                    price=price,
+                    executed_at=executed_at,
+                )
+            )
+
         return tuple(result)
 
     @staticmethod
@@ -159,7 +220,23 @@ class LiveExecutionReconciliationService:
             return None
 
     @staticmethod
-    def _unknown(order_id: str, detail: str) -> LiveExecutionReconciliation:
+    def _datetime(value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return None
+        return parsed
+
+    @staticmethod
+    def _unknown(
+        order_id: str,
+        detail: str,
+    ) -> LiveExecutionReconciliation:
         return LiveExecutionReconciliation(
             broker_order_id=order_id,
             state=LiveExecutionReconciliationState.UNKNOWN,
