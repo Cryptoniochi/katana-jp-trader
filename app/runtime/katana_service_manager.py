@@ -928,7 +928,7 @@ def build_dynamic_watchlist_scheduler_command(
         "--capital-limit",
         "1000000",
         "--purchase-budget",
-        "950000",
+        "200000",
     ]
 
     if enabled:
