@@ -69,7 +69,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--maximum-purchase-amount",
         type=float,
-        default=950_000.0,
+        default=200_000.0,
     )
     parser.add_argument(
         "--apply",

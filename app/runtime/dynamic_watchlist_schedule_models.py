@@ -30,7 +30,7 @@ class DynamicWatchlistScheduleSettings:
     minimum_symbols: int = 5
     maximum_symbols: int = 50
     capital_limit: float = 1_000_000.0
-    purchase_budget: float = 950_000.0
+    purchase_budget: float = 200_000.0
 
     def __post_init__(self) -> None:
         if self.retry_interval_seconds <= 0:

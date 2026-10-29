@@ -63,7 +63,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--purchase-budget",
         type=float,
-        default=950_000.0,
+        default=200_000.0,
     )
     parser.add_argument(
         "--poll-interval-seconds",
