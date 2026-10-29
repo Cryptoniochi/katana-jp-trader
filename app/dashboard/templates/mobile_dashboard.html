@@ -135,7 +135,8 @@
       const lossCount=strategyRows.reduce((n,r)=>n+Number(r.loss_count??0),0);
       const realized=strategyRows.reduce((n,r)=>n+Number(r.net_profit_loss??0),0);
       const winRate=tradeCount>0?winCount/tradeCount:null;
-      const positions=runtimeToday&&Array.isArray(runtime.positions)?runtime.positions:(portfolio.positions??[]);
+      const durableLivePositions=Array.isArray(strategies.open_positions)?strategies.open_positions:[];
+      const positions=durableLivePositions.length>0?durableLivePositions:(runtimeToday&&Array.isArray(runtime.positions)?runtime.positions:(portfolio.positions??[]));
       const unrealized=runtimeToday?(runtime.unrealized_profit_loss??portfolio.total_unrealized_profit_loss??0):(portfolio.total_unrealized_profit_loss??0);
       const todayPl=realized+Number(unrealized??0);
 

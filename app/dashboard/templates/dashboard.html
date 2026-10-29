@@ -119,7 +119,8 @@ async function refresh(){
   const strategyNetPnl=strategyRows.reduce((n,r)=>n+Number(r.net_profit_loss??0),0);
   const strategyWinRate=strategyTradeCount>0?strategyWinCount/strategyTradeCount:null;
   const completedTrades=Array.isArray(strategies.recent_completed_trades)?strategies.recent_completed_trades:[];
-  const currentPositions=runtimeToday&&Array.isArray(runtime.positions)?runtime.positions:(portfolio.positions??[]);
+  const durableLivePositions=Array.isArray(strategies.open_positions)?strategies.open_positions:[];
+  const currentPositions=durableLivePositions.length>0?durableLivePositions:(runtimeToday&&Array.isArray(runtime.positions)?runtime.positions:(portfolio.positions??[]));
   const unrealized=runtimeToday?(runtime.unrealized_profit_loss??portfolio.total_unrealized_profit_loss??0):(portfolio.total_unrealized_profit_loss??0);
   const todayPl=strategyNetPnl+Number(unrealized??0);
 

@@ -69,6 +69,7 @@ class DashboardStrategyPayload:
     strategies: tuple[DashboardStrategyRow, ...]
     recent_trades: tuple[DashboardRecentTrade, ...]
     recent_completed_trades: tuple[dict[str, Any], ...] = ()
+    open_positions: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -85,6 +86,10 @@ class DashboardStrategyPayload:
             "recent_completed_trades": [
                 dict(item)
                 for item in self.recent_completed_trades
+            ],
+            "open_positions": [
+                dict(item)
+                for item in self.open_positions
             ],
         }
 
@@ -173,6 +178,9 @@ class DashboardStrategyService:
                     connection,
                 )
             )
+            open_positions = self._load_live_open_positions(
+                connection,
+            )
 
         rows = []
 
@@ -249,6 +257,7 @@ class DashboardStrategyService:
             recent_completed_trades=(
                 recent_completed_trades
             ),
+            open_positions=open_positions,
         )
 
     @classmethod
@@ -310,10 +319,41 @@ class DashboardStrategyService:
             (start_utc, end_utc),
         ).fetchall()
 
-        return {
+        result = {
             str(name): int(count)
             for name, count in rows
         }
+
+        if cls._table_exists(connection, "trade_executions"):
+            live_rows = connection.execute(
+                """
+                SELECT
+                    CASE
+                        WHEN e.signal_id LIKE 'orb-v2-%'
+                            THEN 'opening-range-breakout-v2'
+                        WHEN e.signal_id LIKE 'pullback-v1-%'
+                            THEN 'pullback-breakout-v1'
+                        WHEN e.signal_id LIKE 'high-breakout-v1-%'
+                            THEN 'high-breakout-v1'
+                        ELSE NULL
+                    END AS strategy_name,
+                    COUNT(DISTINCT e.signal_id)
+                FROM trade_executions AS e
+                LEFT JOIN trade_signals AS s
+                  ON s.signal_id = e.signal_id
+                WHERE e.executed_at >= ? AND e.executed_at < ?
+                  AND s.signal_id IS NULL
+                GROUP BY strategy_name
+                """,
+                (start_utc, end_utc),
+            ).fetchall()
+            for name, count in live_rows:
+                if name is None:
+                    continue
+                key = str(name)
+                result[key] = result.get(key, 0) + int(count)
+
+        return result
 
     @classmethod
     def _load_execution_counts(
@@ -336,12 +376,25 @@ class DashboardStrategyService:
         start_utc, end_utc = cls._jst_day_utc_range(trading_date)
         rows = connection.execute(
             """
-            SELECT s.strategy_name, COUNT(*)
+            SELECT
+                COALESCE(
+                    s.strategy_name,
+                    CASE
+                        WHEN e.signal_id LIKE 'orb-v2-%'
+                            THEN 'opening-range-breakout-v2'
+                        WHEN e.signal_id LIKE 'pullback-v1-%'
+                            THEN 'pullback-breakout-v1'
+                        WHEN e.signal_id LIKE 'high-breakout-v1-%'
+                            THEN 'high-breakout-v1'
+                        ELSE NULL
+                    END
+                ) AS strategy_name,
+                COUNT(*)
             FROM trade_executions AS e
-            JOIN trade_signals AS s
+            LEFT JOIN trade_signals AS s
               ON s.signal_id = e.signal_id
             WHERE e.executed_at >= ? AND e.executed_at < ?
-            GROUP BY s.strategy_name
+            GROUP BY strategy_name
             """,
             (start_utc, end_utc),
         ).fetchall()
@@ -454,10 +507,21 @@ class DashboardStrategyService:
                 e.executed_at,
                 e.commission,
                 e.slippage,
-                s.strategy_name,
-                s.action
+                COALESCE(
+                    s.strategy_name,
+                    CASE
+                        WHEN e.signal_id LIKE 'orb-v2-%'
+                            THEN 'opening-range-breakout-v2'
+                        WHEN e.signal_id LIKE 'pullback-v1-%'
+                            THEN 'pullback-breakout-v1'
+                        WHEN e.signal_id LIKE 'high-breakout-v1-%'
+                            THEN 'high-breakout-v1'
+                        ELSE 'unknown'
+                    END
+                ) AS strategy_name,
+                COALESCE(s.action, e.side) AS action
             FROM trade_executions AS e
-            JOIN trade_signals AS s
+            LEFT JOIN trade_signals AS s
               ON s.signal_id = e.signal_id
             ORDER BY e.executed_at ASC, e.id ASC
             """
@@ -622,7 +686,18 @@ class DashboardStrategyService:
             SELECT
                 e.execution_id,
                 e.executed_at,
-                s.strategy_name,
+                COALESCE(
+                    s.strategy_name,
+                    CASE
+                        WHEN e.signal_id LIKE 'orb-v2-%'
+                            THEN 'opening-range-breakout-v2'
+                        WHEN e.signal_id LIKE 'pullback-v1-%'
+                            THEN 'pullback-breakout-v1'
+                        WHEN e.signal_id LIKE 'high-breakout-v1-%'
+                            THEN 'high-breakout-v1'
+                        ELSE 'unknown'
+                    END
+                ) AS strategy_name,
                 e.code,
                 e.side,
                 e.quantity,
@@ -630,7 +705,7 @@ class DashboardStrategyService:
                 e.commission,
                 e.slippage
             FROM trade_executions AS e
-            JOIN trade_signals AS s
+            LEFT JOIN trade_signals AS s
               ON s.signal_id = e.signal_id
             ORDER BY e.executed_at DESC, e.id DESC
             LIMIT ?
@@ -701,6 +776,47 @@ class DashboardStrategyService:
 
         completed.sort(key=lambda x: x["exit_at"], reverse=True)
         return tuple(completed[: self.recent_trade_limit])
+
+    @classmethod
+    def _load_live_open_positions(
+        cls,
+        connection: sqlite3.Connection,
+    ) -> tuple[dict[str, Any], ...]:
+        if not cls._table_exists(connection, "live_protective_stops"):
+            return ()
+
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(live_protective_stops)"
+            ).fetchall()
+        }
+        required = {"code", "quantity", "fill_price", "state"}
+        if not required.issubset(columns):
+            return ()
+
+        rows = connection.execute(
+            """
+            SELECT code, quantity, fill_price
+            FROM live_protective_stops
+            WHERE LOWER(state) = 'active'
+              AND quantity > 0
+            ORDER BY code
+            """
+        ).fetchall()
+
+        return tuple(
+            {
+                "code": str(code),
+                "side": "BUY",
+                "quantity": int(quantity),
+                "average_cost": float(fill_price),
+                "market_price": None,
+                "unrealized_profit_loss": None,
+                "source": "live_protective_stops",
+            }
+            for code, quantity, fill_price in rows
+        )
 
     @staticmethod
     def _jst_day_utc_range(trading_date: date) -> tuple[str, str]:
