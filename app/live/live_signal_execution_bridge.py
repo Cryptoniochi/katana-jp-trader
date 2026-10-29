@@ -1,4 +1,4 @@
-"""Bridge realtime strategy signals into the final Live execution flow.
+﻿"""Bridge realtime strategy signals into the final Live execution flow.
 
 The realtime engine is evaluated exactly once per Live cycle. BUY signals are
 returned as Live entry intents. SELL/EXIT signals are retained for the
@@ -98,12 +98,22 @@ def _signal_to_entry_intent(signal: TradeSignal) -> LiveEntryIntent:
 class FinalLiveEntrySubmitter:
     """Submit normalized Live entry intents through FinalLiveRuntime only.
 
-    The generated order is deterministic and market-only.  A required baseline
+    A normal final risk rejection is an order-level BLOCK, not a runtime
+    failure.  Such a rejection therefore returns False so LiveProductionRunner
+    can continue operating and report the entry as blocked.
+
+    Unexpected preparation/claim/journal/broker failures are deliberately not
+    swallowed: they continue to propagate and fail closed.
+
+    The generated order is deterministic and market-only. A required baseline
     of zero prevents a stale/new BUY intent from adding to an already existing
-    real position for the same symbol.  Risk, daily-loss, Kill Switch, safety,
-    idempotency, PREPARED and CLAIMED checks remain owned by the injected final
-    prepared tracking flow.
+    real position for the same symbol.
     """
+
+    _NORMAL_RISK_BLOCK_PREFIX = (
+        "Live execution preparation was blocked; submission is prohibited. "
+        "reason=risk_revalidation "
+    )
 
     def __init__(
         self,
@@ -116,6 +126,7 @@ class FinalLiveEntrySubmitter:
 
     def __call__(self, intent: LiveEntryIntent, trading_date: date) -> object:
         order = self._to_trade_order(intent)
+
         # Persist recovery identity before any path can reach broker transport.
         if self.reconciliation_registry is not None:
             self.reconciliation_registry.prepare(
@@ -123,12 +134,23 @@ class FinalLiveEntrySubmitter:
                 trading_date=trading_date,
                 order=order,
             )
-        return self.prepared_tracking_flow.submit(
-            execution_key=intent.execution_key,
-            order=order,
-            trading_date=trading_date,
-            required_baseline_quantity=0,
-        )
+
+        try:
+            return self.prepared_tracking_flow.submit(
+                execution_key=intent.execution_key,
+                order=order,
+                trading_date=trading_date,
+                required_baseline_quantity=0,
+            )
+        except RuntimeError as exc:
+            # Final risk revalidation is expected to reject some otherwise valid
+            # strategy signals (position value, exposure, cash, daily loss, etc.).
+            # That is an order-level decision and must not crash the Live runtime.
+            #
+            # All other RuntimeError paths remain fail-closed.
+            if str(exc).startswith(self._NORMAL_RISK_BLOCK_PREFIX):
+                return False
+            raise
 
     @staticmethod
     def _to_trade_order(intent: LiveEntryIntent) -> TradeOrder:
