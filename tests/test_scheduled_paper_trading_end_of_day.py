@@ -61,7 +61,7 @@ def test_market_close_waits_for_graceful_shutdown(
 ) -> None:
     controller = build_controller(
         now=datetime(
-            2026, 8, 5, 15, 30, 10,
+            2026, 8, 5, 15, 25, 10,
             tzinfo=TOKYO,
         ),
         status_path=tmp_path / "status.json",
@@ -82,7 +82,7 @@ def test_normal_child_exit_marks_completed(
 ) -> None:
     controller = build_controller(
         now=datetime(
-            2026, 8, 5, 15, 31,
+            2026, 8, 5, 15, 26,
             tzinfo=TOKYO,
         ),
         status_path=tmp_path / "status.json",
@@ -101,7 +101,7 @@ def test_before_market_close_keeps_running(
 ) -> None:
     controller = build_controller(
         now=datetime(
-            2026, 8, 5, 15, 29,
+            2026, 8, 5, 15, 24,
             tzinfo=TOKYO,
         ),
         status_path=tmp_path / "status.json",

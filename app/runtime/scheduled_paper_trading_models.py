@@ -30,7 +30,7 @@ class TradingScheduleSettings:
     morning_open_at: time = time(9, 0)
     lunch_start_at: time = time(11, 30)
     lunch_end_at: time = time(12, 30)
-    market_close_at: time = time(15, 30)
+    market_close_at: time = time(15, 25)
     stop_at: time = time(15, 35)
 
     def __post_init__(self) -> None:
