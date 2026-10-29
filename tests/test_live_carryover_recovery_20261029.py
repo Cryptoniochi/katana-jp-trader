@@ -1,4 +1,4 @@
-﻿from datetime import date
+from datetime import date
 from types import SimpleNamespace
 
 from app.live.execution_mode import ExecutionModeSettings, TradingExecutionMode
@@ -145,3 +145,93 @@ def test_missing_ownership_boundary_fails_closed():
 
     assert calls == ["reconcile"]
     assert result.decision is LiveCycleDecision.BLOCKED
+
+
+def test_mixed_prior_and_current_ownership_fails_closed() -> None:
+    calls = []
+    flow = CarryoverFlow(
+        [
+            old_record(),
+            current_record(),
+        ]
+    )
+
+    runner = LiveProductionRunner(
+        execution_settings=SETTINGS,
+        reconciliation_cycle=lambda d: calls.append("reconcile")
+        or SimpleNamespace(blocked=0),
+        position_protection_reconciliation=lambda d: calls.append("guard")
+        or SimpleNamespace(blocked=0),
+        protective_cycle=lambda d: calls.append("protect")
+        or SimpleNamespace(blocked=0),
+        entry_intent_provider=lambda: calls.append("entries") or (),
+        entry_submitter=lambda *_: calls.append("submit"),
+        carryover_liquidation_flow=flow,
+    )
+
+    result = runner.run_cycle(trading_date=DAY)
+
+    assert result.decision is LiveCycleDecision.BLOCKED
+    assert "mixed" in result.message.lower()
+    assert flow.calls == []
+    assert calls == ["reconcile"]
+
+
+def test_future_dated_ownership_fails_closed() -> None:
+    calls = []
+    future_record = SimpleNamespace(
+        code="9603",
+        quantity=100,
+        trading_date=date(2026, 10, 31),
+    )
+    flow = CarryoverFlow([future_record])
+
+    runner = LiveProductionRunner(
+        execution_settings=SETTINGS,
+        reconciliation_cycle=lambda d: calls.append("reconcile")
+        or SimpleNamespace(blocked=0),
+        position_protection_reconciliation=lambda d: calls.append("guard")
+        or SimpleNamespace(blocked=0),
+        protective_cycle=lambda d: calls.append("protect")
+        or SimpleNamespace(blocked=0),
+        entry_intent_provider=lambda: calls.append("entries") or (),
+        entry_submitter=lambda *_: calls.append("submit"),
+        carryover_liquidation_flow=flow,
+    )
+
+    result = runner.run_cycle(trading_date=DAY)
+
+    assert result.decision is LiveCycleDecision.BLOCKED
+    assert "future-dated" in result.message.lower()
+    assert flow.calls == []
+    assert calls == ["reconcile"]
+
+
+def test_invalid_ownership_trading_date_fails_closed() -> None:
+    calls = []
+    invalid_record = SimpleNamespace(
+        code="9603",
+        quantity=100,
+        trading_date="2026-10-29",
+    )
+    flow = CarryoverFlow([invalid_record])
+
+    runner = LiveProductionRunner(
+        execution_settings=SETTINGS,
+        reconciliation_cycle=lambda d: calls.append("reconcile")
+        or SimpleNamespace(blocked=0),
+        position_protection_reconciliation=lambda d: calls.append("guard")
+        or SimpleNamespace(blocked=0),
+        protective_cycle=lambda d: calls.append("protect")
+        or SimpleNamespace(blocked=0),
+        entry_intent_provider=lambda: calls.append("entries") or (),
+        entry_submitter=lambda *_: calls.append("submit"),
+        carryover_liquidation_flow=flow,
+    )
+
+    result = runner.run_cycle(trading_date=DAY)
+
+    assert result.decision is LiveCycleDecision.BLOCKED
+    assert "invalid trading date" in result.message.lower()
+    assert flow.calls == []
+    assert calls == ["reconcile"]

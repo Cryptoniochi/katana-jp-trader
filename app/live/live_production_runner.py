@@ -1,4 +1,4 @@
-﻿"""Live-only production cycle boundary for Project KATANA.
+"""Live-only production cycle boundary for Project KATANA.
 
 This module deliberately contains no PaperBroker dependency and performs no
 broker action by itself. It is the application boundary driven by the
@@ -144,11 +144,52 @@ class LiveProductionRunner:
                     ),
                 )
 
+            ownership_dates = []
+            for record in current_ownership:
+                record_date = getattr(record, "trading_date", None)
+                if not isinstance(record_date, date):
+                    return LiveProductionCycleResult(
+                        decision=LiveCycleDecision.BLOCKED,
+                        message=(
+                            "Live carryover recovery is blocked because durable "
+                            "KATANA ownership has an invalid trading date."
+                        ),
+                    )
+                ownership_dates.append((record, record_date))
+
+            future_ownership = tuple(
+                record
+                for record, record_date in ownership_dates
+                if record_date > trading_date
+            )
+            if future_ownership:
+                return LiveProductionCycleResult(
+                    decision=LiveCycleDecision.BLOCKED,
+                    message=(
+                        "Live carryover recovery is blocked because future-dated "
+                        "durable KATANA ownership exists."
+                    ),
+                )
+
             carryover = tuple(
                 record
-                for record in current_ownership
-                if getattr(record, "trading_date", trading_date) < trading_date
+                for record, record_date in ownership_dates
+                if record_date < trading_date
             )
+            current_day_ownership = tuple(
+                record
+                for record, record_date in ownership_dates
+                if record_date == trading_date
+            )
+
+            if carryover and current_day_ownership:
+                return LiveProductionCycleResult(
+                    decision=LiveCycleDecision.BLOCKED,
+                    message=(
+                        "Live carryover recovery is blocked because prior-day and "
+                        "current-day durable KATANA ownership are mixed."
+                    ),
+                )
 
             if carryover:
                 carryover_detected = True
