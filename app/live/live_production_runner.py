@@ -1,4 +1,4 @@
-"""Live-only production cycle boundary for Project KATANA.
+﻿"""Live-only production cycle boundary for Project KATANA.
 
 This module deliberately contains no PaperBroker dependency and performs no
 broker action by itself. It is the application boundary driven by the
@@ -79,6 +79,7 @@ class LiveProductionRunner:
         reconciliation_cycle: LiveProtectiveCycle | None = None,
         position_protection_reconciliation: LiveProtectiveCycle | None = None,
         strategy_exit_cycle: LiveProtectiveCycle | None = None,
+        carryover_liquidation_flow: object | None = None,
         arming_policy: LiveArmingPolicy | None = None,
     ) -> None:
         self.execution_settings = execution_settings
@@ -88,6 +89,7 @@ class LiveProductionRunner:
         self.reconciliation_cycle = reconciliation_cycle
         self.position_protection_reconciliation = position_protection_reconciliation
         self.strategy_exit_cycle = strategy_exit_cycle
+        self.carryover_liquidation_flow = carryover_liquidation_flow
         self.arming_policy = arming_policy or LiveArmingPolicy()
 
     def run_cycle(self, *, trading_date: date) -> LiveProductionCycleResult:
@@ -115,6 +117,67 @@ class LiveProductionRunner:
                     message="Live entry reconciliation is unresolved; new entries blocked.",
                 )
 
+        carryover_detected = False
+        if self.carryover_liquidation_flow is not None:
+            ownership_repository = getattr(
+                self.carryover_liquidation_flow,
+                "ownership_repository",
+                None,
+            )
+            if ownership_repository is None:
+                return LiveProductionCycleResult(
+                    decision=LiveCycleDecision.BLOCKED,
+                    message=(
+                        "Live carryover recovery is unavailable because durable "
+                        "KATANA ownership cannot be verified."
+                    ),
+                )
+
+            try:
+                current_ownership = tuple(ownership_repository.list_current())
+            except Exception:
+                return LiveProductionCycleResult(
+                    decision=LiveCycleDecision.BLOCKED,
+                    message=(
+                        "Live carryover recovery is blocked because durable "
+                        "KATANA ownership could not be read."
+                    ),
+                )
+
+            carryover = tuple(
+                record
+                for record in current_ownership
+                if getattr(record, "trading_date", trading_date) < trading_date
+            )
+
+            if carryover:
+                carryover_detected = True
+                try:
+                    recovery = self.carryover_liquidation_flow.submit_all(
+                        trading_date=trading_date
+                    )
+                except Exception:
+                    return LiveProductionCycleResult(
+                        decision=LiveCycleDecision.BLOCKED,
+                        message=(
+                            "Live carryover liquidation failed closed; "
+                            "new entries are blocked."
+                        ),
+                    )
+
+                recovery_decision = str(
+                    getattr(recovery, "decision", "")
+                ).strip().lower()
+
+                if recovery_decision != "complete":
+                    return LiveProductionCycleResult(
+                        decision=LiveCycleDecision.BLOCKED,
+                        message=(
+                            "Live carryover liquidation is unresolved; "
+                            "new entries are blocked."
+                        ),
+                    )
+
         if self.position_protection_reconciliation is not None:
             position_protection = self.position_protection_reconciliation(trading_date)
             if int(getattr(position_protection, "blocked", 0) or 0) > 0:
@@ -125,6 +188,16 @@ class LiveProductionRunner:
                         "new entries blocked."
                     ),
                 )
+
+        if carryover_detected:
+            return LiveProductionCycleResult(
+                decision=LiveCycleDecision.NO_ACTION,
+                message=(
+                    "Prior-day KATANA carryover recovery completed and durable "
+                    "protection state was reconciled; new entries are deferred "
+                    "until the next cycle."
+                ),
+            )
 
         protection = self.protective_cycle(trading_date)
         if int(getattr(protection, "blocked", 0) or 0) > 0:

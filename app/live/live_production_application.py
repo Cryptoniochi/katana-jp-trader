@@ -1,4 +1,4 @@
-"""Production wiring for the Live market-session application.
+﻿"""Production wiring for the Live market-session application.
 
 This module joins the Phase 6C Live-only components without importing or
 constructing PaperBroker.  Concrete broker/runtime dependencies remain owned by
@@ -109,5 +109,8 @@ class LiveProductionApplicationFactory:
                 final_runtime, "position_protection_reconciliation", None
             ),
             strategy_exit_cycle=strategy_exit_cycle,
+            carryover_liquidation_flow=getattr(
+                final_runtime, "eod_liquidation_flow", None
+            ),
         )
         return LiveProductionApplication(runner=runner)
