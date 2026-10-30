@@ -192,3 +192,31 @@ def test_eod_fails_closed_at_1530_if_not_flat():
     assert obj.run() == 1
     assert eod.calls == 2
     assert clock.when >= datetime(2026, 10, 16, 15, 30, tzinfo=JST)
+
+
+def test_1520_enters_eod_without_starting_live_entry_cycle():
+    clock = Clock(datetime(2026, 10, 16, 15, 20, tzinfo=JST))
+    eod = Eod(["complete"])
+    obj, app = build(clock, eod=eod)
+
+    assert obj.run() == 0
+    assert app.calls == 0
+    assert eod.calls == 1
+
+
+def test_151959_may_run_last_cycle_but_next_iteration_enters_eod():
+    clock = Clock(datetime(2026, 10, 16, 15, 19, 59, tzinfo=JST))
+    eod = Eod(["complete"])
+    obj, app = build(clock, eod=eod)
+
+    original_sleep = clock.sleep
+
+    def sleep(seconds):
+        original_sleep(seconds)
+
+    obj.sleeper = sleep
+
+    assert obj.run() == 0
+    assert app.calls == 1
+    assert eod.calls == 1
+    assert clock.when < datetime(2026, 10, 16, 15, 30, tzinfo=JST)
