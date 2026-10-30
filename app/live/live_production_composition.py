@@ -114,6 +114,20 @@ class ConcreteLiveProductionApplication:
         market_open=datetime.strptime("09:00","%H:%M").time()
         lunch_start=datetime.strptime("11:30","%H:%M").time()
         lunch_end=datetime.strptime("12:30","%H:%M").time()
+
+        # Stop starting ordinary Live strategy cycles five minutes before EOD.
+        #
+        # run_cycle() is synchronous and can contain multiple authoritative
+        # broker/API operations.  Reserving only one 30-second cycle interval
+        # is therefore insufficient: a cycle started shortly before EOD can
+        # overrun the EOD boundary and delay liquidation.
+        #
+        # 15:15-15:20 is an intentional drain/transition window:
+        #   - no new strategy evaluation
+        #   - no new entry cycle
+        #   - market data / heartbeat remain alive
+        #   - authoritative EOD liquidation begins at 15:20
+        entry_cycle_cutoff=datetime.strptime("15:15","%H:%M").time()
         market_close=datetime.strptime("15:20","%H:%M").time()
         stop_at=datetime.strptime("15:30","%H:%M").time()
 
@@ -176,15 +190,15 @@ class ConcreteLiveProductionApplication:
                 if cycle_stale:
                     self.session_service.record_cycle(successful=True)
 
-                # Reserve the final regular cycle interval for transition
-                # into authoritative EOD liquidation. Starting another
-                # normal cycle here could delay liquidation past 15:20.
-                seconds_until_eod=(
-                    datetime.combine(
-                        local.date(), market_close, tzinfo=TOKYO
-                    ) - local
-                ).total_seconds()
-                if seconds_until_eod <= self.cycle_interval_seconds:
+                # Do not start another synchronous Live strategy cycle once
+                # the drain window begins.  Sleep only until EOD so the outer
+                # loop can transition directly into authoritative liquidation.
+                if local_time >= entry_cycle_cutoff:
+                    seconds_until_eod=(
+                        datetime.combine(
+                            local.date(), market_close, tzinfo=TOKYO
+                        ) - local
+                    ).total_seconds()
                     self.sleeper(max(0.0, seconds_until_eod))
                     continue
 
