@@ -36,6 +36,7 @@ from app.market.kabu_station_completed_bar_provider import KabuStationCompletedB
 from app.market.kabu_station_realtime_provider import KabuStationRealtimeProvider
 from app.market.kabu_station_realtime_service import KabuStationRealtimeService
 from app.market.kabu_station_websocket import KabuStationWebSocketClient
+from app.market.kabu_station_registration_plan import build_registration_codes
 from app.market.models import StockPrice
 from app.market.realtime_signal_engine import RealtimeSignalEngine
 from app.dynamic_watchlist.strategy_routing_repository import (
@@ -426,13 +427,15 @@ class ConcreteLiveProductionFactory:
         # Refresh real account before PUSH registration so held symbols remain
         # protected even when today's watchlist changed.
         state=final.account.account_state_service.refresh()
-        codes=tuple(dict.fromkeys(
-            (*production_settings.codes, *(p.code for p in state.positions))
-        ))
-        if len(codes)>50:
-            raise LiveProductionCompositionError(
-                "Watchlist plus actual Live positions exceeds kabu Station 50-symbol limit."
+        try:
+            codes=build_registration_codes(
+                production_settings.codes,
+                (p.code for p in state.positions),
             )
+        except ValueError as error:
+            raise LiveProductionCompositionError(
+                "Actual Live positions exceed kabu Station registration capacity."
+            ) from error
         # The provider is stateful by design: one engine evaluation produces
         # both BUY intents and last_exit_signals. The application consumes exits
         # before permitting any new BUY in that same cycle.
