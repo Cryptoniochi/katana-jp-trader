@@ -66,10 +66,60 @@ def test_missing_cash_wallet_fails_closed():
         )
 
 
-def test_malformed_position_fails_closed():
+def test_fully_closed_zero_quantity_position_is_ignored():
+    state = KabuStationLiveAccountStateService.from_snapshot(
+        _snapshot(
+            positions=(
+                {
+                    "Symbol": "3911",
+                    "LeavesQty": 0,
+                    "HoldQty": 0,
+                    "Price": 212.0,
+                    "CurrentPrice": 210.0,
+                },
+            )
+        )
+    )
+
+    assert state.positions == ()
+    assert state.position_codes == frozenset()
+    assert state.total_exposure == 0.0
+
+
+def test_zero_leaves_with_positive_hold_quantity_fails_closed():
+    with pytest.raises(
+        LiveAccountStateUnavailableError,
+        match="quantity is inconsistent",
+    ):
+        KabuStationLiveAccountStateService.from_snapshot(
+            _snapshot(
+                positions=(
+                    {
+                        "Symbol": "3911",
+                        "LeavesQty": 0,
+                        "HoldQty": 100,
+                        "Price": 212.0,
+                        "CurrentPrice": 210.0,
+                    },
+                )
+            )
+        )
+
+
+def test_negative_position_quantity_still_fails_closed():
     with pytest.raises(LiveAccountStateUnavailableError):
         KabuStationLiveAccountStateService.from_snapshot(
-            _snapshot(positions=({"Symbol": "3911", "LeavesQty": 0, "Price": 212.0},))
+            _snapshot(
+                positions=(
+                    {
+                        "Symbol": "3911",
+                        "LeavesQty": -1,
+                        "HoldQty": 0,
+                        "Price": 212.0,
+                        "CurrentPrice": 210.0,
+                    },
+                )
+            )
         )
 
 

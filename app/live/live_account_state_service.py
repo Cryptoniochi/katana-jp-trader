@@ -140,7 +140,11 @@ class KabuStationLiveAccountStateService:
             )
 
         cash_balance = _cash_balance(snapshot.cash_wallet)
-        positions = tuple(_position(row) for row in snapshot.positions)
+        positions = tuple(
+            position
+            for row in snapshot.positions
+            if (position := _position(row)) is not None
+        )
         return LiveAccountState(
             generated_at=snapshot.generated_at.astimezone(timezone.utc),
             cash_balance=cash_balance,
@@ -161,7 +165,7 @@ def _cash_balance(wallet: dict[str, object]) -> float:
     )
 
 
-def _position(row: dict[str, object]) -> LiveCashPosition:
+def _position(row: dict[str, object]) -> LiveCashPosition | None:
     code = str(row.get("Symbol") or "").strip()
     if not code.isdigit() or len(code) not in {4, 5}:
         raise LiveAccountStateUnavailableError(
@@ -169,7 +173,20 @@ def _position(row: dict[str, object]) -> LiveCashPosition:
         )
 
     quantity = _integer(row.get("LeavesQty", row.get("Qty")), "position quantity")
-    if quantity <= 0:
+
+    # kabu Station may temporarily retain a fully closed cash-position row with
+    # zero LeavesQty/HoldQty.  It is not an open position and must not block the
+    # Live runtime.  Any negative or otherwise malformed quantity still fails
+    # closed.
+    if quantity == 0:
+        hold_quantity = _integer(row.get("HoldQty", 0), "position HoldQty")
+        if hold_quantity == 0:
+            return None
+        raise LiveAccountStateUnavailableError(
+            f"Broker position quantity is inconsistent: "
+            f"code={code} LeavesQty=0 HoldQty={hold_quantity}"
+        )
+    if quantity < 0:
         raise LiveAccountStateUnavailableError(
             f"Broker position quantity must be positive: code={code}"
         )
