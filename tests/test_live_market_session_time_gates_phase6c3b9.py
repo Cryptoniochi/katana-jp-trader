@@ -204,19 +204,22 @@ def test_1520_enters_eod_without_starting_live_entry_cycle():
     assert eod.calls == 1
 
 
-def test_151959_may_run_last_cycle_but_next_iteration_enters_eod():
+def test_151959_is_reserved_for_eod_transition():
     clock = Clock(datetime(2026, 10, 16, 15, 19, 59, tzinfo=JST))
     eod = Eod(["complete"])
     obj, app = build(clock, eod=eod)
 
-    original_sleep = clock.sleep
+    assert obj.run() == 0
+    assert app.calls == 0
+    assert eod.calls == 1
+    assert clock.when == datetime(2026, 10, 16, 15, 20, tzinfo=JST)
 
-    def sleep(seconds):
-        original_sleep(seconds)
-
-    obj.sleeper = sleep
+def test_final_cycle_interval_is_reserved_for_eod_transition():
+    clock = Clock(datetime(2026, 10, 16, 15, 19, 30, tzinfo=JST))
+    eod = Eod(["complete"])
+    obj, app = build(clock, eod=eod)
 
     assert obj.run() == 0
-    assert app.calls == 1
+    assert app.calls == 0
     assert eod.calls == 1
-    assert clock.when < datetime(2026, 10, 16, 15, 30, tzinfo=JST)
+    assert clock.when == datetime(2026, 10, 16, 15, 20, tzinfo=JST)

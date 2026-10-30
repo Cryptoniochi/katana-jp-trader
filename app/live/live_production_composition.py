@@ -176,6 +176,18 @@ class ConcreteLiveProductionApplication:
                 if cycle_stale:
                     self.session_service.record_cycle(successful=True)
 
+                # Reserve the final regular cycle interval for transition
+                # into authoritative EOD liquidation. Starting another
+                # normal cycle here could delay liquidation past 15:20.
+                seconds_until_eod=(
+                    datetime.combine(
+                        local.date(), market_close, tzinfo=TOKYO
+                    ) - local
+                ).total_seconds()
+                if seconds_until_eod <= self.cycle_interval_seconds:
+                    self.sleeper(max(0.0, seconds_until_eod))
+                    continue
+
                 result=self.application.run_cycle(trading_date=self.trading_date)
                 self.session_service.record_cycle(
                     successful=(getattr(result.decision,"value","")!="blocked")
