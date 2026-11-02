@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from datetime import date, datetime, timezone
 
 from app.live.live_production_composition import ConcreteLiveProductionApplication
@@ -16,10 +18,18 @@ class _Result:
 class _Application:
     def __init__(self) -> None:
         self.calls = 0
+        self.protective_calls = 0
 
     def run_cycle(self, *, trading_date):
         self.calls += 1
         return _Result()
+
+
+    def run_protective_cycle(self, *, trading_date):
+        self.protective_calls += 1
+        return SimpleNamespace(
+            decision=SimpleNamespace(value="no_action")
+        )
 
 
 class _MarketService:
@@ -110,7 +120,8 @@ def test_live_cycle_waits_for_first_realtime_push_price() -> None:
     assert market.stopped is True
     assert session.started is True
     assert session.stopped is True
-    assert session.heartbeats == 2
+    assert application.protective_calls == 14
+    assert session.heartbeats == 16
     assert application.calls == 1
     assert sleeps[0] == 1.0
 

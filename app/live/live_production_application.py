@@ -39,6 +39,11 @@ class LiveProductionApplication:
     def run_cycle(self, *, trading_date: date) -> LiveProductionCycleResult:
         return self.runner.run_cycle(trading_date=trading_date)
 
+    def run_protective_cycle(
+        self, *, trading_date: date
+    ) -> LiveProductionCycleResult:
+        return self.runner.run_protective_cycle(trading_date=trading_date)
+
 
 class LiveProductionApplicationFactory:
     """Wire signal discovery to FinalLiveRuntime without any Paper fallback."""

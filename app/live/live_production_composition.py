@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, time as datetime_time, timezone
+from datetime import datetime, time as datetime_time, timedelta, timezone
 from threading import Event
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -109,6 +109,49 @@ class ConcreteLiveProductionApplication:
         )
         self.now_provider=now_provider or (lambda: datetime.now(timezone.utc))
         self.sleeper=sleeper or time.sleep
+        self.protective_cycle_interval_seconds=min(
+            self.cycle_interval_seconds, 2.0
+        )
+
+    def _wait_with_protection(self, *, started_at: datetime) -> None:
+        """Wait for the next strategy cycle while protecting open Live risk."""
+        if started_at.tzinfo is None:
+            raise ValueError("started_at must be timezone-aware datetime.")
+
+        elapsed=0.0
+        remaining=self.cycle_interval_seconds
+        while remaining > 0:
+            step=min(self.protective_cycle_interval_seconds, remaining)
+            self.sleeper(step)
+            elapsed+=step
+            remaining-=step
+            if remaining <= 0:
+                break
+
+            # The wait duration is controlled by this loop itself, so derive the
+            # boundary-check time from its captured start instead of repeatedly
+            # consuming now_provider().  Production still follows real elapsed
+            # sleep time, while deterministic clocks/tests need only one timestamp
+            # for this bounded wait.
+            local=(started_at + timedelta(seconds=elapsed)).astimezone(TOKYO)
+            local_time=local.time().replace(tzinfo=None)
+
+            # Never extend protection polling into another trading date, lunch,
+            # the pre-EOD drain window, or EOD itself.  The outer session loop
+            # owns those transitions.
+            if local.date()!=self.trading_date:
+                break
+            if local_time < datetime.strptime("09:00","%H:%M").time():
+                break
+            if datetime.strptime("11:30","%H:%M").time() <= local_time < datetime.strptime("12:30","%H:%M").time():
+                break
+            if local_time >= datetime.strptime("15:15","%H:%M").time():
+                break
+
+            self.session_service.record_heartbeat()
+            self.application.run_protective_cycle(
+                trading_date=self.trading_date
+            )
 
     def run(self)->int:
         market_open=datetime.strptime("09:00","%H:%M").time()
@@ -206,7 +249,7 @@ class ConcreteLiveProductionApplication:
                 self.session_service.record_cycle(
                     successful=(getattr(result.decision,"value","")!="blocked")
                 )
-                self.sleeper(self.cycle_interval_seconds)
+                self._wait_with_protection(started_at=now)
 
             # From 15:20 through 15:30, repeatedly perform authoritative EOD
             # verification.  A still-working SELL is left untouched by the EOD

@@ -92,6 +92,64 @@ class LiveProductionRunner:
         self.carryover_liquidation_flow = carryover_liquidation_flow
         self.arming_policy = arming_policy or LiveArmingPolicy()
 
+    def run_protective_cycle(
+        self, *, trading_date: date
+    ) -> LiveProductionCycleResult:
+        """Run only authoritative reconciliation and protective-stop handling.
+
+        This path deliberately performs no strategy evaluation, strategy exit
+        evaluation, carryover submission, or new BUY submission.  It exists so
+        an already-open Live position can be reconciled and protected more
+        frequently than the ordinary strategy cycle.
+        """
+        if self.execution_settings.mode is not TradingExecutionMode.LIVE:
+            raise LiveProductionRunnerError(
+                "LiveProductionRunner requires KATANA execution mode LIVE."
+            )
+        self.arming_policy.require_authorized(
+            self.execution_settings,
+            trading_date=trading_date,
+        )
+
+        if self.reconciliation_cycle is not None:
+            reconciliation = self.reconciliation_cycle(trading_date)
+            if int(getattr(reconciliation, "blocked", 0) or 0) > 0:
+                return LiveProductionCycleResult(
+                    decision=LiveCycleDecision.BLOCKED,
+                    message=(
+                        "Live entry reconciliation is unresolved; "
+                        "protective-only cycle blocked."
+                    ),
+                )
+
+        if self.position_protection_reconciliation is not None:
+            position_protection = self.position_protection_reconciliation(
+                trading_date
+            )
+            if int(getattr(position_protection, "blocked", 0) or 0) > 0:
+                return LiveProductionCycleResult(
+                    decision=LiveCycleDecision.BLOCKED,
+                    message=(
+                        "Live position/protective-stop reconciliation is unresolved; "
+                        "protective-only cycle blocked."
+                    ),
+                )
+
+        protection = self.protective_cycle(trading_date)
+        if int(getattr(protection, "blocked", 0) or 0) > 0:
+            return LiveProductionCycleResult(
+                decision=LiveCycleDecision.BLOCKED,
+                message=(
+                    "Live protective-stop state is unresolved; "
+                    "protective-only cycle blocked."
+                ),
+            )
+
+        return LiveProductionCycleResult(
+            decision=LiveCycleDecision.NO_ACTION,
+            message="Live protective-only cycle completed.",
+        )
+
     def run_cycle(self, *, trading_date: date) -> LiveProductionCycleResult:
         """Run one authorized Live cycle.
 

@@ -58,10 +58,15 @@ class Session:
 class App:
     def __init__(self):
         self.calls = 0
+        self.protective_calls = 0
 
     def run_cycle(self, *, trading_date):
         self.calls += 1
         return SimpleNamespace(decision=SimpleNamespace(value="complete"))
+
+    def run_protective_cycle(self, *, trading_date):
+        self.protective_calls += 1
+        return SimpleNamespace(decision=SimpleNamespace(value="no_action"))
 
 
 class Eod:
