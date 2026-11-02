@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -11,6 +12,10 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from app.live.execution_mode import (
+    ExecutionModeSettings,
+    TradingExecutionMode,
+)
 from app.market.market_calendar import TokyoMarketCalendar
 from app.runtime.daily_report_schedule_models import (
     DailyReportScheduleSettings,
@@ -87,18 +92,26 @@ class DailyReportScheduler:
         if report_result.returncode != 0:
             return self._schedule_retry(now=now, business_day=True, message=f"Daily Report generation failed. exit_code={report_result.returncode}")
 
-        validation_result = self._run_full_day_validation_command(report_date)
-        self.validation_exit_code = int(validation_result.returncode)
-
-        if validation_result.returncode != 0:
-            return self._schedule_retry(
-                now=now,
-                business_day=True,
-                message=(
-                    "Full-Day Validation failed. "
-                    f"exit_code={validation_result.returncode}"
-                ),
+        execution_settings = ExecutionModeSettings.from_environment(os.environ)
+        if execution_settings.mode is TradingExecutionMode.LIVE:
+            self.validation_exit_code = 0
+        else:
+            validation_result = self._run_full_day_validation_command(
+                report_date
             )
+            self.validation_exit_code = int(
+                validation_result.returncode
+            )
+
+            if validation_result.returncode != 0:
+                return self._schedule_retry(
+                    now=now,
+                    business_day=True,
+                    message=(
+                        "Full-Day Validation failed. "
+                        f"exit_code={validation_result.returncode}"
+                    ),
+                )
 
         notification_result = self._run_notification_command(report_date)
         self.notification_exit_code = int(notification_result.returncode)

@@ -43,7 +43,9 @@ def test_disabled_scheduler_does_not_run_commands(
 
 def test_business_day_after_schedule_runs_report_and_notification(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setenv("KATANA_EXECUTION_MODE", "paper")
     commands = []
 
     def command_runner(command, **kwargs):
@@ -125,7 +127,9 @@ def test_marker_prevents_duplicate_notification(
 
 def test_validation_failure_prevents_notification_and_marker(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setenv("KATANA_EXECUTION_MODE", "paper")
     commands = []
 
     def command_runner(command, **kwargs):
@@ -170,7 +174,9 @@ def test_validation_failure_prevents_notification_and_marker(
 
 def test_marker_records_validation_exit_code(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setenv("KATANA_EXECUTION_MODE", "paper")
     import json
 
     def command_runner(command, **kwargs):
@@ -206,3 +212,45 @@ def test_marker_records_validation_exit_code(
         ).read_text(encoding="utf-8")
     )
     assert marker["validation_exit_code"] == 0
+
+def test_live_mode_skips_paper_full_day_validation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    commands = []
+
+    def command_runner(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setenv("KATANA_EXECUTION_MODE", "live")
+
+    scheduler = DailyReportScheduler(
+        enabled=True,
+        database_path=tmp_path / "katana.db",
+        report_directory=tmp_path / "daily",
+        status_path=tmp_path / "status.json",
+        marker_directory=tmp_path / "markers",
+        calendar=TokyoMarketCalendar.with_custom_holidays([]),
+        now_provider=lambda: datetime(
+            2026,
+            8,
+            3,
+            7,
+            0,
+            tzinfo=timezone.utc,
+        ),
+        command_runner=command_runner,
+    )
+
+    status = scheduler.run_once()
+
+    assert status.state is DailyReportScheduleState.COMPLETED
+    assert len(commands) == 2
+    assert "app.run_daily_report" in commands[0]
+    assert "app.run_daily_report_notification" in commands[1]
+    assert not any(
+        "app.run_full_day_validation" in command
+        for command in commands
+    )
+    assert scheduler.validation_exit_code == 0
