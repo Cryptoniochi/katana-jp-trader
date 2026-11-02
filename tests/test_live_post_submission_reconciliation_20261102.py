@@ -1,4 +1,4 @@
-﻿from datetime import date
+from datetime import date
 from types import SimpleNamespace
 
 from app.live.execution_mode import ExecutionModeSettings, TradingExecutionMode
@@ -47,6 +47,7 @@ def test_successful_entry_is_reconciled_again_in_same_cycle():
         "reconcile",
         "protect",
         "signal",
+        "protect",
         "submit",
         "reconcile",
     ]
@@ -84,6 +85,7 @@ def test_post_submission_reconciliation_failure_blocks_cycle():
         "reconcile",
         "protect",
         "signal",
+        "protect",
         "submit",
         "reconcile",
     ]
@@ -114,6 +116,7 @@ def test_blocked_entry_does_not_run_post_submission_reconciliation():
         "reconcile",
         "protect",
         "signal",
+        "protect",
         "submit",
     ]
     assert result.decision is LiveCycleDecision.BLOCKED

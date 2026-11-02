@@ -61,9 +61,43 @@ def test_protective_cycle_runs_before_new_entry_submission():
     result = runner.run_cycle(trading_date=DAY)
     assert calls[0] == ("protect", DAY)
     assert calls[1] == "signal"
-    assert calls[2] == ("submit", "7203", DAY)
+    assert calls[2] == ("protect", DAY)
+    assert calls[3] == ("submit", "7203", DAY)
     assert result.decision is LiveCycleDecision.SUBMISSION_STARTED
     assert result.started_entries == 1
+
+
+def test_pre_buy_protection_block_prevents_entry_submission():
+    calls = []
+    protection_results = iter(
+        (
+            None,
+            type("Protection", (), {"blocked": 1})(),
+        )
+    )
+
+    runner = LiveProductionRunner(
+        execution_settings=_settings(),
+        entry_intent_provider=lambda: calls.append("signal") or (
+            LiveEntryIntent("e1", "7203", 100),
+        ),
+        entry_submitter=lambda *_: calls.append("submit") or object(),
+        protective_cycle=lambda day: (
+            calls.append(("protect", day)) or next(protection_results)
+        ),
+    )
+
+    result = runner.run_cycle(trading_date=DAY)
+
+    assert calls == [
+        ("protect", DAY),
+        "signal",
+        ("protect", DAY),
+    ]
+    assert result.decision is LiveCycleDecision.BLOCKED
+    assert result.attempted_entries == 1
+    assert result.started_entries == 0
+    assert "before BUY" in result.message
 
 
 def test_no_signal_never_calls_submitter():

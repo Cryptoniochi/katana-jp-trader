@@ -331,6 +331,20 @@ class LiveProductionRunner:
                 message="No Live entry intents were produced.",
             )
 
+        # Revalidate protection immediately before opening fresh BUY risk.
+        # Signal/exit evaluation above may perform synchronous work, so the
+        # earlier protection result must not be treated as indefinitely fresh.
+        pre_buy_protection = self.protective_cycle(trading_date)
+        if int(getattr(pre_buy_protection, "blocked", 0) or 0) > 0:
+            return LiveProductionCycleResult(
+                decision=LiveCycleDecision.BLOCKED,
+                attempted_entries=len(intents),
+                message=(
+                    "Live protective-stop state became unresolved before BUY; "
+                    "new entries blocked."
+                ),
+            )
+
         started = 0
         for intent in intents:
             result = self.entry_submitter(intent, trading_date)
