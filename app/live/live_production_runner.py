@@ -279,6 +279,30 @@ class LiveProductionRunner:
             if result is not None and result is not False:
                 started += 1
 
+        # A successful Live BUY submission must not wait until the next market
+        # cycle for its first broker reconciliation attempt.  Market-data /
+        # strategy work can be slow or fail after an entry has reached the
+        # broker, so waiting for another cycle can leave a real position without
+        # its durable protective-stop ownership record.
+        #
+        # Reuse the existing authoritative reconciliation path here.  It is
+        # read-only with respect to broker submission: it may persist confirmed
+        # fill/protective-stop state, but it never resubmits the BUY.
+        if started and self.reconciliation_cycle is not None:
+            post_submission_reconciliation = self.reconciliation_cycle(trading_date)
+            if int(
+                getattr(post_submission_reconciliation, "blocked", 0) or 0
+            ) > 0:
+                return LiveProductionCycleResult(
+                    decision=LiveCycleDecision.BLOCKED,
+                    attempted_entries=len(intents),
+                    started_entries=started,
+                    message=(
+                        "Live entry submission started, but immediate post-submission "
+                        "reconciliation is unresolved; new risk is blocked."
+                    ),
+                )
+
         return LiveProductionCycleResult(
             decision=(
                 LiveCycleDecision.SUBMISSION_STARTED
@@ -288,7 +312,7 @@ class LiveProductionRunner:
             attempted_entries=len(intents),
             started_entries=started,
             message=(
-                "Live entry submission started."
+                "Live entry submission started and immediate reconciliation completed."
                 if started
                 else "All Live entry intents were blocked."
             ),

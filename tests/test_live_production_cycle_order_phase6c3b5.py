@@ -18,7 +18,7 @@ def test_reconciliation_then_protection_then_signal_then_submit():
         entry_intent_provider=lambda: calls.append("signal") or (LiveEntryIntent("e","7203",100),),
         entry_submitter=lambda *_: calls.append("submit") or object())
     result=runner.run_cycle(trading_date=DAY)
-    assert calls == ["reconcile","protect","signal","submit"]
+    assert calls == ["reconcile","protect","signal","submit","reconcile"]
     assert result.decision is LiveCycleDecision.SUBMISSION_STARTED
 
 
