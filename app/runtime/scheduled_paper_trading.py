@@ -172,6 +172,31 @@ class ScheduledPaperTradingController:
 
         self._refresh_process_state()
 
+        # Live production begins its authoritative end-of-day shutdown
+        # at 15:20. A successful child exit from this point onward means
+        # that today's Live operation completed normally. Do not restart
+        # the child merely because the scheduler's market_close_at boundary
+        # has not yet been reached.
+        #
+        # Exits before 15:20 and all non-zero exits remain restartable.
+        live_eod_completion_at = clock_time(15, 20)
+        if (
+            self.process is None
+            and self.last_exit_code == 0
+            and local_time >= live_eod_completion_at
+        ):
+            self._completed_trading_date = now.date()
+            return self._publish(
+                now=now,
+                state=ScheduledTradingState.COMPLETED,
+                business_day=True,
+                next_action_at=None,
+                message=(
+                    "Live end-of-day shutdown completed normally. "
+                    "Same-day restart is suppressed."
+                ),
+            )
+
         if local_time >= self.settings.stop_at:
             self._stop_process()
             self._completed_trading_date = now.date()

@@ -111,3 +111,35 @@ def test_before_market_close_keeps_running(
     status = controller.run_once()
 
     assert status.state is ScheduledTradingState.RUNNING
+
+
+def test_live_eod_normal_exit_before_scheduler_market_close_does_not_restart(
+    tmp_path: Path,
+) -> None:
+    started = []
+
+    controller = ScheduledPaperTradingController(
+        enabled=True,
+        calendar=BusinessDayCalendar(),
+        status_path=tmp_path / "status.json",
+        readiness_check_enabled=False,
+        autonomous_guard_enabled=False,
+        now_provider=lambda: datetime(
+            2026, 8, 5, 15, 24,
+            tzinfo=TOKYO,
+        ),
+        popen_factory=lambda *_args, **_kwargs: (
+            started.append(CompletedProcess())
+            or started[-1]
+        ),
+    )
+    controller.process = CompletedProcess()
+
+    first = controller.run_once()
+    second = controller.run_once()
+
+    assert first.state is ScheduledTradingState.COMPLETED
+    assert second.state is ScheduledTradingState.COMPLETED
+    assert first.last_exit_code == 0
+    assert second.last_exit_code == 0
+    assert started == []
