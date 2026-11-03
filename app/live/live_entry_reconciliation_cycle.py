@@ -1,6 +1,7 @@
 ﻿"""Production reconciliation cycle for durable Live BUY executions."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date
 
@@ -16,6 +17,9 @@ from app.live.live_execution_tracking_flow import (
     LiveExecutionTrackingFlow,
 )
 from app.live.live_execution_journal_models import LiveExecutionState
+
+
+LOGGER = logging.getLogger("katana")
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +60,7 @@ class LiveEntryReconciliationCycle:
     ) -> bool:
         """Return True only when a prior-day KATANA BUY is already externally flat.
 
-        This is deliberately narrow.  A submitted BUY may be retired without
+        This is deliberately narrow. A submitted BUY may be retired without
         creating a protective stop only when broker reconciliation proves that
         the original BUY had a positive terminal execution and the authoritative
         current position has returned exactly to the durable pre-submission
@@ -154,6 +158,16 @@ class LiveEntryReconciliationCycle:
                     tracking_result=tracking,
                 )
             except Exception:
+                LOGGER.exception(
+                    "Live entry reconciliation failed: "
+                    "execution_key=%s code=%s entry_trading_date=%s "
+                    "reconciliation_trading_date=%s",
+                    row.execution_key,
+                    getattr(row, "code", None)
+                    or getattr(row.to_order(), "code", None),
+                    row.trading_date,
+                    trading_date,
+                )
                 blocked += 1
                 continue
 

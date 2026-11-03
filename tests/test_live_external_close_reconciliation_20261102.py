@@ -206,3 +206,34 @@ def test_prior_day_nonterminal_mismatch_remains_fail_closed():
     assert result.blocked == 1
     assert registry.completed == []
     assert stop_recorder.calls == 1
+
+def test_reconciliation_exception_is_logged_and_remains_fail_closed(caplog):
+    import logging
+
+    row = FakeRow()
+    registry = FakeRegistry(row)
+
+    class RaisingTrackingFlow:
+        def reconcile(self, *, execution_key, order):
+            raise RuntimeError("broker reconciliation diagnostic failure")
+
+    cycle = LiveEntryReconciliationCycle(
+        registry=registry,
+        tracking_flow=RaisingTrackingFlow(),
+        stop_recorder=ForbiddenStopRecorder(),
+        journal=FakeJournal(),
+    )
+
+    with caplog.at_level(logging.ERROR, logger="katana"):
+        result = cycle(date(2026, 11, 3))
+
+    assert result.evaluated == 1
+    assert result.completed == 0
+    assert result.stops_recorded == 0
+    assert result.blocked == 1
+    assert registry.completed == []
+
+    assert "Live entry reconciliation failed" in caplog.text
+    assert "execution_key=entry-1" in caplog.text
+    assert "code=7157" in caplog.text
+    assert "broker reconciliation diagnostic failure" in caplog.text
